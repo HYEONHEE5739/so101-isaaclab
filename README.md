@@ -56,10 +56,6 @@ The trained ACT policy was evaluated over **50 randomized simulation rollouts**.
 
 **Overall success rate: 68.0% (34 / 50)**
 
-| Real Teleoperation | Sim Teloperation |
-| :---: | :---: |
-| <img src="demo/teleop_leader_real.gif" width="100%"> | <img src="demo/teleop_leader_sim.gif" width="100%"> |
-
 ```text
 SUCCESS        ██████████████████████████████████  34 (68%)
 APPROACH_FAIL  █████                               5 (10%)
