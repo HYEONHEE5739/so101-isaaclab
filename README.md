@@ -67,41 +67,41 @@ PLACE_FAIL     █                                   1 ( 2%)
 
 ## Architecture
 
-```text
-Physical SO-101 Leader
-        │
-        │ Feetech motor positions
-        ▼
-SO101Leader
-Isaac Lab DeviceBase Adapter
-        │
-        │ calibrated joint-space action
-        ▼
-Isaac Lab SO-101 Environment
-        │
-        ├────────────────────────────┐
-        │                            │
-        ▼                            ▼
-Live Teleoperation          Demonstration Recording
-                                     │
-                           Isaac Lab HDF5
-                                     │
-                                     ▼
-                              Isaac Mimic
-                                     │
-                           Synthetic Demonstrations
-                                     │
-                                     ▼
-                         HDF5 → LeRobot Dataset
-                                     │
-                                     ▼
-                                ACT Training
-                                     │
-                                     ▼
-                           Simulation Rollout
-                                     │
-                                     ▼
-                             Failure Analysis
+```mermaid
+flowchart LR
+
+    subgraph Teleoperation
+        A[Physical SO-101 Leader]
+        B[Feetech Motor Bus]
+        C[SO101Leader<br/>DeviceBase]
+        D[Isaac Lab Environment]
+
+        A --> B --> C --> D
+    end
+
+    subgraph Data_Generation["Demonstration & Data Generation"]
+        E[Human Demonstration<br/>Joint Space]
+        F[Isaac HDF5]
+        G[Isaac Mimic<br/>EE Delta Space]
+        H[Pinocchio IK]
+        I[Synthetic Joint Targets]
+        J[LeRobot Dataset]
+
+        E --> F --> G --> H --> I --> J
+    end
+
+    subgraph Learning_Evaluation["Learning & Evaluation"]
+        K[ACT Training]
+        L[ACT Policy]
+        M[Simulation Rollout]
+        N[Failure Analysis]
+
+        K --> L --> M --> N
+    end
+
+    D --> E
+    J --> K
+
 ```
 
 ---
