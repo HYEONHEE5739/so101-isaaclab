@@ -83,9 +83,9 @@ Human Demonstration
       ↓
 Isaac HDF5
       ↓
-Isaac Mimic
+Isaac Mimic Annotation
       ↓
-EE Delta Trajectory
+Isaac Mimic Generation
       ↓
 Pinocchio IK
       ↓
