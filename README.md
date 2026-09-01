@@ -87,9 +87,11 @@ Isaac Mimic Annotation
       ↓
 Isaac Mimic Generation
       ↓
+EE Trajectory
+      ↓
 Pinocchio IK
       ↓
-Synthetic Joint Targets
+Joint Targets
       ↓
 LeRobot Dataset
 └────────┬───────────────────────┘
