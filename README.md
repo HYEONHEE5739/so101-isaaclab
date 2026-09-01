@@ -28,7 +28,7 @@ The pipeline was designed to investigate whether synthetic demonstrations can ex
 Human demonstrations are converted into Mimic-compatible end-effector trajectories and augmented using **Isaac Mimic**.
 
 <p align="center">
-  <img src="assets/demo/mimic_generation.gif" width="65%">
+  <img src="demo/datagen.gif" width="65%">
 </p>
 
 <p align="center">
@@ -53,20 +53,14 @@ The trained ACT policy was evaluated over **50 randomized simulation rollouts**.
 
 **Overall success rate: 68.0% (34 / 50)**
 
-| Outcome | Episodes | Rate |
-|---|---:|---:|
-| `SUCCESS` | **34** | **68%** |
-| `APPROACH_FAIL` | 5 | 10% |
-| `GRASP_FAIL` | 10 | 20% |
-| `PLACE_FAIL` | 1 | 2% |
-
-### Failure Breakdown
 
 ```text
 SUCCESS        ██████████████████████████████████  34 (68%)
 APPROACH_FAIL  █████                               5 (10%)
 GRASP_FAIL     ██████████                         10 (20%)
 PLACE_FAIL     █                                   1 ( 2%)
+```
+
 ---
 
 ## Architecture
