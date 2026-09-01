@@ -18,7 +18,7 @@ The pipeline was designed to investigate whether synthetic demonstrations can ex
 
 | Real Teleoperation | Sim Teloperation |
 | :---: | :---: |
-| <img src="demo/teleop_leader_real.gif" width="400"> | <img src="demo/teleop_leader_sim.gif" width="400"> |
+| <img src="demo/teleop_leader_real.gif" width="50%"> | <img src="demo/teleop_leader_sim.gif" width="50%"> |
 | **Physical SO-101 leader controlling the simulated follower** | **ACT policy executing pick-and-place without human control** |
 
 ---
