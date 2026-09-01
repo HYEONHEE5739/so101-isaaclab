@@ -24,7 +24,8 @@ The pipeline was designed to investigate whether synthetic demonstrations can ex
 
 ### Synthetic Demonstration Generation
 
-Human demonstrations are converted into Mimic-compatible end-effector trajectories and augmented using **Isaac Mimic**.
+Human demonstrations are converted into Mimic-compatible end-effector trajectories and augmented 
+using **Isaac Mimic**.
 
 <p align="center">
   <img src="demo/datagen.gif" width="65%">
@@ -44,14 +45,20 @@ During the generation run:
 
 ---
 
-## Key Results
 
 ### ACT Simulation Evaluation
 
 The trained ACT policy was evaluated over **50 randomized simulation rollouts**.
 
+| SUCCESS | GRASP FAIL |
+| :---: | :---: |
+| <img src="demo/eval_succes.gif.gif" width="100%"> | <img src="demo/eval_grasp_fail.gif" width="100%"> |
+
 **Overall success rate: 68.0% (34 / 50)**
 
+| Real Teleoperation | Sim Teloperation |
+| :---: | :---: |
+| <img src="demo/teleop_leader_real.gif" width="100%"> | <img src="demo/teleop_leader_sim.gif" width="100%"> |
 
 ```text
 SUCCESS        ██████████████████████████████████  34 (68%)
