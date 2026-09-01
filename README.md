@@ -542,7 +542,9 @@ Use the LeRobot training pipeline with the generated repository ID and the desir
 
 ```bash
 python scripts/inference/inference_act_sim.py \
-    --checkpoint <path-to-act-checkpoint>
+    --policy <path-to-act-checkpoint>
+    --num_episodes 50 \
+    --max_steps 500 
 ```
 
 The evaluation script runs randomized simulation episodes and exports episode-level success and failure-mode statistics.
