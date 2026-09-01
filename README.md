@@ -52,7 +52,7 @@ The trained ACT policy was evaluated over **50 randomized simulation rollouts**.
 
 | SUCCESS | GRASP FAIL |
 | :---: | :---: |
-| <img src="demo/eval_success.gif.gif" width="100%"> | <img src="demo/eval_grasp_fail.gif" width="100%"> |
+| <img src="demo/eval_success.gif" width="100%"> | <img src="demo/eval_grasp_fail.gif" width="100%"> |
 
 **Overall success rate: 68.0% (34 / 50)**
 
