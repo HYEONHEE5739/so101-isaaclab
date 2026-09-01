@@ -70,38 +70,37 @@ PLACE_FAIL     █                                   1 ( 2%)
 ```mermaid
 flowchart LR
 
-    subgraph Teleoperation
-        A[Physical SO-101 Leader]
-        B[Feetech Motor Bus]
-        C[SO101Leader<br/>DeviceBase]
-        D[Isaac Lab Environment]
+    subgraph Teleoperation["Teleoperation"]
+        A["Physical SO-101 Leader"]
+        B["Feetech Motor Bus"]
+        C["SO101Leader<br/>DeviceBase"]
+        D["Isaac Lab Environment"]
 
         A --> B --> C --> D
     end
 
-    subgraph Data_Generation["Demonstration & Data Generation"]
-        E[Human Demonstration<br/>Joint Space]
-        F[Isaac HDF5]
-        G[Isaac Mimic<br/>EE Delta Space]
-        H[Pinocchio IK]
-        I[Synthetic Joint Targets]
-        J[LeRobot Dataset]
+    subgraph DataGeneration["Demonstration & Data Generation"]
+        E["Human Demonstration<br/>Joint Space"]
+        F["Isaac HDF5"]
+        G["Isaac Mimic<br/>EE Delta Space"]
+        H["Pinocchio IK"]
+        I["Synthetic Joint Targets"]
+        J["LeRobot Dataset"]
 
         E --> F --> G --> H --> I --> J
     end
 
-    subgraph Learning_Evaluation["Learning & Evaluation"]
-        K[ACT Training]
-        L[ACT Policy]
-        M[Simulation Rollout]
-        N[Failure Analysis]
+    subgraph LearningEvaluation["Learning & Evaluation"]
+        K["ACT Training"]
+        L["ACT Policy"]
+        M["Simulation Rollout"]
+        N["Failure Analysis"]
 
         K --> L --> M --> N
     end
 
     D --> E
     J --> K
-
 ```
 
 ---
