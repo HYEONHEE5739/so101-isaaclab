@@ -9,11 +9,7 @@ import weakref
 class KeyboardState:
     save_episode: bool = False
     discard_episode: bool = False
-    snapshot: bool = False
     quit: bool = False
-
-    camera_command: str | None = None
-    print_camera_pose: bool = False
 
 
 class KeyboardControl:

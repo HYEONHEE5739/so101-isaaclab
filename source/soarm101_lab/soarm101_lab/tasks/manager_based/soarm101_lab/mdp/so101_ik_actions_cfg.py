@@ -14,20 +14,11 @@ class SO101PinocchioIKActionCfg(ActionTermCfg):
 
     class_type: type = SO101PinocchioIKAction
 
-    # --------------------------------------------------------------
-    # Robot
-    # --------------------------------------------------------------
-
     asset_name: str = "robot"
 
     joint_names: list[str] = MISSING
 
-    # Actual physical/link frame in USD + URDF
     body_name: str = "tool0"
-
-    # --------------------------------------------------------------
-    # Kinematic model
-    # --------------------------------------------------------------
 
     urdf_path: str = MISSING
 

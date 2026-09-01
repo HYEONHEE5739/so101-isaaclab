@@ -43,9 +43,6 @@ class SO101PinocchioIKAction(ActionTerm):
         cfg: "SO101PinocchioIKActionCfg",
         env: "ManagerBasedEnv",
     ):
-        # ----------------------------------------------------------
-        # Isaac Lab ActionTerm initialization
-        # ----------------------------------------------------------
         super().__init__(cfg, env)
 
         # ----------------------------------------------------------

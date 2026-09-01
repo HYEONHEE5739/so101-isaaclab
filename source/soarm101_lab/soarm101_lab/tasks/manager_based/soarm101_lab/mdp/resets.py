@@ -10,7 +10,7 @@ from soarm101_lab.utils.episode_randomizer import EpisodeRandomState, EpisodeRan
 def apply_episode_randomization(
     env,
     env_ids: torch.Tensor | None,
-    random_state: EpisodeRandomState,
+    random_state: EpisodeRandomState | None,
     cube_red_cfg: SceneEntityCfg,
     cube_green_cfg: SceneEntityCfg,
     cube_blue_cfg: SceneEntityCfg,

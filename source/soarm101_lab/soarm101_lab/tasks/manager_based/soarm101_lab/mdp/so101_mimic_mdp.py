@@ -140,6 +140,7 @@ def object_in_bin(
     z_ok = (obj_pos_bin[:, 2] >= z_bounds[0]) & (obj_pos_bin[:, 2] <= z_bounds[1])
 
     success = x_ok & y_ok & z_ok
+
     # if success:
     #     print("🟢🟢🟢 SUCCESS 🟢🟢🟢")
 

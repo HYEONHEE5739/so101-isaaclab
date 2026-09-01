@@ -7,7 +7,6 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
-from isaaclab.utils.math import combine_frame_transforms
 
 def ee_frame_state(
     env: ManagerBasedRLEnv,
