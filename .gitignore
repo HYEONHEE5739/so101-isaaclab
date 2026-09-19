@@ -8,7 +8,7 @@
 **/*.dmp
 **/.thumbs
 
-# No USD files allowed in the repo
+# Generated USD files (required robot assets are included below)
 **/*.usd
 **/*.usda
 **/*.usdc
@@ -64,8 +64,6 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
-# Tests
-tests/
 
 # Docker history
 .isaac-lab-docker-history
@@ -81,3 +79,25 @@ annotation_frames/
 datasets/
 policy/
 outputs/
+
+#API
+.env
+
+# Local environments, captures and secrets
+/.venv*/
+/venv/
+/screenshots/
+.env.*
+!.env.example
+
+# Editor databases
+/.vscode/*.db*
+/.vscode/*.lock
+
+# Device-specific calibration (keep local)
+/source/soarm101_lab/soarm101_lab/devices/lerobot/calibration/*.json
+
+# Required robot assets
+!assets/SO101/usd/**/*.usd
+!assets/SO101/usd/**/*.usda
+!assets/SO101/usd/**/*.usdc

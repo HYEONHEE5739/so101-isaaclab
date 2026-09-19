@@ -1,0 +1,18 @@
+{
+  "version": "0.4.1",
+  "commit": "a5b29d430105f5235eb05bbf2db5a0d747a869d6",
+  "ast_sha256": {
+    "robots/so101_follower/so101_follower.py": "e71b9dd2652012b9058935131735c0bf8135c606a3b59654215985c5bd843f7b",
+    "robots/so101_follower/config_so101_follower.py": "a831440cbfc1c2bd125f744eec2398440db211ab81a96bc1a6de3d9742018ef7",
+    "robots/robot.py": "8f17c244858246e14e9645b1981ec688823487eac84ca4e5c4f1a0eabae26b9c",
+    "robots/utils.py": "6d51093ced56696b712f1f1235e4d10b98fc3100d08f7503fe24d72de43034fd",
+    "motors/motors_bus.py": "0bbb08603f081f6a576c2c237c9f4780f38848497e3c22cee785d59653b41184",
+    "motors/feetech/feetech.py": "8d1115bf6eb2593fdf58b275bcddd1ff21f85ea4d4e2f4e8fc2b42acf65bd4e0"
+  },
+  "camera_ast_sha256": {
+    "cameras/opencv/camera_opencv.py": "ae19d0717ed8d2a2e683fc0f03d761a188cd15f2b7dde7531b6aa87e6ad82315",
+    "cameras/opencv/configuration_opencv.py": "2c76c41e9c2b1365543da3a3a8bd63446feec75b0a9ff0f3aa0cbc3471f95942",
+    "cameras/configs.py": "daf378f868aa29b6eb01696d7fcc27f25f5923dc8f2c10f3a668ee0cb6efe0d1"
+  },
+  "audit_format": "ast.dump without source locations; empty type_params omitted for Python 3.11/3.12 compatibility"
+}

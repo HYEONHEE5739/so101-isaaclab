@@ -13,7 +13,7 @@ from isaaclab.app import AppLauncher
 """
 python scripts/inference/inference_act_sim.py \
     --policy /home/hyeonhee/soarm_isaaclab/soarm101_lab/policy/act_generated_50ep_0.4.1/checkpoints/last/pretrained_model \
-    --num_episodes 1 \
+    --num_episodes 20 \
     --max_steps 500 
 """
 

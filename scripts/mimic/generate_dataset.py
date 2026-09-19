@@ -9,8 +9,8 @@ Main data generation script.
 python scripts/mimic/generate_dataset.py \
     --task SO101-PickPlace-Mimic-v1 \
     --input_file datasets/annotated_demo_20ep.hdf5 \
-    --output_file datasets/generated_demo_20ep_50ep.hdf5 \
-    --generation_num_trials 50 \
+    --output_file datasets/generated_demo_20ep_30ep.hdf5 \
+    --generation_num_trials 30 \
     --num_envs 1 \
     --device cuda:0 \
     --enable_cameras
@@ -93,6 +93,8 @@ from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders imp
     PreStepPolicyObservationsCpuRecorder, PostStepJointTargetsRecorder
 )
 def main():
+    from soarm101_lab.so101_dataset_contract import inherit_contract, MIMIC_SPACE
+    inherit_contract(args_cli.input_file, args_cli.output_file, MIMIC_SPACE)
     num_envs = args_cli.num_envs
 
     # Setup output paths and get env name

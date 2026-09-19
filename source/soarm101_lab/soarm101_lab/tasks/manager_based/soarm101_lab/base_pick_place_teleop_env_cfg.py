@@ -46,6 +46,7 @@ class ActionsCfg:
         ],
         scale=1.0,
         use_default_offset=False,
+        preserve_order=True,
     )
 
 @configclass

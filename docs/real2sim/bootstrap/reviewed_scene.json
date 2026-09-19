@@ -1,0 +1,1073 @@
+{
+  "units": "metres",
+  "optical_axes": "x_right_y_down_z_forward",
+  "robot_base": {
+    "T_world": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "calibrated": false,
+    "provenance": {
+      "T_world": "provisional"
+    }
+  },
+  "workspace": {
+    "T_world": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.2
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "calibrated": false,
+    "provenance": {
+      "T_world": "provisional",
+      "size_m": "user_measured"
+    },
+    "size_m": [
+      0.15,
+      0.15
+    ]
+  },
+  "cameras": {
+    "side": {
+      "parent": "world",
+      "T_parent_camera": [
+        [
+          -0.968099292819469,
+          0.14296521370881746,
+          -0.2057782955309817,
+          0.28
+        ],
+        [
+          0.25056687578856845,
+          0.5523655984204311,
+          -0.7950525054606111,
+          0.4
+        ],
+        [
+          0.0,
+          -0.8212509929070595,
+          -0.5705670921540856,
+          0.34
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "K": [
+        [
+          570,
+          0,
+          320
+        ],
+        [
+          0,
+          570,
+          240
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resolution": [
+        640,
+        480
+      ],
+      "intrinsics_calibrated": false,
+      "extrinsics_calibrated": false,
+      "source": "Render initialization only; physical intrinsics, lens distortion and camera mount are unmeasured.",
+      "provenance": {
+        "T_parent_camera": "provisional",
+        "K": "provisional",
+        "distortion": "provisional",
+        "resolution": "provisional"
+      }
+    },
+    "wrist": {
+      "parent": "gripper",
+      "T_parent_camera": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.05
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "K": [
+        [
+          600.0,
+          0,
+          320.0
+        ],
+        [
+          0,
+          600.0,
+          240.0
+        ],
+        [
+          0,
+          0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resolution": [
+        640,
+        480
+      ],
+      "intrinsics_calibrated": false,
+      "extrinsics_calibrated": false,
+      "source": "Render initialization only; physical intrinsics, lens distortion and camera mount are unmeasured.",
+      "provenance": {
+        "T_parent_camera": "provisional",
+        "K": "provisional",
+        "distortion": "provisional",
+        "resolution": "provisional"
+      }
+    }
+  },
+  "schema": "so101.real2sim/2",
+  "robot_asset": {
+    "source": "model_asset",
+    "urdf": "assets/SO101/urdf/so101_isaaclab.urdf",
+    "usd": "assets/SO101/usd/so101_isaaclab.usd"
+  },
+  "table": {
+    "shape": "box",
+    "dimensions_m": [
+      0.9,
+      0.65,
+      0.04
+    ],
+    "T_workspace": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        -0.05
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        -0.02
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "render_enabled": true,
+    "provenance": {
+      "dimensions_m": "provisional",
+      "T_workspace": "provisional"
+    },
+    "appearance": {
+      "color": [
+        0.72,
+        0.7,
+        0.62
+      ],
+      "roughness": 0.7,
+      "provenance": {
+        "color": "provisional",
+        "roughness": "provisional"
+      }
+    }
+  },
+  "objects": {
+    "cup_a": {
+      "shape": "cup",
+      "top_outer_diameter_m": 0.07,
+      "wall_thickness_m": 0.002,
+      "height_m": 0.065,
+      "bottom_outer_diameter_m": null,
+      "bottom_inner_diameter_m": null,
+      "bottom_thickness_m": null,
+      "taper_profile": null,
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.045
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.14
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0325
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": false,
+      "provenance": {
+        "top_outer_diameter_m": "user_measured",
+        "wall_thickness_m": "user_measured",
+        "height_m": "user_measured",
+        "bottom_outer_diameter_m": "unmeasured",
+        "bottom_inner_diameter_m": "unmeasured",
+        "bottom_thickness_m": "unmeasured",
+        "taper_profile": "unmeasured",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "roughness": 0.6,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "cup_b": {
+      "shape": "cup",
+      "top_outer_diameter_m": 0.07,
+      "wall_thickness_m": 0.002,
+      "height_m": 0.065,
+      "bottom_outer_diameter_m": null,
+      "bottom_inner_diameter_m": null,
+      "bottom_thickness_m": null,
+      "taper_profile": null,
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.045
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.14
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0325
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": false,
+      "provenance": {
+        "top_outer_diameter_m": "user_measured",
+        "wall_thickness_m": "user_measured",
+        "height_m": "user_measured",
+        "bottom_outer_diameter_m": "unmeasured",
+        "bottom_inner_diameter_m": "unmeasured",
+        "bottom_thickness_m": "unmeasured",
+        "taper_profile": "unmeasured",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "roughness": 0.6,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "cube_red": {
+      "shape": "box",
+      "dimensions_m": [
+        0.024,
+        0.024,
+        0.024
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.04
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.035
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0125
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "user_measured",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.65,
+          0.025,
+          0.025
+        ],
+        "roughness": 0.6,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "cube_blue": {
+      "shape": "box",
+      "dimensions_m": [
+        0.024,
+        0.024,
+        0.024
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.04
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.035
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0125
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "user_measured",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.02,
+          0.12,
+          0.45
+        ],
+        "roughness": 0.6,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "cube_green": {
+      "shape": "box",
+      "dimensions_m": [
+        0.024,
+        0.024,
+        0.024
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.035
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.025
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0125
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "user_measured",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.025,
+          0.35,
+          0.09
+        ],
+        "roughness": 0.6,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "marker": {
+      "shape": "box",
+      "dimensions_m": [
+        0.15,
+        0.15,
+        0.0005
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.00025
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.9,
+          0.9,
+          0.88
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      },
+      "measurement_ref": "workspace.size_m; visual thickness is provisional"
+    },
+    "marker_left": {
+      "shape": "box",
+      "dimensions_m": [
+        0.0015,
+        0.15,
+        0.0005
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.07425
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0006
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.015,
+          0.015,
+          0.015
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "marker_right": {
+      "shape": "box",
+      "dimensions_m": [
+        0.0015,
+        0.15,
+        0.0005
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.07425
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0006
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.015,
+          0.015,
+          0.015
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "marker_front": {
+      "shape": "box",
+      "dimensions_m": [
+        0.15,
+        0.0015,
+        0.0005
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.07425
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0006
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.015,
+          0.015,
+          0.015
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "marker_back": {
+      "shape": "box",
+      "dimensions_m": [
+        0.15,
+        0.0015,
+        0.0005
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.07425
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0006
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.015,
+          0.015,
+          0.015
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "cup_a_visual": {
+      "shape": "cup_proxy",
+      "dimensions_m": [
+        0.07,
+        0.07,
+        0.065
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.045
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.14
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0325
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional",
+        "wall_m": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.85,
+          0.8,
+          0.69
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      },
+      "wall_m": 0.002,
+      "approximation": "Provisional cylindrical visual only. Bottom radius equals top radius; bottom thickness equals wall thickness as unmeasured render assumptions. No measured taper.",
+      "measurement_ref": "objects.cup_a"
+    },
+    "cup_b_visual": {
+      "shape": "cup_proxy",
+      "dimensions_m": [
+        0.07,
+        0.07,
+        0.065
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.045
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.14
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0325
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional",
+        "wall_m": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.85,
+          0.8,
+          0.69
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      },
+      "wall_m": 0.002,
+      "approximation": "Provisional cylindrical visual only. Bottom radius equals top radius; bottom thickness equals wall thickness as unmeasured render assumptions. No measured taper.",
+      "measurement_ref": "objects.cup_b"
+    },
+    "background_roller": {
+      "shape": "cylinder",
+      "dimensions_m": [
+        0.12,
+        0.12,
+        0.8
+      ],
+      "T_workspace": [
+        [
+          0,
+          0,
+          1,
+          0
+        ],
+        [
+          0,
+          1,
+          0,
+          -0.27
+        ],
+        [
+          -1,
+          0,
+          0,
+          0.06
+        ],
+        [
+          0,
+          0,
+          0,
+          1
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.018,
+          0.018,
+          0.018
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    },
+    "background_wall": {
+      "shape": "box",
+      "dimensions_m": [
+        1.5,
+        0.025,
+        1.0
+      ],
+      "T_workspace": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.55
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.48
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "render_enabled": true,
+      "provenance": {
+        "dimensions_m": "provisional",
+        "T_workspace": "provisional"
+      },
+      "appearance": {
+        "color": [
+          0.45,
+          0.43,
+          0.4
+        ],
+        "roughness": 0.7,
+        "provenance": {
+          "color": "provisional",
+          "roughness": "provisional"
+        }
+      }
+    }
+  },
+  "relations": {
+    "cup_spacing": {
+      "objects": [
+        "cup_a",
+        "cup_b"
+      ],
+      "center_to_center_distance_m": 0.09,
+      "provenance": {
+        "center_to_center_distance_m": "user_measured"
+      }
+    }
+  },
+  "appearance": {
+    "light_intensity": 1500.0,
+    "provenance": {
+      "light_intensity": "provisional"
+    }
+  },
+  "revision": {
+    "kind": "bootstrap_provisional",
+    "parent": null
+  },
+  "notes": "Only supplied dimensions are user_measured. Camera/base/workspace/light numbers initialize a preview, not calibration. Unknown table and object poses are null; omitted geometry is not rendered. Cups have known TOP OUTER diameter, not an opening diameter. Derived inner diameter and edge gap are computed on demand, not independent measurements.",
+  "bootstrap": {
+    "status": "provisional",
+    "method": "Codex reviewed real images; explicit scene hypothesis, not numerical fitting",
+    "reviewed_items": [
+      {
+        "import_id": "import_20260918_122007_358435be2fee43a8aedd0181cf130822",
+        "id": "ddac9f4982a44bf3a782308e018d2aa6",
+        "view": "side",
+        "image_sha256": "190ae4145932ac8726c8169ae33bdef7eae9acbf1bca4fe254f832d81b9a0f23"
+      },
+      {
+        "import_id": "import_20260918_122043_5c21f4088aeb4157b4abb78011eb1609",
+        "id": "e67e05cf79ff46a784f60a98f1c43385",
+        "view": "wrist",
+        "image_sha256": "a86766aa045b5aaa8ef25bdf193ac1ebc87b578159443d3625ea12e62dd52b50"
+      },
+      {
+        "import_id": "import_20260918_122057_94bb422a73f24bac93c0c13f4459d750",
+        "id": "2e1e367632c74fe89a6ccb6879420dd8",
+        "view": "overview",
+        "image_sha256": "749da765b2234e63eae082d1e6f090db054e46dca186d29946e7b861980e44e8"
+      },
+      {
+        "import_id": "import_20260918_122057_94bb422a73f24bac93c0c13f4459d750",
+        "id": "edf6ec9b1c4e4f6bb394089f3b18032b",
+        "view": "overview",
+        "image_sha256": "224274b2f03bec4bcfb17e5392a149324a78566cf9c999f4f8091ad0a1d934e1"
+      },
+      {
+        "import_id": "import_20260918_122057_94bb422a73f24bac93c0c13f4459d750",
+        "id": "89849f61457945ea9e0ad4aaae9f2f14",
+        "view": "overview",
+        "image_sha256": "4646bddcdba7de1da2d4608cdc0c3bdf7af8b8693ccbf31b60271a3291d281f7"
+      }
+    ],
+    "notes": [
+      "Three colored cubes, two cups, pale tabletop, black horizontal roller observed in real references.",
+      "Cube positions are arbitrary nonoverlapping placements inside the measured workspace per user request. No randomizer changed.",
+      "Robot joints in references are unknown. Existing asset default pose is only preview initialization.",
+      "Wrist reference is blurred; existing provisional mount seed retained, not inferred calibration.",
+      "Table, background, camera, alignment and materials are provisional. No sim screenshots used.",
+      "Cup measurement records remain partial/disabled; separate visual proxies are excluded from fitting.",
+      "This reviewed hypothesis is specific to these references; other environments require another reviewed hypothesis."
+    ]
+  }
+}

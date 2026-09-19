@@ -30,25 +30,27 @@ import time
 from isaaclab.app import AppLauncher
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--port", default="/dev/ttyACM0")
-parser.add_argument("--recalibrate", action="store_true")
-parser.add_argument("--calibration_file_name", default="so101_leader.json")
-parser.add_argument("--dataset_file", default="./datasets/pick_red_place_into_bin_a.hdf5")
-parser.add_argument("--mimic_task", default="SO101-PickPlace-Mimic-v0")
-parser.add_argument("--grasp_object", default="cube_red")
-parser.add_argument("--place_bin", default="bin_a")
-parser.add_argument("--num_episodes", type=int, default=20)
-parser.add_argument("--episode_time_s", type=float, default=20.0)
-parser.add_argument("--reset_time_s", type=float, default=5.0)
-parser.add_argument("--num_envs", type=int, default=1)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace", help="Published workspace ID or package path (opt-in)")
+    parser.add_argument("--port", default="/dev/ttyACM0")
+    parser.add_argument("--recalibrate", action="store_true")
+    parser.add_argument("--calibration_file_name", default="so101_leader.json")
+    parser.add_argument("--dataset_file", default="./datasets/pick_red_place_into_bin_a.hdf5")
+    parser.add_argument("--mimic_task", default="SO101-PickPlace-Mimic-v0")
+    parser.add_argument("--grasp_object", default="cube_red")
+    parser.add_argument("--place_bin", default="bin_a")
+    parser.add_argument("--num_episodes", type=int, default=20)
+    parser.add_argument("--episode_time_s", type=float, default=20.0)
+    parser.add_argument("--reset_time_s", type=float, default=5.0)
+    parser.add_argument("--num_envs", type=int, default=1)
 
-AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
-args_cli.enable_cameras = True
+    AppLauncher.add_app_launcher_args(parser)
+    args_cli = parser.parse_args()
+    args_cli.enable_cameras = True
 
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
+    app_launcher = AppLauncher(args_cli)
+    simulation_app = app_launcher.app
 
 
 def reset_env(env, episode_random_state):
@@ -245,7 +247,16 @@ def main():
     controller = SO101Leader(controller_cfg)
     controller.connect()
 
-    env_cfg = SO101TeleopEnvCfg()
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.environment import make_config
+        from soarm101_lab.real2sim.workspaces.package import load as load_workspace
+        workspace = load_workspace(args_cli.workspace)
+        env_cfg = make_config(args_cli.workspace, args_cli.device, args_cli.num_envs)
+        args_cli.grasp_object = workspace['task']['pick']
+        args_cli.place_bin = workspace['task']['place']
+        args_cli.mimic_task = 'SO101-Workspace-Source-v1'
+    else:
+        env_cfg = SO101TeleopEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
 
@@ -254,7 +265,11 @@ def main():
     if env.num_envs != 1:
         raise ValueError("This recorder currently supports num_envs=1.")
 
-    randomizer = EpisodeRandomizer()
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
+        randomizer = WorkspaceRandomizer(workspace)
+    else:
+        randomizer = EpisodeRandomizer()
 
     control_dt = env.step_dt
     control_hz = 1.0 / control_dt
@@ -265,6 +280,13 @@ def main():
     print(f"✅ control_hz : {control_hz}")
     print(f"✅ sim_dt     : {env_cfg.sim.dt}")
 
+    from soarm101_lab.so101_dataset_contract import current_contract, write_contract, MIMIC_SPACE
+    coordinates = current_contract(MIMIC_SPACE)
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
+        coordinates = coordinate_contract(workspace)
+    # Persist before recording, including interrupted runs. Never mix mapping revisions.
+    write_contract(args_cli.dataset_file, coordinates)
     writer = HDF5DatasetFileHandler()
     writer.create(
         args_cli.dataset_file,
@@ -275,8 +297,18 @@ def main():
             "grasp_object": args_cli.grasp_object,
             "place_bin": args_cli.place_bin,
             "control_dt": float(control_dt),
+            "so101_coordinates": coordinates,
         }
     )
+
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.package import metadata
+        try:
+            from isaaclab.utils.datasets.hdf5_dataset_file_handler import DATASET_FORMAT_VERSION
+        except ImportError:
+            DATASET_FORMAT_VERSION = 0
+        writer.add_env_args({'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
+                             'root_quaternion_order': 'xyzw' if DATASET_FORMAT_VERSION >= 1 else 'wxyz'})
 
     episode_count = 0
     step_count = 0

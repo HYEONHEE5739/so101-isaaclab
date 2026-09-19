@@ -8,13 +8,14 @@
 import json
 import os
 import logging
-import math
 
 from dataclasses import dataclass
 import numpy as np
 import torch
 
 #from soarm101_lab.assets import SO101_FOLLOWER_MOTOR_LIMITS
+
+from soarm101_lab.so101_joint_mapping import calibrated_to_urdf
 
 from ..device_base import DeviceBase
 from soarm101_lab.devices.lerobot.utils import check_if_not_connected, check_if_already_connected
@@ -67,7 +68,7 @@ class SO101Leader(DeviceBase):
         >>> leader.disconnect()
     """
 
-    def __init__(self, env, cfg: SO101LeaderCfg | None = None):
+    def __init__(self, env=None, cfg: SO101LeaderCfg | None = None):
         """Initialize SO101 Leader device.
 
         Args:
@@ -76,6 +77,9 @@ class SO101Leader(DeviceBase):
         """
         super().__init__()
 
+        # Scripts pass SO101Leader(cfg); Real2Sim passes env/cfg by name.
+        if isinstance(env, SO101LeaderCfg) and cfg is None:
+            cfg, env = env, None
         if cfg is None:
             cfg = SO101LeaderCfg()
         self.cfg = cfg
@@ -111,13 +115,13 @@ class SO101Leader(DeviceBase):
 
 
     def _get_raw_data(self) -> dict:
-        """Read raw joint positions from the physical robot.
+        """Read calibrated control coordinates from the physical robot.
 
         Returns:
             Raw result from the motor bus `sync_read("Present_Position")`.
         """
         try:
-            # sync_read with normalize=True returns -100 to 100 range
+            # normalize=True: arm DEGREES, gripper RANGE_0_100
             raw_data = self._bus.sync_read("Present_Position")
             return raw_data
         except Exception as e:
@@ -128,24 +132,13 @@ class SO101Leader(DeviceBase):
     @check_if_not_connected
     def advance(self) -> torch.Tensor:
         """Read joint positions and return as torch.Tensor."""
-        # DEGREES 모드: 도 단위로 반환됨
-        raw_data = self._get_raw_data() 
-        
-        values = []
-        for name in SO101_MOTOR_NAMES:
-            if name in raw_data:
-                degree = raw_data[name]  # 이미 도!
-                # 🔴 도 → 라디안으로만 변환
-                radian = degree / 180.0 * math.pi
-                values.append(radian)
-            else:
-                values.append(0.0)
-        
-        action = torch.tensor(values, dtype=torch.float32)
-        return action
+        # Bus already returns calibrated degrees / gripper percent, not raw encoders.
+        calibrated = self._get_raw_data()
+        # Preserve legacy fallback here; Real2Sim's strict reader raises on missing data.
+        calibrated = {n: calibrated.get(n, 0.0) for n in SO101_MOTOR_NAMES}
+        target = calibrated_to_urdf(calibrated)
+        return torch.tensor([target[n] for n in SO101_MOTOR_NAMES], dtype=torch.float32)
 
-     
-    
     @property
     def motor_limits(self) -> dict[str, tuple[float, float]]:
         """Get motor limits (USD joint limits)."""

@@ -52,6 +52,8 @@ def main():
     # Load joint targets
     # --------------------------------------------------------
 
+    from soarm101_lab.so101_dataset_contract import require_joint_replay
+    require_joint_replay(args_cli.dataset)  # targets are already URDF radians; do not remap.
     with h5py.File(args_cli.dataset, "r") as f:
 
         demo = f["data"][args_cli.episode]

@@ -160,6 +160,8 @@ if not input_file.exists():
     raise FileNotFoundError(f"Input HDF5 not found: {input_file}")
 
 
+from soarm101_lab.so101_dataset_contract import read_contract, write_contract, JOINT_SPACE, MIMIC_SPACE
+source_coordinates = read_contract(input_file)
 with h5py.File(input_file, "r") as h5:
     if "data" not in h5:
         raise KeyError("Input HDF5 has no 'data' group.")
@@ -192,6 +194,7 @@ with h5py.File(input_file, "r") as h5:
 
     action_source = choose_action_source(first)
     first_actions = load_actions(first, first_states, action_source)
+    first_action_source = action_source
 
     if action_source != "mimic_actions" and first_states.shape[-1] != first_actions.shape[-1]:
         raise ValueError(
@@ -288,6 +291,8 @@ with h5py.File(input_file, "r") as h5:
         )
 
         action_source = choose_action_source(demo)
+        if action_source != first_action_source:
+            raise ValueError("Mixed action representations across episodes; convert separately")
         actions = load_actions(demo, states, action_source)
 
         if action_source != "mimic_actions" and states.shape[-1] != actions.shape[-1]:
@@ -344,6 +349,9 @@ with h5py.File(input_file, "r") as h5:
 
 dataset.stop_image_writer()
 dataset.finalize()
+write_contract(dataset_root, {**source_coordinates,
+    "action_space": MIMIC_SPACE if first_action_source == "mimic_actions" else JOINT_SPACE,
+    "source_dataset": str(input_file), "action_source": first_action_source})
 
 print()
 print("=" * 70)

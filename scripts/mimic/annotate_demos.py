@@ -388,6 +388,8 @@ def annotate_episode_in_manual_mode(
 # ============================================================
 
 def main():
+    from soarm101_lab.so101_dataset_contract import inherit_contract, MIMIC_SPACE
+    inherit_contract(args_cli.input_file, args_cli.output_file, MIMIC_SPACE)
     if not os.path.exists(args_cli.input_file):
         raise FileNotFoundError(f"Input HDF5 not found: {args_cli.input_file}")
 

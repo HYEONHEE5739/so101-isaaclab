@@ -9,6 +9,7 @@ import weakref
 class KeyboardState:
     save_episode: bool = False
     discard_episode: bool = False
+    save_screenshot: bool = False
     quit: bool = False
 
 
@@ -18,6 +19,7 @@ class KeyboardControl:
 
     RIGHT : Save episode
     LEFT  : Discard episode
+    DOWN  : Save camera screenshot
     Q     : Quit
     """
 
@@ -76,6 +78,9 @@ class KeyboardControl:
         elif key_name == "LEFT":
             self.state.discard_episode = True
 
+        elif key_name == "DOWN":
+            self.state.save_screenshot = True
+
         elif key_name == "Q":
             self.state.quit = True
 
@@ -90,6 +95,11 @@ class KeyboardControl:
     def consume_discard(self):
         value = self.state.discard_episode
         self.state.discard_episode = False
+        return value
+
+    def consume_screenshot(self):
+        value = self.state.save_screenshot
+        self.state.save_screenshot = False
         return value
 
     def should_quit(self):
