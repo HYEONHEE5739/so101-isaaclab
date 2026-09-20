@@ -216,6 +216,9 @@ def save_episode(writer, episode, episode_id):
     episode.success = True
     episode.pre_export()
     writer.write_episode(episode)
+    if hasattr(writer, 'workflow_task_definition'):
+        from soarm101_lab.workflow.tasks import stamp_group
+        stamp_group(writer._hdf5_data_group[f'demo_{episode_id}'], writer.workflow_task_definition)
     writer.flush()
 
     print(
@@ -236,7 +239,12 @@ def main():
     from soarm101_lab.utils.keyboard import KeyboardControl
     from soarm101_lab.utils.voice import log_say
 
-    keyboard_control = KeyboardControl()
+    from soarm101_lab.workflow.presentation import current, attach, RecorderControls
+    bridge = current()
+    if bridge:
+        keyboard_control = RecorderControls(bridge, None if args_cli.headless else KeyboardControl())
+    else:
+        keyboard_control = KeyboardControl()
 
     controller_cfg = SO101LeaderCfg(
         port=args_cli.port,
@@ -250,7 +258,8 @@ def main():
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.environment import make_config
         from soarm101_lab.real2sim.workspaces.package import load as load_workspace
-        workspace = load_workspace(args_cli.workspace)
+        from soarm101_lab.workflow.tasks import configured
+        workspace = configured(load_workspace(args_cli.workspace))
         env_cfg = make_config(args_cli.workspace, args_cli.device, args_cli.num_envs)
         args_cli.grasp_object = workspace['task']['pick']
         args_cli.place_bin = workspace['task']['place']
@@ -261,6 +270,7 @@ def main():
     env_cfg.sim.device = args_cli.device
 
     env = ManagerBasedEnv(cfg=env_cfg)
+    attach(env)
 
     if env.num_envs != 1:
         raise ValueError("This recorder currently supports num_envs=1.")
@@ -307,8 +317,11 @@ def main():
             from isaaclab.utils.datasets.hdf5_dataset_file_handler import DATASET_FORMAT_VERSION
         except ImportError:
             DATASET_FORMAT_VERSION = 0
-        writer.add_env_args({'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
-                             'root_quaternion_order': 'xyzw' if DATASET_FORMAT_VERSION >= 1 else 'wxyz'})
+        from soarm101_lab.representation import describe
+        writer.add_env_args({'representation': describe(coordinates), 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
+                             'root_quaternion_order': 'xyzw' if DATASET_FORMAT_VERSION >= 1 else 'wxyz',
+                             'task_definitions': [workspace['task_definition']]})
+        writer.workflow_task_definition = workspace['task_definition']
 
     episode_count = 0
     step_count = 0
@@ -335,6 +348,7 @@ def main():
     )
 
     episode_start_time = time.perf_counter()
+    print('[WORKFLOW] Episode 0 시작 · 오른쪽: 저장/다음 · 왼쪽: 폐기/같은 배치 리셋', flush=True)
 
     try:
         while simulation_app.is_running():
@@ -343,6 +357,8 @@ def main():
             # Quit
             # ====================================================
 
+            if bridge:
+                bridge.details.update(episode_index=episode_count + 1, episode_total=args_cli.num_episodes, recording=recording)
             if keyboard_control.should_quit():
                 log_say("stop recording", blocking = True)
                 print(

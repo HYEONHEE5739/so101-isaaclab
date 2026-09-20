@@ -36,9 +36,9 @@ def default_task(profile):
             'dynamic': dynamic, 'targets': targets, 'pick': 'cube_red', 'place': 'cup_a',
             'success': {'relation': 'contained_and_settled', 'max_speed_m_s': .03},
             'reset': {'seed': 0, 'margin_m': .01, 'clearance_m': .003, 'separation_m': .005,
-                      'support_object': 'marker', 'yaw_rad': [0., 0.]},
+                      'support_object': 'marker', 'yaw_rad': [0., 0.], 'mode': 'four_anchors', 'xy_jitter_m': .015},
             'physics': {'mass_kg': .02, 'static_friction': 1., 'dynamic_friction': 1.,
-                        'restitution': 0., 'provenance': 'provisional task simulation parameters'},
+                        'restitution': 0., 'provenance': 'default_template'},
             'robot_initial_joint_rad': {'shoulder_pan': 0., 'shoulder_lift': -1.7453,
                 'elbow_flex': 1.5708, 'wrist_flex': 1.2217, 'wrist_roll': 0., 'gripper': 0.}}
 
@@ -61,6 +61,11 @@ def validate_task(task, profile):
         if profile['objects'][visual]['shape'] not in ('cup', 'cup_proxy'):
             raise ValueError('Phase 1 targets must be cups')
     reset = task['reset']
+    if reset.get('mode', 'uniform') not in ('uniform', 'four_anchors'):
+        raise ValueError('Unknown reset mode')
+    if reset.get('mode') == 'four_anchors':
+        if len(dynamic) > 4 or not np.isfinite(reset.get('xy_jitter_m', -1)) or reset.get('xy_jitter_m', -1) < 0:
+            raise ValueError('Invalid four-anchor reset settings')
     if reset['yaw_rad'] != [0., 0.]:
         raise ValueError('Phase 1 supports fixed zero workspace yaw')
     if any(not np.isfinite(reset[k]) or reset[k] < 0 for k in ('margin_m', 'clearance_m', 'separation_m')):
@@ -175,6 +180,8 @@ def publish(revision, workspace_id, task, version=1, registry=REGISTRY):
             elif isinstance(value, list):
                 for v in value:collect(v)
         collect(profile)
+        from .physics import compile_physics
+        dump(staging/'physics.json', compile_physics(profile, task))
         from .scene_assets import build_assets
         build_assets(staging, profile, task, asset_map)
         dump(staging/'provenance.json', {'source_revision_path':str(source),'asset_map':asset_map,

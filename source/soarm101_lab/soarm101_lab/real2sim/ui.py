@@ -261,6 +261,10 @@ class Window(QMainWindow):
             for k, v in json.loads(settings_path.read_text()).items():
                 if k in self.fields:
                     self.fields[k].setText(v)
+        from ..workflow.ui import WorkflowPanel
+        self.workflow_panel = WorkflowPanel(self.work, self)
+        self.tabs.addTab(self.workflow_panel, "4 · Workspace Pipeline")
+        self.tabs.currentChanged.connect(lambda _: self.log.setVisible(self.tabs.currentWidget() is not self.workflow_panel))
         self.reload_references()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -376,7 +380,8 @@ class Window(QMainWindow):
         self.worker.start()
 
     def open_profile(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Profile 선택", "", "JSON (*.json)")
+        from ..workflow.artifacts import browse_directory
+        path, _ = QFileDialog.getOpenFileName(self, "Profile 선택", browse_directory("revision"), "JSON (*.json)")
         if path:
             self.selected(path)
 
@@ -558,6 +563,7 @@ class Window(QMainWindow):
 
     def closeEvent(self, event):
         self.cancel.set()
+        self.workflow_panel.service.cancel()
         try:
             self.bus.send("stop")
         except RuntimeError:

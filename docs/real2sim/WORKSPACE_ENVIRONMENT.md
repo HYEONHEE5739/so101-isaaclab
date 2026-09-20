@@ -1,5 +1,7 @@
 # Real2Sim Workspace Environment — Phase 1
 
+이 문서는 Phase 1 기록입니다. 후속 구현과 통합 UI 안내는 [Phase 2 Workspace Pipeline](PHASE2_WORKSPACE_PIPELINE.md)을 참고하세요.
+
 ## 현재 상태
 
 기존 pick_place scene을 덮어쓰지 않고 독립적인 `workspace_001/v1`을 publish했다.

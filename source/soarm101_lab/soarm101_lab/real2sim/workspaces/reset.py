@@ -7,19 +7,38 @@ class WorkspaceRandomizer:
     def __init__(self, workspace):
         self.workspace=workspace
         self.rng=np.random.default_rng(workspace['task']['reset']['seed'])
+        self.sample_index = 0
 
     def sample(self):
         p,t=self.workspace['profile'],self.workspace['task'];r=t['reset'];support=p['objects'][r['support_object']]
         center=np.array(support['T_workspace'])[:3,3];half=np.array(support['dimensions_m'])/2
         placed={};sizes={}
-        for name in t['dynamic']:
+        mode = r.get('mode', 'uniform')
+        if mode not in ('uniform', 'four_anchors'):
+            raise ValueError('Unknown reset sampling mode')
+        anchors = np.array([[-1,-1], [-1,1], [1,-1], [1,1]], dtype=float)
+        anchor_order = self.rng.permutation(4) if mode == 'four_anchors' else None
+        if mode == 'four_anchors' and len(t['dynamic']) > 4:
+            raise ValueError('Four-anchor sampling supports up to four objects')
+        for index, name in enumerate(t['dynamic']):
             size=np.array(p['objects'][name]['dimensions_m']);limit=half[:2]-size[:2]/2-r['margin_m']
             for _ in range(1000):
-                xy=center[:2]+self.rng.uniform(-limit,limit)
+                if mode == 'four_anchors':
+                    anchor = anchors[anchor_order[index]] * half[:2] * .5
+                    jitter = float(r['xy_jitter_m'])
+                    if not np.isfinite(jitter) or jitter < 0:
+                        raise ValueError('Invalid XY jitter')
+                    local = anchor + self.rng.uniform(-jitter, jitter, size=2)
+                    if np.any(np.abs(local) > limit):
+                        continue
+                    xy = center[:2] + local
+                else:
+                    xy=center[:2]+self.rng.uniform(-limit,limit)
                 if all(np.any(np.abs(xy-np.array(pos[:2]))>(size[:2]+sizes[n][:2])/2+r['separation_m']) for n,pos in placed.items()):break
             else:raise ValueError('Unable to place non-overlapping objects in workspace')
             placed[name]=[*xy,float(center[2]+half[2]+size[2]/2+r['clearance_m'])];sizes[name]=size
-        return {'frame':'workspace','cube_positions':placed,'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
+        self.sample_index += 1
+        return {'sampling': {'mode': mode, 'seed': r['seed'], 'sample_index': self.sample_index, 'xy_jitter_m': r.get('xy_jitter_m', 0)}, 'frame':'workspace','cube_positions':placed,'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
 
 
 def reset_workspace(env,env_ids,workspace,random_state=None):

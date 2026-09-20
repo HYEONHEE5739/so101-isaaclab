@@ -9,7 +9,7 @@ if known.command in ('teleop','source-demo'):
     script='teleop_so101.py' if known.command=='teleop' else 'record_mimic_dataset.py'
     os.environ['PYTHONPATH']=str(ROOT/'source/soarm101_lab')+os.pathsep+os.environ.get('PYTHONPATH','')
     os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/envs/teleoperation'/script),'--workspace',known.workspace,*rest])
-p.add_argument('--dataset');p.add_argument('--episode',default='demo_0');p.add_argument('--steps',type=int,default=60)
+p.add_argument('--report');p.add_argument('--dataset');p.add_argument('--episode',default='demo_0');p.add_argument('--steps',type=int,default=60)
 from isaaclab.app import AppLauncher
 AppLauncher.add_app_launcher_args(p);args=p.parse_args();args.enable_cameras=True
 app=AppLauncher(args).app
@@ -20,7 +20,7 @@ try:
     from isaaclab.utils.datasets import EpisodeData,HDF5DatasetFileHandler
     from soarm101_lab.real2sim.workspaces.environment import make_config
     from soarm101_lab.real2sim.workspaces.package import load,metadata
-    from soarm101_lab.real2sim.workspaces.demo import verify_dataset,restore_initial_state,coordinate_contract
+    from soarm101_lab.real2sim.workspaces.demo import verify_dataset,restore_initial_state,coordinate_contract,replay_fields
     from soarm101_lab.so101_dataset_contract import current_contract,write_contract,MIMIC_SPACE,require_joint_replay
     sys.path.insert(0,str(ROOT/'scripts/envs/teleoperation'))
     import record_mimic_dataset as recording
@@ -31,7 +31,8 @@ try:
     legacy_before=SO101TeleopEnvCfg().scene.to_dict()
     cfg=make_config(args.workspace,args.device)
     assert SO101TeleopEnvCfg().scene.to_dict()==legacy_before, 'Legacy scene mutated'
-    env=ManagerBasedEnv(cfg=cfg);obs,_=env.reset()
+    from soarm101_lab.workflow.presentation import attach
+    env=ManagerBasedEnv(cfg=cfg);attach(env);obs,_=env.reset()
     print('WORKSPACE_SPAWNED',metadata(w),list(env.scene.rigid_objects),flush=True)
     if args.command=='preview':
         indices=[env.scene['robot'].joint_names.index(n) for n in cfg.actions.joint_positions.joint_names]
@@ -59,17 +60,23 @@ try:
         reader=HDF5DatasetFileHandler();reader.open(str(dataset));ep=reader.load_episode(args.episode,env.device)
         if ep is None:raise ValueError('Episode missing')
         obs,_=restore_initial_state(env,ep,meta.get('root_quaternion_order','wxyz'))
+        recorded_obs, recorded_joints, recorded_objects = replay_fields(ep.data)
+        print(f'[WORKFLOW] Replay {args.episode} 시작: {len(ep.data["joint_targets"])} frames', flush=True)
         joint_errors=[];object_errors=[];camera_errors=[]
         for t,action in enumerate(ep.data['joint_targets']):
+            if t % 100 == 0: print(f'[WORKFLOW] Replay {args.episode}: {t}/{len(ep.data["joint_targets"])}', flush=True)
             for camera in ['side_cam','wrist_cam']:
-                if camera in ep.data['obs']['policy']:
-                    expected=ep.data['obs']['policy'][camera][t];camera_errors.append(float((obs['policy'][camera][0].float()-expected.float()).abs().mean()))
-            obs,_=env.step(action.unsqueeze(0));joint_errors.append(float((env.scene['robot'].data.joint_pos[0]-ep.data['states']['joint_pos'][t]).abs().max()))
-            for name,target in ep.data.get('workspace_states',{}).items():object_errors.append(float((env.scene[name].data.root_pose_w[0,:3]-target[t,:3]).abs().max()))
+                if camera in recorded_obs:
+                    expected=recorded_obs[camera][t];camera_errors.append(float((obs['policy'][camera][0].float()-expected.float()).abs().mean()))
+            obs,_=env.step(action.unsqueeze(0));joint_errors.append(float((env.scene['robot'].data.joint_pos[0]-recorded_joints[t]).abs().max()))
+            for name,target in recorded_objects.items():object_errors.append(float((env.scene[name].data.root_pose_w[0,:3]-target[t,:3]).abs().max()))
         result={'steps':len(joint_errors),'max_joint_error_rad':max(joint_errors),'max_object_position_error_m':max(object_errors) if object_errors else None,'mean_camera_rgb_abs_error':float(np.mean(camera_errors)),'hardware_tested':False,'legacy_scene_unchanged':True,'rigid_objects':list(env.scene.rigid_objects)}
         result['passed']=result['max_joint_error_rad']<.005 and (result['max_object_position_error_m'] is None or result['max_object_position_error_m']<.002) and result['mean_camera_rgb_abs_error']<3.
         result['object_trajectory_checked']=bool(object_errors)
-        (out/'replay_report.json').write_text(json.dumps(result,indent=2));print('REPLAY_RESULT',result,flush=True);reader.close()
+        report_path=Path(args.report) if args.report else out/'replay_report.json'
+        report_path.parent.mkdir(parents=True,exist_ok=True)
+        report_path.write_text(json.dumps(result,indent=2));print('REPLAY_RESULT',result,flush=True);reader.close()
+        print(f'[WORKFLOW] Replay {args.episode} 완료: passed={result["passed"]}', flush=True)
         if not result['passed']:raise RuntimeError('Workspace replay verification failed; see report')
     for view in ['side_cam','wrist_cam']:Image.fromarray(obs['policy'][view][0].detach().cpu().numpy().astype('uint8')).save(out/(view+'.png'))
     env.close()

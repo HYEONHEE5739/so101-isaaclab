@@ -1,5 +1,6 @@
 """Independent workspace scene; reuses SO101 action/observation implementations only."""
 import copy
+import json
 import numpy as np
 from .package import load, metadata
 from .reset import reset_workspace
@@ -8,6 +9,7 @@ from .reset import reset_workspace
 def task_success(env, workspace):
     import torch
     from isaaclab.utils.math import subtract_frame_transforms, quat_apply
+    workspace = getattr(env, '_workflow_task_workspace', workspace)
     task=workspace['task'];profile=workspace['profile'];cube=env.scene[task['pick']];target=env.scene[task['place']]
     pos,quat=subtract_frame_transforms(target.data.root_pos_w,target.data.root_quat_w,cube.data.root_pos_w,cube.data.root_quat_w)
     size=profile['objects'][task['pick']]['dimensions_m'];cup=profile['objects'][task['targets'][task['place']]]
@@ -19,7 +21,7 @@ def task_success(env, workspace):
     return inside & (torch.linalg.vector_norm(cube.data.root_lin_vel_w,dim=-1)<task['success']['max_speed_m_s'])
 
 
-def make_config(workspace, device='cuda:0', num_envs=1):
+def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None):
     if num_envs!=1:raise ValueError('Workspace Phase 1 supports num_envs=1')
     from isaaclab.utils import configclass
     from isaaclab.envs import ManagerBasedEnvCfg
@@ -31,7 +33,8 @@ def make_config(workspace, device='cuda:0', num_envs=1):
     from ...assets.robots.so101 import SO101_FOLLOWER_CFG
     from ...tasks.manager_based.soarm101_lab.base_pick_place_teleop_env_cfg import ActionsCfg, ObservationsCfg
     from ..profile import pose, render_k
-    w=load(workspace);p=w['profile'];task=w['task'];root=w['root']
+    from ...workflow.tasks import configured
+    w=configured(load(workspace), task_definition);p=w['profile'];task=w['task'];root=w['root']
     @configclass
     class Events:
         reset_episode=EventTermCfg(func=reset_workspace,mode='reset',params={'workspace':w,'random_state':None})
@@ -50,8 +53,12 @@ def make_config(workspace, device='cuda:0', num_envs=1):
     scene.workspace_static=AssetBaseCfg(prim_path='{ENV_REGEX_NS}/WorkspaceStatic',spawn=sim.UsdFileCfg(usd_path=str(root/'scene/static.usda')))
     if p.get('wrist_mount'):
         scene.workspace_camera_mount=AssetBaseCfg(prim_path='{ENV_REGEX_NS}/Robot/gripper/WorkspaceMount',spawn=sim.UsdFileCfg(usd_path=str(root/'scene/wrist_mount.usda')))
+    compiled = json.loads((root/'physics.json').read_text()) if (root/'physics.json').exists() else None
     for name in task['dynamic']:
         obj=p['objects'][name];pos,rot=pose(np.array(p['workspace']['T_world'])@np.array(obj['T_workspace']));physics=task['physics']
+        if compiled:
+            spec=compiled['objects'][name]
+            physics={**spec['material'], 'mass_kg': spec['mass_kg']}
         setattr(scene,name,RigidObjectCfg(prim_path='{ENV_REGEX_NS}/'+name,
             spawn=sim.CuboidCfg(size=tuple(obj['dimensions_m']),mass_props=sim.MassPropertiesCfg(mass=physics['mass_kg']),
                 rigid_props=sim.RigidBodyPropertiesCfg(solver_position_iteration_count=16,solver_velocity_iteration_count=1),
@@ -71,7 +78,32 @@ def make_config(workspace, device='cuda:0', num_envs=1):
             width=width,height=height,data_types=['rgb'],update_latest_camera_pose=True,update_period=0.,
             spawn=sim.PinholeCameraCfg(focal_length=24.,horizontal_aperture=24*width/k[0,0],vertical_aperture=24*height/k[1,1],clipping_range=(.001,100.),f_stop=0.),
             offset=CameraCfg.OffsetCfg(pos=pos,rot=rot,convention='ros')))
+    # Inspection-only camera: same scene/runtime, outside policy observation space.
+    from ...workflow.presentation import current
+    presentation = current()
+    if presentation and presentation.config['stage'] in ('annotate', 'datagen', 'sim_eval'):
+        from ...workflow.overview import framing
+        overview_pos, overview_rot = framing(w)
+        scene.camera_overview = CameraCfg(prim_path='{ENV_REGEX_NS}/Camera_Overview', width=800, height=600,
+            data_types=['rgb'], update_period=.1,
+            spawn=sim.PinholeCameraCfg(focal_length=18., horizontal_aperture=36., vertical_aperture=27., clipping_range=(.01, 100.)),
+            offset=CameraCfg.OffsetCfg(pos=overview_pos, rot=overview_rot, convention='ros'))
     cfg.actions=ActionsCfg();cfg.observations=ObservationsCfg();cfg.observations.task=TaskObservations(concatenate_terms=False)
+    if presentation and presentation.config['stage'] == 'sim_eval':
+        from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
+        from isaaclab.managers import SceneEntityCfg
+        subtask = copy.deepcopy(SO101PickPlaceMimicEnvCfg().observations.subtask_terms)
+        original_grasp = subtask.grasp.func
+        from functools import wraps
+        @wraps(original_grasp)
+        def selected_grasp(env, **params):
+            active = getattr(env, '_workflow_task_workspace', w)
+            params['object_cfg'] = SceneEntityCfg(active['task']['pick'])
+            return original_grasp(env, **params)
+        subtask.grasp.func = selected_grasp
+        subtask.grasp.params['object_cfg'] = SceneEntityCfg(task['pick'])
+        cfg.observations.subtask_terms = subtask
     cfg.events=Events();cfg.decimation=2;cfg.sim.dt=1/60;cfg.sim.render_interval=2;cfg.sim.device=device
+    cfg.workflow_workspace=w
     cfg.workspace_metadata=metadata(w);cfg.workspace_package=str(root)
     return cfg

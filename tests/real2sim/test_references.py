@@ -52,7 +52,7 @@ def test_ui_multiselect_and_restart(tmp_path, monkeypatch):
     files = photos(tmp_path)
     monkeypatch.setattr(QFileDialog, 'getOpenFileNames', lambda *a: ([str(p) for p in files], ''))
     w = Window(tmp_path)
-    assert [w.tabs.tabText(i) for i in range(w.tabs.count())] == ['1 · Reference', '2 · Real / Sim', '3 · Inspect']
+    assert [w.tabs.tabText(i) for i in range(w.tabs.count())] == ['1 · Reference', '2 · Real / Sim', '3 · Inspect', '4 · Workspace Pipeline']
     from PyQt6.QtWidgets import QPushButton
     live = w.tabs.widget(1)
     assert any(b.text() == 'Capture' for b in live.findChildren(QPushButton))

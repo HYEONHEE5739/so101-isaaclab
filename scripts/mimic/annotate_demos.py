@@ -43,6 +43,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Annotate demonstrations for Isaac Lab environments.")
 
+parser.add_argument("--workspace", help="Published workspace ID/path")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--input_file", type=str, default="./datasets/dataset.hdf5")
 parser.add_argument("--output_file", type=str, default="./datasets/dataset_annotated.hdf5")
@@ -58,6 +59,8 @@ parser.add_argument(
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.workspace:
+    args_cli.enable_cameras = True
 
 if args_cli.enable_pinocchio:
     import pinocchio  # noqa: F401
@@ -224,23 +227,45 @@ def replay_episode(
 
     env.sim.reset()
     env.recorder_manager.reset()
-    env.reset_to(initial_state, None, is_relative=True)
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.demo import restore_initial_state
+        restore_initial_state(env, episode, env._workspace_source_quat_order)
+    else:
+        env.reset_to(initial_state, None, is_relative=True)
 
     first_action = True
 
     for action_index, action in enumerate(actions):
+        if action_index % 100 == 0:
+            print(f'[WORKFLOW] Annotation frame {action_index}/{len(actions)}', flush=True)
         current_action_index = action_index
+        bridge = getattr(env, '_workflow_presentation', None)
+        if bridge:
+            bridge.details['action_index'] = action_index
+            bridge.details['marks'] = list(marked_subtask_action_indices)
+            bridge.poll()
 
         if first_action:
             first_action = False
         else:
             while is_paused or skip_episode:
                 env.sim.render()
+                if bridge:
+                    bridge.poll()
+                    bridge.details['marks'] = list(marked_subtask_action_indices)
+                    bridge.status('PAUSED')
+                    import time
+                    time.sleep(.03)
 
                 if skip_episode:
                     return False
 
         action_tensor = torch.as_tensor(action, dtype=torch.float32, device=env.device).reshape(1, -1)
+        if args_cli.workspace:
+            target = episode.data['joint_targets'][action_index].to(env.device).reshape(1, 6)
+            env._workspace_recorded_arm_target = target[:, :5]
+            if not torch.allclose(action_tensor[:, -1], target[:, -1], atol=1e-5):
+                raise ValueError('Source gripper action differs from recorded joint target')
         env.step(action_tensor)
 
     if success_term is not None:
@@ -436,7 +461,13 @@ def main():
     if env_name is None:
         raise ValueError("Task/env name was not specified nor found in the dataset.")
 
-    env_cfg = parse_env_cfg(env_name, device=args_cli.device, num_envs=1)
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
+        _, source_args = validate_input(args_cli.input_file, args_cli.workspace)
+        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, annotation=True)
+        env_name = env_cfg.env_name
+    else:
+        env_cfg = parse_env_cfg(env_name, device=args_cli.device, num_envs=1)
     env_cfg.env_name = env_name
 
     if env_cfg.terminations is not None and hasattr(env_cfg.terminations, "success"):
@@ -447,6 +478,9 @@ def main():
 
     env_cfg.terminations = None
     env_cfg.recorders = MimicRecorderManagerCfg()
+    if args_cli.workspace:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import PreStepPolicyObservationsCpuRecorder
+        env_cfg.recorders.record_pre_step_flat_policy_observations = RecorderTermCfg(class_type=PreStepPolicyObservationsCpuRecorder)
 
     if not args_cli.auto:
         env_cfg.recorders.record_pre_step_subtask_term_signals = None
@@ -457,7 +491,17 @@ def main():
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
 
-    env: ManagerBasedRLMimicEnv = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+    if args_cli.workspace:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.so101_mimic_env import SO101PickPlaceMimicEnv
+        env = SO101PickPlaceMimicEnv(cfg=env_cfg)
+        env._workspace_source_quat_order = source_args.get('root_quaternion_order', 'wxyz')
+    else:
+        env = gym.make(args_cli.task or env_name, cfg=env_cfg).unwrapped
+
+    from soarm101_lab.workflow.presentation import attach
+    bridge = attach(env)
+    if bridge and not args_cli.auto:
+        bridge.callbacks.update(resume=play_cb, pause=pause_cb, mark=mark_subtask_cb, skip=skip_episode_cb)
 
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("Environment must derive from ManagerBasedRLMimicEnv")
@@ -518,13 +562,15 @@ def main():
                     break
 
                 processed_episode_count += 1
+                if bridge:
+                    bridge.details.update(episode_outcome='진행 중', outcome_reason='', episode=episode_name, episode_index=processed_episode_count, episode_total=len(episode_names))
 
                 print(
                     f"\nAnnotating {processed_episode_count}/{len(episode_names)} "
                     f"({episode_name})"
                 )
 
-                episode = dataset_file_handler.load_episode(episode_name, env.device)
+                episode = dataset_file_handler.load_episode(episode_name, 'cpu' if args_cli.workspace else env.device)
 
                 if args_cli.auto:
                     success = annotate_episode_in_auto_mode(env, episode, success_term)
@@ -547,8 +593,12 @@ def main():
                     exported_episode_count += 1
                     successful_task_count += 1
 
+                    if bridge:
+                        bridge.details.update(episode_outcome='성공 / 저장됨', outcome_reason='task와 subtask 검증 통과'); bridge.status()
                     print("\t✅ Exported annotated episode.")
                 else:
+                    if bridge:
+                        bridge.details.update(episode_outcome='실패 / 제외', outcome_reason='task/subtask 미충족 또는 사용자 건너뛰기 — 로그 확인'); bridge.status()
                     print("\t❌ Skipped episode.")
 
     except KeyboardInterrupt:
@@ -564,10 +614,17 @@ def main():
     print("=" * 70)
 
     env.close()
+    if args_cli.workspace and exported_episode_count:
+        from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
+        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace)
 
+    if not exported_episode_count:
+        raise RuntimeError('Annotation exported 0 episodes: see task/subtask failure above; no annotated artifact was created')
     return successful_task_count
 
 
 if __name__ == "__main__":
-    main()
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        simulation_app.close()

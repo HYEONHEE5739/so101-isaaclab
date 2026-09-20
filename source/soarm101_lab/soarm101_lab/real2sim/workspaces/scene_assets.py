@@ -7,11 +7,24 @@ from ..scene import build_usd
 
 def build_assets(root, profile, task, asset_map):
     from pxr import Usd, UsdGeom, UsdPhysics, Gf
+    from .physics import compile_physics, bind_material
+    physics = compile_physics(profile, task)['objects']
     p = copy.deepcopy(profile)
     p.pop('wrist_mount',None);p['relations']={}
     removed = set(task['dynamic']) | set(task['targets']) | set(task['targets'].values())
     static = copy.deepcopy(p);static['objects']={k:v for k,v in p['objects'].items() if k not in removed}
     build_usd(root/'scene/static.usda',static)
+    stage = Usd.Stage.Open(str(root/'scene/static.usda'))
+    for name, spec in physics.items():
+        prim = stage.GetPrimAtPath('/Real2Sim/Workspace/' + name)
+        if not prim:
+            continue
+        for child in Usd.PrimRange(prim):
+            if child.HasAPI(UsdPhysics.CollisionAPI) and not spec['collision']:
+                child.RemoveAPI(UsdPhysics.CollisionAPI)
+        if spec['collision']:
+            bind_material(stage, prim, spec['material'])
+    stage.GetRootLayer().Save()
     for name,visual in task['targets'].items():
         q=copy.deepcopy(p);q['table']['render_enabled']=False;q['workspace']['T_world']=np.eye(4).tolist()
         obj=copy.deepcopy(p['objects'][visual]);obj['T_workspace']=np.eye(4).tolist();q['objects']={name:obj}
@@ -31,6 +44,7 @@ def build_assets(root, profile, task, asset_map):
                 c.AddRotateZOp().Set(math.degrees(angle));c.AddScaleOp().Set(Gf.Vec3f(wall,2*radius*math.tan(math.pi/32)*1.02,h/4+.0002));shapes.append(c)
         for shape in shapes:
             shape.CreateVisibilityAttr('invisible');UsdPhysics.CollisionAPI.Apply(shape.GetPrim())
+        bind_material(stage, prim, physics[name]['material'])
         stage.GetRootLayer().Save()
     if profile.get('wrist_mount'):
         q=copy.deepcopy(p);q['table']['render_enabled']=False;q['workspace']['T_world']=np.eye(4).tolist()

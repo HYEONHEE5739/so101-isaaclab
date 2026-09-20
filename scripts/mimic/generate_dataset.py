@@ -23,6 +23,7 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac Lab environments.")
+parser.add_argument("--workspace", help="Published workspace ID/path")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
 parser.add_argument(
@@ -56,6 +57,8 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
+if args_cli.workspace:
+    args_cli.enable_cameras = True
 
 if args_cli.enable_pinocchio:
     # Import pinocchio before AppLauncher to force the use of the version installed by IsaacLab and not the one installed by Isaac Sim
@@ -105,14 +108,29 @@ def main():
     env_name = task_name or get_env_name_from_dataset(args_cli.input_file)
 
     # Configure environment
-    env_cfg, success_term = setup_env_config(
-        env_name=env_name,
-        output_dir=output_dir,
-        output_file_name=output_file_name,
-        num_envs=num_envs,
-        device=args_cli.device,
-        generation_num_trials=args_cli.generation_num_trials,
-    )
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
+        from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
+        from isaaclab.managers import DatasetExportMode
+        validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
+        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs)
+        env_name = env_cfg.env_name
+        success_term = env_cfg.terminations.success
+        env_cfg.terminations = None
+        env_cfg.datagen_config.generation_num_trials = args_cli.generation_num_trials or 10
+        env_cfg.recorders = ActionStateRecorderManagerCfg()
+        env_cfg.recorders.dataset_export_dir_path = output_dir
+        env_cfg.recorders.dataset_filename = output_file_name
+        env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    else:
+        env_cfg, success_term = setup_env_config(
+            env_name=env_name,
+            output_dir=output_dir,
+            output_file_name=output_file_name,
+            num_envs=num_envs,
+            device=args_cli.device,
+            generation_num_trials=args_cli.generation_num_trials,
+        )
 
     # override
     env_cfg.recorders.record_pre_step_flat_policy_observations = RecorderTermCfg(
@@ -125,7 +143,18 @@ def main():
     )
 
     # Create environment
-    env = gym.make(env_name, cfg=env_cfg).unwrapped
+    if args_cli.workspace:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.so101_mimic_env import SO101PickPlaceMimicEnv
+        env = SO101PickPlaceMimicEnv(cfg=env_cfg)
+    else:
+        env = gym.make(env_name, cfg=env_cfg).unwrapped
+
+    from soarm101_lab.workflow.presentation import attach
+    bridge = attach(env)
+    if bridge:
+        from soarm101_lab.workflow.progress import GenerationProgress
+        import isaaclab_mimic.datagen.generation as generation
+        bridge.progress_provider = GenerationProgress(generation)
 
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
@@ -212,6 +241,10 @@ def main():
                     planner.plan_visualizer.close()
                     planner.plan_visualizer = None
             motion_planners.clear()
+
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
+        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace)
 
 
 if __name__ == "__main__":

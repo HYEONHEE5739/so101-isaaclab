@@ -26,6 +26,7 @@ python scripts/tools/convert_isaac2lerobot.py \
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import h5py
@@ -44,7 +45,7 @@ parser.add_argument("--input_file", required=True)
 parser.add_argument("--repo_id", required=True)
 parser.add_argument("--root", required=True)
 parser.add_argument("--fps", type=int, default=30)
-parser.add_argument("--task", required=True)
+parser.add_argument("--task", default="", help="Legacy-only instruction; explicit episode Task Definition takes precedence")
 parser.add_argument("--robot_type", default="so101_follower_sim")
 
 parser.add_argument(
@@ -206,12 +207,12 @@ with h5py.File(input_file, "r") as h5:
         "observation.state": {
             "dtype": "float32",
             "shape": tuple(first_states[0].shape),
-            "names": None,
+            "names": source_coordinates.get("joint_order") if first_states.shape[-1] == 6 else None,
         },
         "action": {
             "dtype": "float32",
             "shape": tuple(first_actions[0].shape),
-            "names": None,
+            "names": source_coordinates.get("joint_order") if first_actions.shape[-1] == 6 else None,
         },
     }
 
@@ -280,8 +281,24 @@ with h5py.File(input_file, "r") as h5:
     # Convert demos
     # --------------------------------------------------------
 
+    from soarm101_lab.workflow.tasks import episode_definition
+    task_episodes = []
+    source_env_args = json.loads(h5['data'].attrs.get('env_args', '{}'))
     for demo_name in demo_names:
         demo = demos[demo_name]
+        definition = episode_definition(demo, source_env_args)
+        if definition is None:
+            import os
+            from soarm101_lab.workflow.tasks import TASK_ENV
+            if os.environ.get(TASK_ENV):
+                choices = json.loads(Path(os.environ[TASK_ENV]).read_text())['tasks']
+                if len(choices) != 1:
+                    raise ValueError('Legacy episodes require one explicit task definition')
+                definition = choices[0]
+        instruction = definition['language_instruction'] if definition else args.task
+        if not instruction:
+            raise ValueError('Missing episode Task Definition/instruction')
+        task_episodes.append({'episode_index': len(task_episodes), 'source_episode': demo_name, 'task_definition': definition})
 
         joint_pos_path = get_joint_pos_path(demo)
 
@@ -326,7 +343,7 @@ with h5py.File(input_file, "r") as h5:
             frame = {
                 "observation.state": states[t],
                 "action": actions[t],
-                "task": args.task,
+                "task": instruction,
             }
 
             for camera_name, images in camera_arrays.items():
@@ -352,6 +369,16 @@ dataset.finalize()
 write_contract(dataset_root, {**source_coordinates,
     "action_space": MIMIC_SPACE if first_action_source == "mimic_actions" else JOINT_SPACE,
     "source_dataset": str(input_file), "action_source": first_action_source})
+from soarm101_lab.representation import describe
+converted_coordinates = read_contract(dataset_root)
+with h5py.File(input_file, "r") as source_h5:
+    source_args = json.loads(source_h5["data"].attrs.get("env_args", "{}"))
+provenance = {"workspace": source_args.get("workspace"), "source_dataset": str(input_file),
+              "source_env_args": source_args, "action_source": first_action_source,
+              "episodes": task_episodes, "task_definitions": list({json.dumps(e["task_definition"], sort_keys=True): e["task_definition"] for e in task_episodes if e["task_definition"]}.values())}
+if converted_coordinates.get("provenance_status") != "legacy_unknown":
+    provenance["representation"] = describe(converted_coordinates)
+(dataset_root / "workflow_provenance.json").write_text(json.dumps(provenance, indent=2))
 
 print()
 print("=" * 70)
