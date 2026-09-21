@@ -21,7 +21,10 @@
 5. [TESTING.md](TESTING.md)  
    실행 성공이 아니라 correctness를 증명하기 위한 테스트/metric 기준.
 
-6. [CHANGELOG_AI.md](CHANGELOG_AI.md)  
+6. [REAL2SIM_ITERATION.md](REAL2SIM_ITERATION.md)  
+   Codex/agent가 bootstrap → paired capture → fitting → validation → 다음 iteration으로 scene을 반복 개선하는 실제 작업 프로토콜.
+
+7. [CHANGELOG_AI.md](CHANGELOG_AI.md)  
    큰 AI-generated 변경에서 문제, 접근, 변경 파일, 테스트, 미검증 영역, 위험을 기록.
 
 ## 실행 진입점
