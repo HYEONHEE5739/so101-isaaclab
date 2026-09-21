@@ -6,6 +6,23 @@ from .package import load, metadata
 from .reset import reset_workspace
 
 
+def deactivate_legacy_wrist_camera(robot_prim):
+    """Session-only override; never edit the referenced robot asset on disk."""
+    from pxr import Usd, UsdGeom
+    stage = robot_prim.GetStage()
+    camera = stage.GetPrimAtPath(robot_prim.GetPath().AppendPath('gripper/Camera_WristView'))
+    if camera and camera.IsA(UsdGeom.Camera):
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            camera.SetActive(False)
+
+
+def spawn_workspace_robot(prim_path, cfg, translation=None, orientation=None, **kwargs):
+    from isaaclab.sim.spawners.from_files import spawn_from_usd
+    robot = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
+    deactivate_legacy_wrist_camera(robot)
+    return robot
+
+
 def task_success(env, workspace):
     import torch
     from isaaclab.utils.math import subtract_frame_transforms, quat_apply
@@ -45,6 +62,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None):
     scene=cfg.scene
     scene.robot=SO101_FOLLOWER_CFG.copy();scene.robot.prim_path='{ENV_REGEX_NS}/Robot'
     scene.robot.spawn.usd_path=str(root/w['manifest']['robot_asset'])
+    scene.robot.spawn.func=spawn_workspace_robot
     scene.robot.init_state.pos,scene.robot.init_state.rot=pose(p['robot_base']['T_world'])
     scene.robot.init_state.joint_pos=copy.deepcopy(task['robot_initial_joint_rad'])
     scene.ee_frame=FrameTransformerCfg(prim_path='{ENV_REGEX_NS}/Robot/base',debug_vis=False,

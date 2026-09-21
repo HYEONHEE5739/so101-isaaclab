@@ -94,3 +94,27 @@ def test_demo_metadata_rejects_wrong_workspace(published,tmp_path):
         meta['version']=999;h['data'].attrs['env_args']=json.dumps({'workspace':meta})
     with pytest.raises(ValueError,match='differs'):verify_dataset(demo,path)
     assert coordinate_contract(w)['mapping']==w['manifest']['mapper']
+
+
+def test_legacy_camera_disabled_only_in_workspace_session():
+    from pxr import UsdGeom
+    from soarm101_lab.real2sim.workspaces.environment import deactivate_legacy_wrist_camera
+    asset = Usd.Stage.Open(str(package.ROOT / 'assets/SO101/usd/so101_isaaclab.usd'))
+    before = asset.GetRootLayer().ExportToString()
+    stage = Usd.Stage.CreateInMemory()
+    robot = stage.DefinePrim('/World/Robot', 'Xform')
+    robot.GetReferences().AddReference(asset.GetRootLayer().identifier)
+    legacy = stage.GetPrimAtPath('/World/Robot/gripper/Camera_WristView')
+    assert legacy and legacy.IsActive()
+    wrist = UsdGeom.Camera.Define(stage, '/World/Robot/gripper/Camera_WorkspaceWrist').GetPrim()
+    side = UsdGeom.Camera.Define(stage, '/World/Camera_Side').GetPrim()
+    overview = UsdGeom.Camera.Define(stage, '/World/Camera_Overview').GetPrim()
+    root_before = stage.GetRootLayer().ExportToString()
+    deactivate_legacy_wrist_camera(robot)
+    deactivate_legacy_wrist_camera(robot)  # Idempotent.
+    assert not legacy.IsActive()
+    assert all(p.IsActive() for p in (wrist, side, overview))
+    assert stage.GetRootLayer().ExportToString() == root_before
+    assert asset.GetRootLayer().ExportToString() == before
+    assert asset.GetPrimAtPath('/so101_calibrated/gripper/Camera_WristView').IsActive()
+    deactivate_legacy_wrist_camera(stage.DefinePrim('/World/NoCamera', 'Xform'))
