@@ -23,6 +23,7 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac Lab environments.")
+parser.add_argument("--generation_seed", type=int, default=None, help="Workspace Datagen seed; default: fresh seed per run")
 parser.add_argument("--workspace", help="Published workspace ID/path")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
@@ -112,12 +113,24 @@ def main():
         from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
         from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
         from isaaclab.managers import DatasetExportMode
-        validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
-        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs)
+        workspace, _ = validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
+        from soarm101_lab.real2sim.workspaces.reset import datagen_seed
+        from soarm101_lab.real2sim.storage import atomic
+        from pathlib import Path
+        seed = datagen_seed(workspace['task']['reset']['seed'], args_cli.generation_seed)
+        generation_provenance = dict(generation_seed=seed, workspace_reset_seed=workspace['task']['reset']['seed'],
+                                     seed_mode='automatic' if args_cli.generation_seed is None else 'explicit')
+        atomic(Path(args_cli.output_file).with_suffix('.generation.json'), generation_provenance)
+        print(f'[WORKFLOW] Datagen seed={seed} (workspace seed={workspace["task"]["reset"]["seed"]})', flush=True)
+        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs, randomization_seed=seed)
         env_name = env_cfg.env_name
         success_term = env_cfg.terminations.success
         env_cfg.terminations = None
-        env_cfg.datagen_config.generation_num_trials = args_cli.generation_num_trials or 10
+        target = 10 if args_cli.generation_num_trials is None else args_cli.generation_num_trials
+        if target < 1:
+            raise ValueError('Successful demo target must be positive')
+        env_cfg.datagen_config.generation_num_trials = target
+        print(f'[WORKFLOW] Datagen 목표: 성공 데이터 {target}개 (실패 시도 제외)', flush=True)
         env_cfg.recorders = ActionStateRecorderManagerCfg()
         env_cfg.recorders.dataset_export_dir_path = output_dir
         env_cfg.recorders.dataset_filename = output_file_name
@@ -154,7 +167,7 @@ def main():
     if bridge:
         from soarm101_lab.workflow.progress import GenerationProgress
         import isaaclab_mimic.datagen.generation as generation
-        bridge.progress_provider = GenerationProgress(generation)
+        bridge.progress_provider = GenerationProgress(generation, env.cfg.datagen_config.generation_num_trials)
 
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
@@ -202,6 +215,14 @@ def main():
 
         env.cfg.datagen_config.use_skillgen = True
 
+    from soarm101_lab.workflow.data_resume import deferred_interrupt
+    interrupt_boundary = deferred_interrupt()
+    original_step = env.step
+    def interruptible_step(*args, **kwargs):
+        interrupt_boundary()
+        return original_step(*args, **kwargs)
+    env.step = interruptible_step
+
     # Setup and run async data generation
     async_components = setup_async_generation(
         env=env,
@@ -221,8 +242,8 @@ def main():
             async_components["info_pool"],
             async_components["event_loop"],
         )
-    except asyncio.CancelledError:
-        print("Tasks were cancelled.")
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("[WORKFLOW] Datagen 중지 요청 · 완료 episode 저장 후 종료", flush=True)
     finally:
         # Cancel all async tasks when env_loop finishes
         data_gen_tasks.cancel()
@@ -242,9 +263,14 @@ def main():
                     planner.plan_visualizer = None
             motion_planners.clear()
 
+    env.close()  # close/flush recorder before opening the completed dataset
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
         preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace)
+        import h5py
+        import json
+        with h5py.File(args_cli.output_file, 'a') as dataset:
+            dataset['data'].attrs['generation_provenance'] = json.dumps(generation_provenance)
 
 
 if __name__ == "__main__":

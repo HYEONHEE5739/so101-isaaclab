@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt6.QtCore import QUrl, QTimer, Qt
 from PyQt6.QtGui import QDesktopServices, QPixmap, QShortcut, QKeySequence
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox,
-                            QPushButton, QLineEdit, QPlainTextEdit, QTextBrowser, QFileDialog, QMessageBox, QGridLayout, QScrollArea, QCheckBox, QSplitter, QToolButton, QDialog, QSpinBox, QDoubleSpinBox)
+                            QPushButton, QLineEdit, QPlainTextEdit, QTextBrowser, QFileDialog, QMessageBox, QGridLayout, QScrollArea, QCheckBox, QSplitter, QToolButton, QDialog, QSpinBox, QDoubleSpinBox, QListWidget, QListWidgetItem, QSizePolicy)
 from .artifacts import Registry, browse_directory
 from .operations import Operations, STAGES, default_python
 from ..real2sim.workspaces.package import ROOT, load, metadata
@@ -20,22 +20,51 @@ LABELS = {'accept': 'Revision 승인', 'publish': 'Publish Workspace', 'source':
 class WorkflowPanel(QWidget):
     def __init__(self, run_worker, parent=None):
         super().__init__(parent)
+        from .theme import STYLE
+        self.setStyleSheet(STYLE)
         self.run_worker = run_worker; self.registry = Registry(); self.service = Operations(self.registry)
         self.busy = False
         from .view import CameraView, LogTail
         self.log_tail = LogTail(); self.last_result = None
         outer = QVBoxLayout(self)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal); outer.addWidget(self.splitter)
+        outer.setContentsMargins(12, 12, 12, 12); outer.setSpacing(16)
+        header = QWidget(); header.setObjectName('dashboardHeader')
+        header_layout = QHBoxLayout(header)
+        title_box = QVBoxLayout()
+        brand = QLabel('SO-101  /  WORKSPACE'); brand.setObjectName('eyebrow')
+        self.dashboard_title = QLabel('Source Demo'); self.dashboard_title.setObjectName('dashboardTitle')
+        title_box.addWidget(brand); title_box.addWidget(self.dashboard_title)
+        header_layout.addLayout(title_box, 1)
+        settings_toggle = QPushButton('실행 설정'); settings_toggle.setCheckable(True); settings_toggle.setChecked(True)
+        header_layout.addWidget(settings_toggle)
+        outer.addWidget(header)
+        body = QHBoxLayout(); body.setSpacing(16); outer.addLayout(body, 1)
+        self.navigation_panel = QWidget(); self.navigation_panel.setObjectName('navigationPanel')
+        self.navigation_panel.setFixedWidth(200)
+        nav_layout = QVBoxLayout(self.navigation_panel)
+        nav_title = QLabel('WORKFLOW'); nav_title.setObjectName('eyebrow'); nav_layout.addWidget(nav_title)
+        self.navigation = QListWidget(); self.navigation.setObjectName('stageNavigation')
+        nav_layout.addWidget(self.navigation, 1)
+        nav_note = QLabel('단계를 선택하고\n입력을 확인한 뒤 실행하세요.'); nav_note.setWordWrap(True); nav_note.setObjectName('mutedLabel')
+        nav_layout.addWidget(nav_note)
+        body.addWidget(self.navigation_panel)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal); body.addWidget(self.splitter, 1)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumWidth(280)
         self.splitter.addWidget(scroll)
         viewer = QWidget(); display = QVBoxLayout(viewer); self.splitter.addWidget(viewer)
         self.splitter.setStretchFactor(0, 0); self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([350, 900])
+        self.splitter.insertWidget(0, viewer)
+        self.splitter.setStretchFactor(0, 1); self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([850, 390])
+        scroll.setObjectName('settingsPanel'); viewer.setObjectName('workspaceCanvas')
+        scroll.setMinimumWidth(320)
+        settings_toggle.toggled.connect(scroll.setVisible)
+        display.setContentsMargins(0, 0, 0, 0); display.setSpacing(12)
         content = QWidget(); scroll.setWidget(content)
         layout = QVBoxLayout(content)
-        layout.addWidget(QLabel('Workspace 선택 → Source Demo → Replay → Annotation'))
+        settings_title = QLabel('실행 설정'); settings_title.setObjectName('sectionTitle'); layout.addWidget(settings_title)
         self.section = QComboBox(); self.section.addItems(['Sim 작업 파이프라인', '환경 관리', '실제 로봇 평가'])
-        layout.addWidget(self.section)
+        nav_layout.insertWidget(1, self.section)
         form = QFormLayout(); form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows); layout.addLayout(form)
         self.main_form = form
         self.workspace = QLineEdit(); form.addRow('Workspace ID / 경로', self.workspace)
@@ -52,19 +81,22 @@ class WorkflowPanel(QWidget):
         self.stage = QComboBox()
         for k in ('source', 'replay', 'annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'): self.stage.addItem(LABELS[k], k)
         form.addRow('단계', self.stage)
-        self.inputs = QComboBox(); form.addRow('등록된 입력 artifact', self.inputs)
+        self.stage.hide(); form.labelForField(self.stage).hide()
+        self.inputs = QComboBox(); self.inputs.setMinimumContentsLength(16); self.inputs.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon); form.addRow('사용할 데이터 / 모델', self.inputs)
         self.kind = QComboBox(); form.addRow('수동 선택 파일 유형', self.kind)
         row = QGridLayout(); layout.addLayout(row)
         self.browse_buttons = []
         for index, (title, fn) in enumerate( [('입력 파일/폴더 선택', self.browse), ('입력 폴더 열기', self.open_folder),
-                          ('Workspace 선택', self.browse_workspace), ('Artifact 새로고침', self.refresh)]):
+                          ('Workspace 선택', self.browse_workspace), ('목록 새로고침', self.refresh)]):
             b = QPushButton(title); b.clicked.connect(lambda _, f=fn: self.guard(f)); row.addWidget(b, index // 2, index % 2); self.browse_buttons.append(b)
         from .task_ui import TaskSelector
         self.task_selector = TaskSelector(); layout.addWidget(self.task_selector)
         self.task_selector.changed.connect(self.update_ready)
-        advanced = QToolButton(); advanced.setText('실행 설정 · JSON 예시 / 항목 설명'); advanced.setCheckable(True)
+        self.task_selector.layout().setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        advanced = QToolButton(); advanced.setText('실행 설정 접기 / 펼치기'); advanced.setCheckable(True)
         layout.addWidget(advanced)
         self.primary = QWidget(); primary_form = QFormLayout(self.primary)
+        primary_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.port = QLineEdit('/dev/so101_leader'); primary_form.addRow('Leader port', self.port)
         self.episodes = QSpinBox(); self.episodes.setRange(1, 100000); primary_form.addRow('Episodes', self.episodes)
         self.episode_time = QDoubleSpinBox(); self.episode_time.setRange(.1, 3600); self.episode_time.setValue(20); self.episode_time.setSuffix(' s')
@@ -72,6 +104,40 @@ class WorkflowPanel(QWidget):
         primary_form.addRow('Episode Time', self.episode_time); primary_form.addRow('Reset Time', self.reset_time)
         self.annotation_mode = QComboBox(); self.annotation_mode.addItems(['자동 Annotation', '수동 Annotation'])
         primary_form.addRow('Annotation 방식', self.annotation_mode)
+        self.architecture = QComboBox()
+        self.architecture.addItem('SmolVLA — smolvla_base 파인튜닝', 'smolvla')
+        self.architecture.addItem('ACT', 'act')
+        primary_form.addRow('학습 모델', self.architecture)
+        self.architecture.currentIndexChanged.connect(self.update_ready)
+        self.resume_training = QCheckBox('이어서 학습')
+        self.resume_training.setToolTip('모델·optimizer·scheduler·step을 체크포인트에서 복원합니다.')
+        primary_form.addRow('학습 방식', self.resume_training)
+        self.resume_path = QLineEdit()
+        self.resume_path.setPlaceholderText('checkpoint 폴더: checkpoints/040000')
+        self.resume_browse = QPushButton('체크포인트 선택')
+        primary_form.addRow('Resume checkpoint', self.resume_path)
+        primary_form.addRow('폴더 선택', self.resume_browse)
+        self.resume_browse.clicked.connect(self.browse_checkpoint)
+        self.resume_training.toggled.connect(self.update_ready)
+        self.resume_path.textChanged.connect(self.update_ready)
+        self.resume_data = QLineEdit()
+        self.resume_data.setPlaceholderText('선택 사항: 이어 수집할 기존 HDF5')
+        self.resume_data_browse = QPushButton('이어 수집할 HDF5 선택')
+        primary_form.addRow('기존 완료 데이터', self.resume_data)
+        primary_form.addRow('이어 수집', self.resume_data_browse)
+        self.resume_data.textChanged.connect(self.update_ready)
+        self.resume_data_browse.clicked.connect(self.browse_resume_data)
+        self.eval_seed_mode = QComboBox()
+        self.eval_seed_mode.addItem('고정 seed — 모델 비교용', 'fixed')
+        self.eval_seed_mode.addItem('실행마다 랜덤 seed', 'random')
+        self.eval_seed = QSpinBox()
+        self.eval_seed.setRange(0, 2147483647)
+        primary_form.addRow('평가 배치 seed 방식', self.eval_seed_mode)
+        primary_form.addRow('평가 seed', self.eval_seed)
+        self.eval_seed_mode.currentIndexChanged.connect(
+            lambda: self.eval_seed.setEnabled(self.eval_seed_mode.currentData() == 'fixed'))
+        self.eval_seed_mode.currentIndexChanged.connect(self.update_ready)
+        self.eval_seed.valueChanged.connect(self.update_ready)
         layout.insertWidget(layout.count() - 1, self.primary)
         self.port.textChanged.connect(self.update_ready); self.episodes.valueChanged.connect(self.update_ready)
         self.annotation_mode.currentIndexChanged.connect(self.configure_stage)
@@ -79,18 +145,19 @@ class WorkflowPanel(QWidget):
         self.advanced_panel = QWidget(); options_layout = QVBoxLayout(self.advanced_panel)
         options_layout.setContentsMargins(0, 0, 0, 0)
         self.options_help = QTextBrowser(); self.options_help.setMinimumHeight(200)
-        options_layout.addWidget(self.options_help)
-        self.options = QPlainTextEdit(); self.options.setMinimumHeight(200)
-        options_layout.addWidget(QLabel('실행 JSON — 아래 기본값에서 필요한 값만 수정'))
+        self.options_help.hide() # retained schema reference for tooling
+        from .settings_form import SettingsForm
+        self.options = SettingsForm()
+        options_layout.addWidget(QLabel('체크한 항목을 적용합니다 · 해제하면 자동 기본값'))
         options_layout.addWidget(self.options)
-        restore = QPushButton('현재 단계 JSON을 기본 예시로 되돌리기')
+        restore = QPushButton('설정을 기본값으로 복원')
         restore.clicked.connect(self.reset_options); options_layout.addWidget(restore)
-        self.advanced_panel.hide()
+        self.advanced_panel.show(); advanced.setChecked(True)
         advanced.toggled.connect(self.advanced_panel.setVisible); layout.addWidget(self.advanced_panel)
         layout.addStretch()
         self.status = QLabel(); self.status.setWordWrap(True); display.addWidget(self.status)
-        self.run = QPushButton('선택 단계 Run'); self.run.clicked.connect(lambda: self.guard(self.execute)); display.addWidget(self.run)
-        self.stop = QPushButton('현재 workflow 중지'); self.stop.clicked.connect(self.service.cancel); display.addWidget(self.stop)
+        self.run = QPushButton('선택 단계 실행'); self.run.setObjectName('primaryAction'); self.run.clicked.connect(lambda: self.guard(self.execute)); display.addWidget(self.run)
+        self.stop = QPushButton('현재 workflow 중지'); self.stop.setObjectName('stopAction'); self.stop.clicked.connect(self.service.cancel); display.addWidget(self.stop)
         self.media_splitter = QSplitter(Qt.Orientation.Vertical); display.addWidget(self.media_splitter, 1)
         images = QWidget(); grid = QGridLayout(images); self.media_splitter.addWidget(images)
         self.images = images; self.image_grid = grid
@@ -123,6 +190,31 @@ class WorkflowPanel(QWidget):
             button = QPushButton(title); button.setEnabled(False)
             button.clicked.connect(lambda _, c=command: self.guard(lambda: self.control(c)))
             controls.addWidget(button); self.controls[command] = button
+        # Reorganize existing controls into a compact action bar and rounded cards.
+        display.removeWidget(self.status); display.removeWidget(self.run); display.removeWidget(self.stop)
+        action_card = QWidget(); action_card.setObjectName('actionCard')
+        action_layout = QHBoxLayout(action_card)
+        action_layout.addWidget(self.status, 1); action_layout.addWidget(self.run); action_layout.addWidget(self.stop)
+        display.insertWidget(0, action_card)
+        images.setObjectName('previewCard'); log_panel.setObjectName('logCard')
+        self.stage_summary.setObjectName('mutedLabel')
+        self.task_state.setObjectName('taskBadge')
+        self.result.setObjectName('console')
+        for card in (header, self.navigation_panel, action_card, images, log_panel):
+            card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        content.setObjectName('settingsContent')
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.status.setStyleSheet('background: transparent; padding: 6px;')
+        for label in self.feeds.values():
+            label.setStyleSheet('background: #141b23; border-radius: 14px; color: #8b9aaa;')
+        self.connection_settings = QToolButton()
+        self.connection_settings.setText('연결 · 실행 환경 설정'); self.connection_settings.setCheckable(True)
+        layout.insertWidget(1, self.connection_settings)
+        self.connection_settings.toggled.connect(self.toggle_connection_settings)
+        self.toggle_connection_settings(False)
+        self.inputs.currentIndexChanged.connect(self.update_input_tooltip)
+        self.navigation.currentRowChanged.connect(self.select_navigation)
+        self.sync_navigation()
         self.timer = QTimer(self); self.timer.timeout.connect(self.poll_preview); self.timer.start(100)
         self.shortcuts = []
         for key, command in [('Right', 'save'), ('Left', 'discard')]:
@@ -166,13 +258,41 @@ class WorkflowPanel(QWidget):
         try: fn()
         except Exception as exc: QMessageBox.warning(self, 'Workflow', str(exc))
 
+    def toggle_connection_settings(self, expanded):
+        for widget in (self.workspace, self.python):
+            widget.setVisible(expanded)
+            self.main_form.labelForField(widget).setVisible(expanded)
+
+    def update_input_tooltip(self):
+        identifier = self.inputs.currentData()
+        if identifier:
+            try:
+                self.inputs.setToolTip(self.registry.get(identifier)['path'])
+            except (OSError, ValueError):
+                pass
+
+    def sync_navigation(self):
+        self.navigation.blockSignals(True)
+        self.navigation.clear()
+        for i in range(self.stage.count()):
+            item = QListWidgetItem(f'{i + 1:02d}   {self.stage.itemText(i)}')
+            self.navigation.addItem(item)
+        self.navigation.setCurrentRow(self.stage.currentIndex())
+        self.navigation.blockSignals(False)
+
+    def select_navigation(self, row):
+        if row >= 0:
+            self.stage.setCurrentIndex(row)
+
     def changed(self):
         stage = self.stage.currentData()
         if not stage: return
+        self.sync_navigation()
+        self.dashboard_title.setText(LABELS.get(stage, stage))
         self.configure_stage()
-        self.primary.setVisible(stage in ('source', 'annotate'))
+        self.primary.setVisible(stage in ('source', 'annotate', 'train', 'datagen', 'sim_eval'))
         primary_form = self.primary.layout()
-        for widget, visible in ((self.port, stage == 'source'), (self.episodes, stage == 'source'), (self.episode_time, stage == 'source'), (self.reset_time, stage == 'source'), (self.annotation_mode, stage == 'annotate')):
+        for widget, visible in ((self.port, stage == 'source'), (self.episodes, stage == 'source'), (self.episode_time, stage == 'source'), (self.reset_time, stage == 'source'), (self.annotation_mode, stage == 'annotate'), (self.architecture, stage == 'train'), (self.resume_training, stage == 'train'), (self.resume_path, stage == 'train'), (self.resume_browse, stage == 'train'), (self.resume_data, stage in ('source', 'datagen')), (self.resume_data_browse, stage in ('source', 'datagen')), (self.eval_seed_mode, stage == 'sim_eval'), (self.eval_seed, stage == 'sim_eval')):
             widget.setVisible(visible); primary_form.labelForField(widget).setVisible(visible)
         from .option_help import help_html
         self.options_help.setHtml(help_html(stage))
@@ -186,7 +306,10 @@ class WorkflowPanel(QWidget):
         except Exception: workspace = None
         for a in self.registry.all():
             if a['type'] in allowed and (not workspace or not a.get('workspace') or a['workspace'] == workspace):
-                self.inputs.addItem(a['type'] + ' · ' + a['path'], a['id'])
+                path = Path(a['path'])
+                label = path.parent.name + ' / ' + path.name
+                self.inputs.addItem(label, a['id'])
+                self.inputs.setItemData(self.inputs.count() - 1, a['path'], Qt.ItemDataRole.ToolTipRole)
         index = self.inputs.findData(selected)
         self.inputs.setCurrentIndex(index if index >= 0 else self.inputs.count() - 1)
         self.inputs.blockSignals(False); self.sync_tasks(); self.update_ready()
@@ -195,6 +318,8 @@ class WorkflowPanel(QWidget):
         if self.busy:
             self.status.setText('RUNNING — 완료 후 output 검증 및 등록'); self.run.setEnabled(False); return
         try:
+            if self.inputs.currentData() is None:
+                raise ValueError('입력 데이터를 선택하세요.')
             artifact = self.registry.get(self.inputs.currentData())
             opts = self.stage_options()
             state, reason = self.service.readiness(self.stage.currentData(), artifact, self.workspace.text(), opts)
@@ -209,7 +334,11 @@ class WorkflowPanel(QWidget):
         else:
             path, _ = QFileDialog.getOpenFileName(self, 'Artifact 선택', directory, 'Artifacts (*.json *.hdf5 *.h5)')
         if path:
-            artifact = self.registry.register(kind, path)
+            if kind == 'policy':
+                from .policy import import_checkpoint
+                artifact = import_checkpoint(path, self.registry)
+            else:
+                artifact = self.registry.register(kind, path)
             if kind == 'workspace': self.workspace.setText(artifact['path'])
             self.refresh(); self.inputs.setCurrentIndex(self.inputs.findData(artifact['id']))
 
@@ -297,7 +426,7 @@ class WorkflowPanel(QWidget):
                 + '   |   Grasp (휴리스틱): ' + word(signals.get('grasp')) + '   |   컵 안 정지: ' + word(signals.get('place'))
                 + '\nEpisode 결과: ' + status.get('episode_outcome', '진행 중' if active else '대기')
                 + '   ' + status.get('outcome_reason', '')
-                + (f" · 시도 {status['attempts']} / 성공 {status['successes']} / 실패 {status['failures']}" if 'attempts' in status else ''))
+                + (f" · 시도 {status['attempts']} / 성공 {status['successes']} / 실패 {status['failures']} · 성공률 " + (f"{status['success_rate'] * 100:.1f}%" if status.get('success_rate') is not None else "—") if 'attempts' in status else ''))
             outcome = status.get('episode_outcome', '')
             color = '#dff3e3' if outcome.startswith('성공') else '#ffe4d9' if outcome.startswith('실패') else '#e9eef5'
             self.task_state.setStyleSheet(f'QLabel {{ background: {color}; color: #17202a; padding: 8px; }}')
@@ -327,14 +456,52 @@ class WorkflowPanel(QWidget):
             raise ValueError('실행 설정은 {"항목": 값} 형식의 JSON 객체여야 합니다.')
         stage = self.stage.currentData()
         if stage == 'source': opts.update(port=self.port.text(), episodes=self.episodes.value(), episode_time_s=self.episode_time.value(), reset_time_s=self.reset_time.value())
+        if stage in ('source', 'datagen') and self.resume_data.text().strip():
+            opts['resume_data'] = self.resume_data.text().strip()
+        if stage == 'sim_eval':
+            opts.update(eval_seed_mode=self.eval_seed_mode.currentData(), eval_seed=self.eval_seed.value())
+        if stage == 'train':
+            opts['architecture'] = self.architecture.currentData()
+            opts.pop('resume_checkpoint', None)
+            if self.resume_training.isChecked():
+                if not self.resume_path.text().strip():
+                    raise ValueError('이어서 학습할 checkpoint를 선택하세요.')
+                opts['resume_checkpoint'] = self.resume_path.text().strip()
         if stage == 'annotate': opts['auto'] = self.annotation_mode.currentIndex() == 0
         if stage in ('source', 'sim_eval', 'real_eval'):
             opts['tasks'] = self.task_selector.selection(evaluation=stage != 'source')
         return opts
 
+    def browse_resume_data(self):
+        path, _ = QFileDialog.getOpenFileName(self, '이어 수집할 완료 HDF5', '', 'HDF5 (*.hdf5 *.h5)')
+        if path:
+            self.resume_data.setText(path)
+
+    def browse_checkpoint(self):
+        path = QFileDialog.getExistingDirectory(self, '체크포인트 폴더 선택 (예: checkpoints/040000)')
+        if not path:
+            return
+        self.resume_path.setText(path)
+        root = Path(path).resolve()
+        if root.name == 'pretrained_model':
+            root = root.parent
+        try:
+            saved = json.loads((root / 'pretrained_model/train_config.json').read_text())
+            self.architecture.setCurrentIndex(self.architecture.findData(saved['policy']['type']))
+            opts = json.loads(self.options.toPlainText())
+            opts['steps'] = saved['steps']
+            self.options.setPlainText(json.dumps(opts, indent=2, ensure_ascii=False))
+        except (OSError, ValueError, KeyError):
+            pass  # readiness validation explains incomplete checkpoints
+        self.resume_training.setChecked(True)
+
     def reset_options(self):
         from .option_help import template
-        self.options.setPlainText(json.dumps(template(self.stage.currentData()), indent=2, ensure_ascii=False))
+        self.options.set_stage(self.stage.currentData())
+        values = template(self.stage.currentData())
+        if self.stage.currentData() == 'train':
+            values.pop('architecture', None)
+        self.options.setPlainText(json.dumps(values, indent=2, ensure_ascii=False))
 
     def change_section(self):
         groups = [('source', 'replay', 'annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'),
@@ -398,4 +565,9 @@ class WorkflowPanel(QWidget):
                         'sim_eval': 'Task별 평가 · Overview / Side / Wrist · episode 성공/실패',
                         'real_eval': '실제 카메라 및 실행 로그 · 실제 성공은 자동 판정하지 않음'}
         self.stage_summary.setText(descriptions.get(stage, LABELS.get(stage, '')))
+        actions = {'source': '데모 기록 시작', 'replay': '데모 재생', 'annotate': 'Annotation 시작',
+                   'datagen': '데이터 생성 시작', 'convert': '데이터셋 변환', 'train': '학습 시작',
+                   'sim_eval': 'Sim 평가 시작', 'real_eval': 'Real 평가 시작'}
+        self.run.setText(actions.get(stage, '선택 작업 실행'))
+        self.browse_buttons[2].setVisible(stage != 'source')
         self.update_ready()

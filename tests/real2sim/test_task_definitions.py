@@ -113,6 +113,8 @@ def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatc
     (dataset / 'meta/info.json').write_text('{"repo_id":"local/test"}')
     output = tmp_path / 'training'; checkpoint = output / 'checkpoints/last/pretrained_model'
     def fake_train(*args, **kwargs):
+        assert '--policy.path=lerobot/smolvla_base' in args[0]
+        assert '--policy.push_to_hub=false' in args[0]
         checkpoint.mkdir(parents=True)
         (checkpoint / 'config.json').write_text('{}')
         (checkpoint / 'model.safetensors').write_bytes(b'test-only')
@@ -123,3 +125,6 @@ def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatc
     provenance = json.loads((checkpoint / 'workflow_provenance.json').read_text())
     assert provenance['task_definitions'] == definitions
     assert provenance['training']['policy']['type'] == 'smolvla'
+    assert provenance['training']['policy']['pretrained_path'] == 'lerobot/smolvla_base'
+    assert provenance['training']['save_checkpoint'] is True
+    assert provenance['training']['rename_map']['observation.images.side_cam'] == 'observation.images.camera1'

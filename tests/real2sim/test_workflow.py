@@ -58,9 +58,9 @@ def test_compiled_static_collision(published):
 
 
 def test_four_anchor_bounds_repeatability(published):
-    w = copy.deepcopy(load(published[3])); w['task']['reset'].update(mode='four_anchors', xy_jitter_m=.015)
+    w = copy.deepcopy(load(published[3])); w['task']['reset'].update(mode='four_anchors', xy_jitter_m=.02)
     a, b = WorkspaceRandomizer(w), WorkspaceRandomizer(w)
-    for i in range(30):
+    for i in range(300):
         sample = a.sample(); assert sample == b.sample()
         assert sample['sampling']['sample_index'] == i + 1
         for p in sample['cube_positions'].values(): assert max(abs(p[0]), abs(p[1])) <= .053
@@ -151,7 +151,7 @@ def test_workflow_panel_shared_backend_and_no_autorun(tmp_path, monkeypatch):
     assert not calls
     assert panel.service.registry is registry
     assert panel.status.text().startswith('NOT_READY')
-    assert json.loads(panel.options.toPlainText())['architecture'] == 'smolvla'
+    assert panel.stage_options()['architecture'] == 'smolvla'
     panel.close()
 
 
@@ -191,3 +191,49 @@ def test_overview_framing_is_read_only(published):
     assert np.isfinite(eye).all()
     assert np.linalg.norm(quaternion) == pytest.approx(1)
     assert workspace['profile'] == original
+
+
+def test_readable_run_names():
+    import re
+    from soarm101_lab.workflow.operations import run_folder_name
+    artifact = {'tasks': [{'task_id': 'cube_red_to_cup_a'}]}
+    name = run_folder_name('annotate', artifact)
+    assert re.fullmatch(r'\d{8}_\d{6}_annotation_cube_red_to_cup_a_[0-9a-f]{8}', name)
+    assert run_folder_name('annotate', artifact) != name
+    assert '_cube_blue_to_cup_b_' in run_folder_name('source', artifact, options={'tasks': [{'task_id': 'cube_blue_to_cup_b'}]})
+    assert '_all_tasks_' in run_folder_name('sim_eval', artifact, options={'task_scope': 'all'})
+    assert '_multi_2_tasks_' in run_folder_name('train', {'tasks': [{'task_id': 'a'}, {'task_id': 'b'}]})
+    assert '_no_task_' in run_folder_name('publish', {})
+    assert '/' not in run_folder_name('source', {}, options={'tasks': [{'task_id': '../../bad/name'}]})
+
+
+def test_success_target_name_and_legacy_alias():
+    from soarm101_lab.workflow.operations import successful_demo_target
+    assert successful_demo_target({}) == 10
+    assert successful_demo_target({'num_successful_demos': 30}) == 30
+    assert successful_demo_target({'trials': 20}) == 20
+    with pytest.raises(ValueError):
+        successful_demo_target({'trials': 20, 'num_successful_demos': 30})
+    for value in (0, -1, True, 1.5):
+        with pytest.raises(ValueError): successful_demo_target({'num_successful_demos': value})
+
+
+def test_datagen_seed_changes_layout_without_mutating_workspace(published, monkeypatch):
+    from soarm101_lab.real2sim.workspaces.reset import datagen_seed
+    w = load(published[3]); before = copy.deepcopy(w)
+    import secrets
+    values = iter([w['task']['reset']['seed'], 12345, 67890])
+    monkeypatch.setattr(secrets, 'randbits', lambda bits: next(values))
+    seed = datagen_seed(w['task']['reset']['seed'])
+    assert seed == 12345
+    assert datagen_seed(w['task']['reset']['seed']) == 67890
+    a, b = WorkspaceRandomizer(w, seed), WorkspaceRandomizer(w, seed)
+    original = WorkspaceRandomizer(w)
+    assert a.sample() == b.sample()
+    different = a.sample()
+    assert different['cube_positions'] != original.sample()['cube_positions']
+    assert different['sampling']['seed'] == seed
+    assert w == before
+    with pytest.raises(ValueError): datagen_seed(0, 0)
+    with pytest.raises(ValueError): datagen_seed(0, -1)
+    assert datagen_seed(0, 12345) == 12345

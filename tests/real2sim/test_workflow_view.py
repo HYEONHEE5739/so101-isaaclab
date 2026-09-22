@@ -87,17 +87,66 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     panel = ui.WorkflowPanel(lambda *args: None)
     assert 'Episode Time' in panel.options_help.toPlainText()
     panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
-    assert json.loads(panel.options.toPlainText())['trials'] == 10
-    assert '생성 trial' in panel.options_help.toPlainText()
-    panel.options.setPlainText('{"trials": 3}')
-    assert panel.stage_options()['trials'] == 3
+    assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
+    assert '만들 성공 데이터 수' in panel.options_help.toPlainText()
+    panel.options.setPlainText('{"num_successful_demos": 3}')
+    assert panel.stage_options()['num_successful_demos'] == 3
     panel.reset_options()
-    assert json.loads(panel.options.toPlainText())['trials'] == 10
+    assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
     assert 'batch_size' in panel.options_help.toPlainText()
-    assert 'trials' not in json.loads(panel.options.toPlainText())
+    assert 'num_successful_demos' not in json.loads(panel.options.toPlainText())
     panel.options.setPlainText('[]')
     import pytest
     with pytest.raises(ValueError, match='JSON 객체'):
         panel.stage_options()
+    panel.close()
+
+
+def test_conversion_progress_hides_encoder_info_but_keeps_errors():
+    tail = LogTail()
+    assert not tail.relevant('Svt[info]: SVT [config]: preset / tune / pred struct : 8 / PSNR / random access')
+    assert tail.relevant('Svt[error]: Failed to encode frame')
+    assert tail.relevant('[WORKFLOW] LeRobot 변환 [####----------------] 10/50 episodes · 20.0%')
+    assert tail.relevant('[WORKFLOW] Episode 변환 완료 · dataset 최종 정리 중')
+
+
+def test_training_model_selector_owns_architecture(tmp_path, monkeypatch):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    panel = ui.WorkflowPanel(lambda *args: None)
+    assert panel.architecture.isHidden()
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    assert not panel.primary.isHidden() and not panel.architecture.isHidden()
+    assert 'architecture' not in json.loads(panel.options.toPlainText())
+    assert panel.stage_options()['architecture'] == 'smolvla'
+    panel.architecture.setCurrentIndex(panel.architecture.findData('act'))
+    panel.options.setPlainText('{"architecture": "smolvla", "steps": 42}')
+    assert panel.stage_options()['architecture'] == 'act'
+    assert panel.stage_options()['steps'] == 42
+    panel.reset_options()
+    assert panel.stage_options()['architecture'] == 'act'
+    panel.stage.setCurrentIndex(panel.stage.findData('convert'))
+    assert panel.architecture.isHidden()
+    panel.close()
+
+
+def test_dashboard_navigation_selects_existing_stage(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    panel = ui.WorkflowPanel(lambda *args: None)
+    assert panel.stage.isHidden()
+    panel.navigation.setCurrentRow(panel.stage.findData('train'))
+    assert panel.stage.currentData() == 'train'
+    assert panel.dashboard_title.text() == ui.LABELS['train']
+    panel.section.setCurrentIndex(1)
+    assert panel.navigation.count() == panel.stage.count()
+    assert panel.stage.currentData() == 'accept'
     panel.close()

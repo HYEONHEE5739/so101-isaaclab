@@ -8,20 +8,22 @@ from html import escape
 
 # key: (JSON type, suggested/default value, explanation)
 FIELDS = {
+    'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
     'output': ('문자열', '', '선택. 비우면 고유 run 폴더에 자동 저장합니다. 직접 지정할 때는 아직 존재하지 않는 경로를 사용하세요.'),
     'device': ('문자열', 'cuda:0', '실행 장치. 예: cuda:0. Isaac 작업에는 현재 NVIDIA GPU 설정을 유지하세요.'),
     'workspace_id': ('문자열', 'workspace_002', '필수. 새 workspace 이름. 기존 ID/version을 덮어쓰지 않습니다.'),
     'version': ('정수', 1, 'Workspace 버전 번호.'),
     'task_file': ('문자열', '', '필수. 실제 존재하는 task JSON 파일 경로를 입력하세요.'),
-    'trials': ('정수', 10, '생성 trial 설정. 성공 보장 여부에 따른 의미는 workspace Mimic generation 설정을 따릅니다.'),
+    'num_successful_demos': ('정수', 10, '만들 성공 데이터 수. 예: 10이면 성공 episode 10개까지 재시도합니다. 실패 시도는 포함하지 않으며 중지 버튼으로 중단할 수 있습니다.'),
     'repo_id': ('문자열', '', '필수. 예: my-account/so101-demo. 변환에서는 로컬 dataset 식별자이며 업로드는 별도 단계입니다.'),
     'architecture': ('문자열', 'smolvla', '학습 모델: smolvla 또는 act.'),
-    'steps': ('정수', 10000, '전체 학습 step 수.'),
+    'steps': ('정수', 10000, '총 목표 학습 step 수. Resume에서 40000 → 100000이면 추가 60000 step 학습합니다.'),
     'batch_size': ('정수', 8, '학습 batch 크기. GPU 메모리가 부족하면 줄이세요.'),
     'num_workers': ('정수', 0, '데이터 로더 worker 수. 0은 별도 worker 없이 실행합니다.'),
     'save_freq': ('정수', 1000, 'checkpoint 저장 간격(step).'),
     'dataset_repo_id': ('문자열', None, '선택. 생략하면 입력 dataset meta/info.json의 repo_id를 사용합니다.'),
-    'base_model': ('문자열', None, '선택. 사용할 pretrained 모델의 경로 또는 repo ID. 생략하면 모델의 기본 초기화 설정을 사용합니다.'),
+    'base_model': ('문자열', None, '선택. 사용할 pretrained 모델의 경로 또는 repo ID. SmolVLA는 생략해도 lerobot/smolvla_base로 파인튜닝합니다. ACT는 지정한 경우에만 pretrained 모델을 사용합니다.'),
+    'rename_map': ('객체', None, 'SmolVLA 기본: observation.images.side_cam → observation.images.camera1, observation.images.wrist_cam → observation.images.camera2. 다른 모델이면 입력 키에 맞춰 지정하세요.'),
     'policy_options': ('객체', {}, '선택. LeRobot 모델별 추가 config. type/device/push_to_hub/repo_id는 여기서 지정하지 않습니다.'),
     'episodes': ('정수', 1, '선택한 task마다 평가할 episode 수.'),
     'max_steps': ('정수', 300, 'episode당 최대 평가 step 수.'),
@@ -43,9 +45,9 @@ KEYS = {
     'source': ['device', 'output'],
     'replay': ['device', 'output'],
     'annotate': ['device', 'output'],
-    'datagen': ['trials', 'device', 'output'],
+    'datagen': ['num_successful_demos', 'generation_seed', 'device', 'output'],
     'convert': ['repo_id', 'output'],
-    'train': ['architecture', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'policy_options'],
+    'train': ['architecture', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
     'sim_eval': ['episodes', 'max_steps', 'device', 'output'],
     'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'episodes', 'max_steps', 'fps', 'enable_motion', 'device', 'output', 'calibration_dir'],
     'hf_dataset': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
@@ -70,6 +72,8 @@ def help_html(stage):
         value = '생략 가능' if default is None else json.dumps(default, ensure_ascii=False)
         rows.append(f'<p><b>{key}</b> · {kind} · 기본/예시 <code>{escape(value)}</code><br>{escape(description)}</p>')
     owned = 'Task는 위 Task Selector, 실행 모드와 Python은 위 입력란에서 설정합니다.'
+    if stage == 'train':
+        owned += ' 학습 모델은 위 학습 모델 드롭다운에서 선택합니다. 이어서 학습은 checkpoint를 선택하세요. Resume에서는 총 steps/output 외 학습 설정은 checkpoint에서 복원하며 결과는 새 출력 폴더에 저장합니다. JSON의 architecture보다 드롭다운 선택이 우선합니다.'
     if stage == 'source':
         owned += ' Leader port, Episodes, Episode Time, Reset Time도 위 전용 입력란에서 수정하세요.'
     if stage == 'annotate':

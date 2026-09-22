@@ -6,17 +6,25 @@ from .environment import make_config, task_success
 from .demo import verify_dataset, coordinate_contract
 
 
-def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False):
+def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, randomization_seed=None):
     from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
     from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
     from ...workflow.tasks import configured
     w = configured(load(workspace))
     base = make_config(workspace, device, num_envs)
+    from isaaclab.sensors import ContactSensorCfg
+    # One sensor per rigid body: Isaac filtered contacts are one-to-many.
+    for sensor, link in [('grasp_fixed_contact', 'gripper'), ('grasp_moving_contact', 'jaw')]:
+        setattr(base.scene, sensor, ContactSensorCfg(
+            prim_path='{ENV_REGEX_NS}/Robot/' + link, update_period=0.0,
+            filter_prim_paths_expr=['{ENV_REGEX_NS}/' + w['task']['pick']]))
     cfg = SO101PickPlaceMimicEnvCfg()
     # Replace the complete scene/reset; never translate legacy world positions.
     for name in ('scene', 'events', 'sim', 'decimation', 'workspace_metadata', 'workspace_package', 'workflow_workspace'):
         setattr(cfg, name, copy.deepcopy(getattr(base, name)))
-    cfg.seed = w['task']['reset']['seed']
+    if randomization_seed is not None:
+        cfg.events.reset_episode.params['randomization_seed'] = randomization_seed
+    cfg.seed = w['task']['reset']['seed'] if randomization_seed is None else randomization_seed
     if annotation:
         from ...tasks.manager_based.soarm101_lab.mdp.so101_ik_actions import SO101PinocchioIKAction
         class RecordedJointAction(SO101PinocchioIKAction):
@@ -30,6 +38,8 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False):
         cfg.actions.arm.class_type = RecordedJointAction
     cfg.actions.arm.urdf_path = str(w['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf')
     cfg.observations.policy = copy.deepcopy(base.observations.policy)
+    from .grasp import object_stably_grasped
+    cfg.observations.subtask_terms.grasp.func = object_stably_grasped
     cfg.observations.subtask_terms.grasp.params['object_cfg'] = SceneEntityCfg(w['task']['pick'])
     cfg.observations.task_state.place_success.func = task_success
     cfg.observations.task_state.place_success.params = {'workspace': w}
@@ -37,8 +47,8 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False):
     cfg.subtask_configs['tool0'][0].object_ref = w['task']['pick']
     cfg.subtask_configs['tool0'][1].object_ref = w['task']['place']
     cfg.datagen_config.name = w['manifest']['workspace_id']
-    cfg.datagen_config.seed = w['task']['reset']['seed']
-    cfg.datagen_config.generation_guarantee = False  # explicit finite number of attempts
+    cfg.datagen_config.seed = cfg.seed
+    cfg.datagen_config.generation_guarantee = True  # Stop at the requested number of successful demonstrations.
     cfg.env_name = 'SO101-Workspace-Mimic-v1'
     return cfg
 

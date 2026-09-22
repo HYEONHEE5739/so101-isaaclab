@@ -8,6 +8,41 @@ from ..real2sim.workspaces.demo import coordinate_contract
 from .policy import load_policy, observation
 
 
+
+def evaluation_seed(options):
+    mode = options.get('eval_seed_mode', 'fixed')
+    if mode == 'random':
+        import secrets
+        return secrets.randbelow(2**31)
+    if mode != 'fixed':
+        raise ValueError('eval_seed_mode must be fixed or random')
+    seed = options.get('eval_seed', 0)
+    if type(seed) is not int or not 0 <= seed < 2**31:
+        raise ValueError('eval_seed must be an integer in [0, 2147483647]')
+    return seed
+
+
+def episode_result(definition, episode, steps, success, details):
+    checks = {name: bool(details[key][0]) for name, key in
+              [('높이', 'height_ok'), ('컵 안쪽 벽', 'wall_ok'), ('정지 속도', 'speed_ok')]}
+    failed = [name for name, passed in checks.items() if not passed]
+    return dict(task_id=definition['task_id'], language_instruction=definition['language_instruction'],
+                episode=episode, steps=steps, success=success, checks=checks,
+                failure_conditions=failed,
+                outcome_reason='컵 안 정지 조건 충족' if success else '최대 step 도달 · 미충족: ' + ', '.join(failed))
+
+
+def log_evaluation(rows, task_id):
+    selected = [r for r in rows if r['task_id'] == task_id]
+    last = rows[-1]
+    wins = sum(r['success'] for r in selected)
+    total_wins = sum(r['success'] for r in rows)
+    print(f"[WORKFLOW] Sim 평가 {task_id} Episode {last['episode'] + 1}: "
+          f"{'성공' if last['success'] else '실패'} · {last['steps']} steps · {last['outcome_reason']}", flush=True)
+    print(f"[WORKFLOW] Task 성공률 {wins}/{len(selected)} ({100*wins/len(selected):.1f}%) · "
+          f"전체 누적 {total_wins}/{len(rows)} ({100*total_wins/len(rows):.1f}%)", flush=True)
+
+
 def evaluate(request):
     from .presentation import current, attach
     bridge = current()
@@ -33,14 +68,22 @@ def evaluate(request):
         if not definitions or len({t['task_id'] for t in definitions}) != len(definitions):
             raise ValueError('Select distinct evaluation tasks')
         rows = []
+        used_seed = None
         if stage == 'sim_eval':
             from isaaclab.envs import ManagerBasedEnv
-            from ..real2sim.workspaces.environment import make_config, task_success
-            env = ManagerBasedEnv(cfg=make_config(w['root'], device, task_definition=definitions[0]))
+            from ..real2sim.workspaces.environment import make_config, task_success_details
+            used_seed = evaluation_seed(opts)
+            cfg = make_config(w['root'], device, task_definition=definitions[0])
+            cfg.seed = used_seed
+            cfg.events.reset_episode.params['randomization_seed'] = used_seed
+            print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
+            atomic(str(request['output']) + '.seed.json', {'seed': used_seed, 'mode': opts.get('eval_seed_mode', 'fixed')})
+            env = ManagerBasedEnv(cfg=cfg)
             attach(env)
             try:
                 for definition, ep in [(d, e) for d in definitions for e in range(int(opts.get('episodes', 1)))]:
                     task = definition['language_instruction']
+                    print(f"[WORKFLOW] Sim 평가 시작 · {definition['task_id']} · Episode {ep + 1}/{int(opts.get('episodes', 1))}", flush=True)
                     env._workflow_task_workspace = configured(w, definition)
                     if bridge:
                         bridge.details.update(task_id=definition['task_id'], language_instruction=task, episode_index=ep + 1, episode_total=int(opts.get('episodes', 1)), episode_outcome='진행 중', outcome_reason='')
@@ -55,12 +98,16 @@ def evaluate(request):
                         if not torch.isfinite(action).all():
                             raise ValueError('Nonfinite policy action')
                         obs, _ = env.step(action.to(env.device))
-                        success = bool(task_success(env, w)[0])
+                        result, details = task_success_details(env, w)
+                        success = bool(result[0])
                         if success:
                             break
-                    rows.append({'task_id': definition['task_id'], 'language_instruction': task, 'episode': ep, 'steps': step + 1, 'success': success})
+                    rows.append(episode_result(definition, ep, step + 1, success, details))
+                    log_evaluation(rows, definition['task_id'])
+                    from ..real2sim.workspaces.diagnostics import report_place
+                    report_place(env, w)
                     if bridge:
-                        bridge.details.update(episode_outcome='성공' if success else '실패', outcome_reason='컵 안 정지 조건 충족' if success else '최대 step 도달, 컵 안 정지 조건 미충족'); bridge.status()
+                        bridge.details.update(episode_outcome='성공' if success else '실패', outcome_reason=rows[-1]['outcome_reason']); bridge.status()
             finally:
                 env.close()
         else:
@@ -110,8 +157,13 @@ def evaluate(request):
                     for camera in cameras.values():
                         camera.close()
         from .tasks import evaluation_metrics
+        if stage == 'sim_eval':
+            for definition in definitions:
+                subset = [r for r in rows if r['task_id'] == definition['task_id']]
+                wins = sum(r['success'] for r in subset)
+                print(f"[WORKFLOW] 평가 완료 · {definition['task_id']} · 성공 {wins}/{len(subset)} · 성공률 {100*wins/len(subset):.1f}%", flush=True)
         atomic(request['output'], {'status': 'SUCCEEDED', 'mode': stage, 'workspace': metadata(w),
-               'policy_artifact': artifact['id'], 'task_definitions': definitions,
+               'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
                'metrics_per_task': evaluation_metrics(definitions, rows, stage == 'sim_eval'), 'episodes' if stage == 'sim_eval' else 'steps': rows,
                'task_success': 'simulation geometric condition' if stage == 'sim_eval' else 'unmeasured; human review required'})
     except Exception:

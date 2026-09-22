@@ -150,3 +150,23 @@ def test_observation_diagnostics_preserve_policy(tmp_path, monkeypatch):
     bridge.observe(obs, force=True)
     assert bridge.details['task_signals'] == {'grasp': True, 'place': False}
     assert list(policy) == ['side_cam']
+
+
+def test_generation_success_target_progress():
+    from types import SimpleNamespace
+    from soarm101_lab.workflow.progress import GenerationProgress
+    g = SimpleNamespace(num_attempts=12, num_success=3, num_failures=9)
+    status = GenerationProgress(g, target=10)()
+    assert status['outcome_reason'] == '성공 데이터 3/10개'
+    assert status['attempts'] == 12 and status['failures'] == 9
+
+
+def test_generation_success_rate():
+    from types import SimpleNamespace
+    from soarm101_lab.workflow.progress import GenerationProgress
+    g = SimpleNamespace(num_attempts=0, num_success=0, num_failures=0)
+    progress = GenerationProgress(g, 10)
+    assert progress()['success_rate'] is None
+    g.num_attempts = 20; g.num_success = 8; g.num_failures = 12
+    status = progress()
+    assert status['success_rate'] == .4 and status['target_successes'] == 10

@@ -36,10 +36,19 @@ class SO101PickPlaceMimicEnv(ManagerBasedRLMimicEnv):
         )
 
     def _reset_idx(self, env_ids):
+        if hasattr(self, '_stable_grasp_trackers'):
+            for i in env_ids:
+                tracker = self._stable_grasp_trackers[int(i)]
+                from soarm101_lab.real2sim.workspaces.grasp import StableGrasp
+                # The workspace currently supports one env; preserve configured size.
+                self._stable_grasp_trackers[int(i)] = StableGrasp(tracker.dt, tracker.size)
         super()._reset_idx(env_ids)
 
         if hasattr(self, "_gripper_opened_once"):
             self._gripper_opened_once[env_ids] = False
+
+        if hasattr(self, "_grasp_signal_logged"):
+            self._grasp_signal_logged[env_ids] = False
 
         if hasattr(self, "_grasp_completed"):
             self._grasp_completed[env_ids] = False
@@ -304,12 +313,12 @@ class SO101PickPlaceMimicEnv(ManagerBasedRLMimicEnv):
 
         grasp = terms["grasp"][env_ids]
 
-        if torch.any(grasp):
-            print(
-                "🔥 GRASP SIGNAL TRUE:",
-                grasp.detach().cpu().numpy(),
-                flush=True,
-            )
+        if not hasattr(self, '_grasp_signal_logged'):
+            self._grasp_signal_logged = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        fresh = grasp.bool().reshape(-1) & ~self._grasp_signal_logged[env_ids].reshape(-1)
+        if torch.any(fresh):
+            print("[DIAGNOSTIC] GRASP SIGNAL TRUE (episode 최초 감지)", flush=True)
+        self._grasp_signal_logged[env_ids] |= grasp.bool().reshape(-1)
 
         return {
             "grasp": grasp,

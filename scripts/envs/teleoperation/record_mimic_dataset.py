@@ -351,7 +351,10 @@ def main():
     print('[WORKFLOW] Episode 0 시작 · 오른쪽: 저장/다음 · 왼쪽: 폐기/같은 배치 리셋', flush=True)
 
     try:
+        from soarm101_lab.workflow.data_resume import deferred_interrupt
+        interrupt_boundary = deferred_interrupt()
         while simulation_app.is_running():
+            interrupt_boundary()
 
             # ====================================================
             # Quit

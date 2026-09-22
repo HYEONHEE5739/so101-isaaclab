@@ -230,14 +230,22 @@ def replay_episode(
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.demo import restore_initial_state
         restore_initial_state(env, episode, env._workspace_source_quat_order)
+        if hasattr(env, '_stable_grasp_trackers'):
+            del env._stable_grasp_trackers
+        if hasattr(env, '_stable_grasp_diagnostics'):
+            del env._stable_grasp_diagnostics
+        if hasattr(env, '_grasp_completed'):
+            env._grasp_completed.zero_()
     else:
         env.reset_to(initial_state, None, is_relative=True)
 
+    from soarm101_lab.real2sim.workspaces.diagnostics import GraspReport
+    grasp_report = GraspReport()
     first_action = True
 
     for action_index, action in enumerate(actions):
         if action_index % 100 == 0:
-            print(f'[WORKFLOW] Annotation frame {action_index}/{len(actions)}', flush=True)
+            print(f'[DIAGNOSTIC] Annotation frame {action_index}/{len(actions)}', flush=True)
         current_action_index = action_index
         bridge = getattr(env, '_workflow_presentation', None)
         if bridge:
@@ -267,6 +275,12 @@ def replay_episode(
             if not torch.allclose(action_tensor[:, -1], target[:, -1], atol=1e-5):
                 raise ValueError('Source gripper action differs from recorded joint target')
         env.step(action_tensor)
+        grasp_report.observe(env)
+
+    grasp_report.report(env)
+    if args_cli.workspace and success_term is not None:
+        from soarm101_lab.real2sim.workspaces.diagnostics import report_place
+        report_place(env, success_term.params["workspace"])
 
     if success_term is not None:
         if not bool(success_term.func(env, **success_term.params)[0]):
@@ -294,7 +308,7 @@ def annotate_episode_in_auto_mode(
         return False
 
     if not success:
-        print("\tThe final task was not completed.")
+        print("[DIAGNOSTIC] The final task was not completed.")
         return False
 
     annotated_episode = env.recorder_manager.get_episode(0)
@@ -306,7 +320,7 @@ def annotate_episode_in_auto_mode(
 
         if not torch.any(signal_flags):
             success = False
-            print(f'\tDid not detect completion for subtask "{signal_name}".')
+            print(f'[DIAGNOSTIC] Did not detect completion for subtask "{signal_name}".')
 
     if args_cli.annotate_subtask_start_signals:
         subtask_start_signals = annotated_episode.data["obs"]["datagen_info"]["subtask_start_signals"]
@@ -316,7 +330,7 @@ def annotate_episode_in_auto_mode(
 
             if not torch.any(signal_flags):
                 success = False
-                print(f'\tDid not detect start for subtask "{signal_name}".')
+                print(f'[DIAGNOSTIC] Did not detect start for subtask "{signal_name}".')
 
     return success
 
@@ -384,7 +398,7 @@ def annotate_episode_in_manual_mode(
                 break
 
             if not task_success:
-                print("\tThe final task was not completed.")
+                print("[DIAGNOSTIC] The final task was not completed.")
                 return False
 
             print(

@@ -284,7 +284,10 @@ with h5py.File(input_file, "r") as h5:
     from soarm101_lab.workflow.tasks import episode_definition
     task_episodes = []
     source_env_args = json.loads(h5['data'].attrs.get('env_args', '{}'))
-    for demo_name in demo_names:
+    total_episodes = len(demo_names)
+    print(f"[WORKFLOW] LeRobot 변환 0/{total_episodes} episodes · 0.0%", flush=True)
+    for episode_index, demo_name in enumerate(demo_names, 1):
+        print(f"[WORKFLOW] Episode {episode_index}/{total_episodes} 변환 중 ({demo_name})", flush=True)
         demo = demos[demo_name]
         definition = episode_definition(demo, source_env_args)
         if definition is None:
@@ -356,7 +359,13 @@ with h5py.File(input_file, "r") as h5:
 
             dataset.add_frame(frame)
 
+        print(f"[WORKFLOW] Episode {episode_index}/{total_episodes} 영상 인코딩 / 저장 중", flush=True)
         dataset.save_episode()
+        completed = episode_index
+        bar = "#" * (completed * 20 // total_episodes)
+        bar = bar.ljust(20, "-")
+        print(f"[WORKFLOW] LeRobot 변환 [{bar}] {completed}/{total_episodes} episodes "
+              f"· {100 * completed / total_episodes:.1f}% · {demo_name} 저장 완료", flush=True)
 
         print(
             f"{demo_name}: {length} frames "
@@ -364,6 +373,7 @@ with h5py.File(input_file, "r") as h5:
         )
 
 
+print("[WORKFLOW] Episode 변환 완료 · dataset 최종 정리 중", flush=True)
 dataset.stop_image_writer()
 dataset.finalize()
 write_contract(dataset_root, {**source_coordinates,
@@ -385,3 +395,4 @@ print("=" * 70)
 print("DONE")
 print("=" * 70)
 print(f"LeRobotDataset: {dataset_root}")
+print(f"[WORKFLOW] LeRobot 변환 완료 · {total_episodes}/{total_episodes} episodes · 100% · {dataset_root}", flush=True)

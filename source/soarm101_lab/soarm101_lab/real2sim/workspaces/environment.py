@@ -23,7 +23,19 @@ def spawn_workspace_robot(prim_path, cfg, translation=None, orientation=None, **
     return robot
 
 
+# Contact/geometry tolerance, in meters; shared by annotation, datagen and evaluation.
+WALL_TOLERANCE_M = 0.001
+
+
+def inside_wall(radial_excess):
+    return (radial_excess <= WALL_TOLERANCE_M).all(1)
+
+
 def task_success(env, workspace):
+    return task_success_details(env, workspace)[0]
+
+
+def task_success_details(env, workspace):
     import torch
     from isaaclab.utils.math import subtract_frame_transforms, quat_apply
     workspace = getattr(env, '_workflow_task_workspace', workspace)
@@ -34,8 +46,18 @@ def task_success(env, workspace):
     pts=quat_apply(quat[:,None,:].expand(-1,8,-1).reshape(-1,4),corners[None].expand(env.num_envs,-1,-1).reshape(-1,3)).reshape(env.num_envs,8,3)+pos[:,None,:]
     h=cup['dimensions_m'][2];bottom=cup.get('bottom_diameter_m',cup['dimensions_m'][0])/2;top=cup['dimensions_m'][0]/2;wall=cup['wall_m']
     radius=bottom+(top-bottom)*(pts[:,:,2]+h/2)/h-wall
-    inside=(torch.linalg.vector_norm(pts[:,:,:2],dim=-1)<radius).all(1)&(pts[:,:,2]>-h/2+wall-.002).all(1)&(pts[:,:,2]<h/2).all(1)
-    return inside & (torch.linalg.vector_norm(cube.data.root_lin_vel_w,dim=-1)<task['success']['max_speed_m_s'])
+    radial_excess = torch.linalg.vector_norm(pts[:,:,:2],dim=-1)-radius
+    zmin, zmax = pts[:,:,2].min(1).values, pts[:,:,2].max(1).values
+    lower, upper = -h/2+wall-.002, h/2
+    height_ok = (zmin > lower) & (zmax < upper)
+    wall_ok = inside_wall(radial_excess)
+    speed = torch.linalg.vector_norm(cube.data.root_lin_vel_w,dim=-1)
+    speed_ok = speed < task['success']['max_speed_m_s']
+    return height_ok & wall_ok & speed_ok, dict(
+        pick=task['pick'], target=task['place'], height_ok=height_ok, wall_ok=wall_ok,
+        speed_ok=speed_ok, zmin=zmin, zmax=zmax, lower=lower, upper=upper,
+        radial_excess=radial_excess.max(1).values, speed=speed,
+        speed_limit=task['success']['max_speed_m_s'], wall_tolerance=WALL_TOLERANCE_M)
 
 
 def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None):

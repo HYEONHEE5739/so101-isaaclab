@@ -94,6 +94,8 @@ class Window(QMainWindow):
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.bus = Bus(self.workspace / "ipc")
+        from .launcher import RuntimeLauncher
+        self.runtime_launcher = RuntimeLauncher(self.bus, self.workspace, ROOT)
         self.worker = None
         self.cancel = Event()
         self.pending = {}
@@ -157,7 +159,7 @@ class Window(QMainWindow):
             ("Start", lambda: self.send("start")),
             ("Stop", self.stop),
             ("Capture", lambda: self.send("capture")),
-            ("Disconnect", lambda: self.send("disconnect")),
+            ("Disconnect / Sim 종료", self.disconnect_sim),
         ]:
             self.button(row, title, fn)
         settings = QWidget()
@@ -311,17 +313,43 @@ class Window(QMainWindow):
 
     def stop(self):
         self.cancel.set()
+        if self.runtime_launcher.pending is not None:
+            self.runtime_launcher.cancel_connect()
+            self.log.appendPlainText("자동 Connect 취소 · Isaac 프로세스는 유지됩니다.")
+            return
         self.send("stop")
 
     def connect_hw(self, preview=False):
         if self.worker and self.worker.isRunning():
             raise ValueError("진행 중인 보정 작업이 끝난 뒤 연결하세요")
         hardware = {k: v.text().strip() for k, v in self.fields.items() if k != "profile"}
-        self.send("connect", {"profile": self.profile_path(), "hardware": hardware, "preview_only": preview})
+        payload = {"profile": self.profile_path(), "hardware": hardware, "preview_only": preview}
+        identifier = self.runtime_launcher.connect(payload, self.workflow_panel.python.text().strip(),
+                                                   headless=self.workflow_panel.mode.currentData() == 'operator')
+        if identifier:
+            self.pending[identifier] = "connect"
+        else:
+            self.log.appendPlainText("Isaac 자동 시작 · 준비 후 Connect 실행 · 로그: " + str(self.runtime_launcher.log_path))
         atomic(self.workspace / "ui_settings.json", {k: v.text() for k, v in self.fields.items()})
+
+    def disconnect_sim(self):
+        if self.worker and self.worker.isRunning():
+            raise ValueError("보정 작업이 끝난 뒤 Disconnect를 실행하세요.")
+        identifier = self.runtime_launcher.disconnect()
+        if identifier:
+            self.pending[identifier] = "disconnect"
+        else:
+            self.log.appendPlainText("자동 연결 취소 · 시작 중인 Isaac 종료 요청")
 
     def refresh(self):
         atomic(self.bus.root / "ui_heartbeat.json", {"time": time.time()})
+        try:
+            identifier = self.runtime_launcher.poll()
+            if identifier:
+                self.pending[identifier] = "connect"
+                self.log.appendPlainText("Isaac 준비 완료 · Connect 요청 전송")
+        except Exception as exc:
+            self.log.appendPlainText("ERROR: " + str(exc))
         s = self.bus.status()
         fresh = self.bus.responsive(s)
         self.status.setText(
@@ -331,6 +359,8 @@ class Window(QMainWindow):
                 else "Isaac 연결 끊김 / 시작 대기 · 마지막 영상은 실시간이 아닙니다"
             )
         )
+        if self.runtime_launcher.pending is not None:
+            self.status.setText("Isaac 자동 시작 중 · 준비 후 연결됩니다.\n로그: " + str(self.runtime_launcher.log_path))
         availability = s.get("availability", {}) if fresh else {}
         quality = s.get("capture_quality") if fresh else None
         self.live_details.setText(
@@ -562,6 +592,7 @@ class Window(QMainWindow):
         )
 
     def closeEvent(self, event):
+        self.runtime_launcher.cancel_connect()
         self.cancel.set()
         self.workflow_panel.service.cancel()
         try:
@@ -583,6 +614,9 @@ def main():
     parser.add_argument("--workspace", default=str(ROOT / "outputs/real2sim"))
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
+    from ..workflow.theme import STYLE
+    app.setStyle("Fusion")
+    app.setStyleSheet(STYLE)
     w = Window(args.workspace)
     w.show()
     sys.exit(app.exec())

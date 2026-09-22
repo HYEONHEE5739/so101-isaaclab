@@ -36,7 +36,7 @@ def default_task(profile):
             'dynamic': dynamic, 'targets': targets, 'pick': 'cube_red', 'place': 'cup_a',
             'success': {'relation': 'contained_and_settled', 'max_speed_m_s': .03},
             'reset': {'seed': 0, 'margin_m': .01, 'clearance_m': .003, 'separation_m': .005,
-                      'support_object': 'marker', 'yaw_rad': [0., 0.], 'mode': 'four_anchors', 'xy_jitter_m': .015},
+                      'support_object': 'marker', 'yaw_rad': [0., 0.], 'mode': 'four_anchors', 'xy_jitter_m': .02},
             'physics': {'mass_kg': .02, 'static_friction': 1., 'dynamic_friction': 1.,
                         'restitution': 0., 'provenance': 'default_template'},
             'robot_initial_joint_rad': {'shoulder_pan': 0., 'shoulder_lift': -1.7453,

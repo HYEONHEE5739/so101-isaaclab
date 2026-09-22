@@ -10,6 +10,8 @@ import sys
 import time
 import uuid
 import signal
+import re
+from datetime import datetime
 from .artifacts import Registry, inspect_artifact
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import ROOT, load, metadata
@@ -33,10 +35,51 @@ STAGES = {
 }
 
 
+def successful_demo_target(options):
+    if ('num_successful_demos' in options and 'trials' in options
+            and options['num_successful_demos'] != options['trials']):
+        raise ValueError('num_successful_demos와 기존 trials 값이 다릅니다. 하나만 지정하세요.')
+    target = options.get('num_successful_demos', options.get('trials', 10))
+    if type(target) is not int or target < 1:
+        raise ValueError('num_successful_demos는 생성할 성공 데이터 수인 양의 정수여야 합니다.')
+    return target
+
+
 def default_python():
     # Explicitly configurable; do not use the GUI-only Python for Isaac.
     candidate = Path.home() / 'miniconda3/envs/lerobot-arena/bin/python'
     return str(candidate) if candidate.exists() else sys.executable
+
+
+def run_folder_name(stage, artifact, workspace='', options=None):
+    """Human-readable local timestamp and semantic task ID, never language text."""
+    from .tasks import from_artifact, catalog
+    opts = options or {}
+    definitions = from_artifact(artifact)
+    if stage in ('source', 'sim_eval', 'real_eval'):
+        definitions = opts.get('tasks') or definitions
+    label = 'no_task'
+    if stage in ('sim_eval', 'real_eval') and opts.get('task_scope') == 'all':
+        label = 'all_tasks'
+    else:
+        if not definitions:
+            try:
+                path = artifact['path'] if stage == 'source' else workspace
+                w = load(path) if path else None
+                if w:
+                    definitions = from_artifact(artifact, w)
+                    if not definitions and stage in ('source', 'sim_eval', 'real_eval'):
+                        definitions = [t for t in catalog(w) if t['pick_object_id'] == w['task']['pick']
+                                       and t['target_object_id'] == w['task']['place']]
+            except (ValueError, OSError, KeyError):
+                pass  # plan() records the actual validation failure in state.json.
+        if len(definitions) == 1:
+            label = definitions[0].get('task_id', 'no_task')
+        elif definitions:
+            label = f'multi_{len(definitions)}_tasks'
+    safe = lambda value: re.sub(r'[^a-zA-Z0-9_-]+', '_', str(value)).strip('_')[:80] or 'unknown'
+    stage_label = 'annotation' if stage == 'annotate' else stage
+    return f'{datetime.now():%Y%m%d_%H%M%S}_{safe(stage_label)}_{safe(label)}_{uuid.uuid4().hex[:8]}'
 
 
 class Operations:
@@ -69,6 +112,9 @@ class Operations:
         else:
             self.registry.verify(artifact)
         opts = dict(options)
+        if stage == 'datagen':
+            opts['num_successful_demos'] = successful_demo_target(opts)
+            opts.pop('trials', None)
         if any(k.lower() in ('token', 'api_key', 'password', 'hf_token') for k in opts):
             raise ValueError('Use local Hugging Face login/environment authentication, not workflow options')
         mode = opts.get('mode', 'operator' if opts.get('headless', True) else 'developer')
@@ -112,6 +158,20 @@ class Operations:
             coords = artifact.get('coordinates')
             if not coords or coords.get('action_space') != JOINT_SPACE:
                 raise ValueError('Policy stages require model joint-radian actions')
+        if stage in ('source', 'datagen') and opts.get('resume_data'):
+            from .data_resume import validate as validate_resume
+            count = validate_resume(stage, opts['resume_data'], metadata(w), definitions,
+                                    path if stage == 'datagen' else None)
+            key = 'episodes' if stage == 'source' else 'num_successful_demos'
+            target_count = int(opts.get(key, 1))
+            if target_count <= count:
+                raise ValueError(f'총 목표 episode 수는 기존 {count}개보다 커야 합니다.')
+            opts['resume_completed'] = count
+            opts['resume_target'] = target_count
+            opts[key] = target_count - count
+        if stage == 'train' and opts.get('resume_checkpoint'):
+            from .policy import resume_checkpoint
+            resume_checkpoint(opts['resume_checkpoint'], artifact, opts)
         if stage == 'publish' and artifact.get('revision', {}).get('status', '').upper() != 'ACCEPTED':
             raise ValueError('Accept revision first')
         required = {'publish': ('workspace_id', 'task_file'), 'source': ('port',),
@@ -159,7 +219,9 @@ class Operations:
             if stage == 'annotate' and opts.get('auto', True):
                 cli += ['--auto']
             if stage == 'datagen':
-                cli += ['--generation_num_trials', str(opts.get('trials', 10)), '--num_envs', '1']
+                cli += ['--generation_num_trials', str(opts['num_successful_demos']), '--num_envs', '1']
+                if opts.get('generation_seed') is not None:
+                    cli += ['--generation_seed', str(opts['generation_seed'])]
         elif stage == 'convert':
             cli += ['scripts/tools/convert_isaac2lerobot.py', '--input_file', path, '--root', str(output),
                     '--repo_id', opts['repo_id'], '--task', opts.get('task', ''), '--action_source', 'joint_targets']
@@ -176,7 +238,7 @@ class Operations:
     def run(self, stage, artifact, workspace='', options=None, notify=lambda message: None):
         self.cancelled = False
         self.cancel_time = None
-        run_dir = self.registry.root / 'runs' / uuid.uuid4().hex
+        run_dir = self.registry.root / 'runs' / run_folder_name(stage, artifact, workspace, options)
         run_dir.mkdir(parents=True)
         commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
         dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True)
@@ -212,20 +274,30 @@ class Operations:
                         code = process.wait(timeout=.5)
                         break
                     except subprocess.TimeoutExpired:
-                        if self.cancelled and self.cancel_time:
+                        if self.cancelled and self.cancel_time and stage not in ('source', 'datagen'):
                             elapsed = time.monotonic() - self.cancel_time
                             if elapsed > 5:
                                 try: os.killpg(process.pid, signal.SIGKILL if elapsed > 10 else signal.SIGTERM)
                                 except ProcessLookupError: pass
-            if self.cancelled:
+            resumable_stop = self.cancelled and stage in ('source', 'datagen')
+            if self.cancelled and not resumable_stop:
                 raise RuntimeError('Workflow cancelled; partial outputs were not registered')
+            if resumable_stop:
+                notify('중지 완료 · 저장된 episode 검증 중 (진행 중 episode는 제외)')
+            if stage in ('source', 'datagen') and (code == 0 or resumable_stop):
+                inspect_artifact(stage, target)
+                if plan['options'].get('resume_data'):
+                    from .data_resume import combine
+                    combine(plan['options']['resume_data'], target)
+                if resumable_stop:
+                    code = 0
             if code:
                 raise RuntimeError(f'Process exit {code}; log: {run_dir / "process.log"}')
             if stage == 'train':
                 target = target / 'checkpoints/last/pretrained_model'
             # Validate artifact content even when an Isaac shutdown masks a process failure.
             result = self.registry.register(plan['type'], target, parents=[artifact['id']], extra=state)
-            state.update(status='SUCCEEDED', artifact=result['id'])
+            state.update(status='STOPPED' if resumable_stop else 'SUCCEEDED', artifact=result['id'])
             notify('완료: ' + str(target))
             return result
         except Exception as exc:

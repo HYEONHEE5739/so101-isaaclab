@@ -4,9 +4,10 @@ import numpy as np
 
 
 class WorkspaceRandomizer:
-    def __init__(self, workspace):
+    def __init__(self, workspace, seed=None):
         self.workspace=workspace
-        self.rng=np.random.default_rng(workspace['task']['reset']['seed'])
+        self.seed = workspace['task']['reset']['seed'] if seed is None else seed
+        self.rng=np.random.default_rng(self.seed)
         self.sample_index = 0
 
     def sample(self):
@@ -38,10 +39,10 @@ class WorkspaceRandomizer:
             else:raise ValueError('Unable to place non-overlapping objects in workspace')
             placed[name]=[*xy,float(center[2]+half[2]+size[2]/2+r['clearance_m'])];sizes[name]=size
         self.sample_index += 1
-        return {'sampling': {'mode': mode, 'seed': r['seed'], 'sample_index': self.sample_index, 'xy_jitter_m': r.get('xy_jitter_m', 0)}, 'frame':'workspace','cube_positions':placed,'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
+        return {'sampling': {'mode': mode, 'seed': self.seed, 'sample_index': self.sample_index, 'xy_jitter_m': r.get('xy_jitter_m', 0)}, 'frame':'workspace','cube_positions':placed,'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
 
 
-def reset_workspace(env,env_ids,workspace,random_state=None):
+def reset_workspace(env,env_ids,workspace,random_state=None,randomization_seed=None):
     import torch
     from ..profile import pose
     from ..scene import apply_robot_appearance
@@ -50,7 +51,7 @@ def reset_workspace(env,env_ids,workspace,random_state=None):
     ids=torch.arange(env.num_envs,device=env.device) if env_ids is None else env_ids
     if len(ids)==0:return
     if random_state is None:
-        if not hasattr(env,'_workspace_randomizer'):env._workspace_randomizer=WorkspaceRandomizer(workspace)
+        if not hasattr(env,'_workspace_randomizer'):env._workspace_randomizer=WorkspaceRandomizer(workspace, seed=randomization_seed)
         random_state=env._workspace_randomizer.sample()
     if not isinstance(random_state,dict) or random_state.get('frame')!='workspace':
         raise ValueError('Expected workspace-local reset state; legacy world reset state is not compatible')
@@ -63,3 +64,18 @@ def reset_workspace(env,env_ids,workspace,random_state=None):
     robot=env.scene['robot'];q=torch.tensor([[random_state['joint_positions'][n] for n in robot.joint_names]],device=env.device)
     robot.write_joint_state_to_sim(q,torch.zeros_like(q),env_ids=ids);robot.set_joint_position_target(q,env_ids=ids)
     apply_robot_appearance(get_current_stage(),workspace['profile'])
+
+
+def datagen_seed(source_seed, requested=None):
+    """Fresh run seed by default; explicit seeds allow exact re-execution."""
+    if requested is not None:
+        if type(requested) is not int or not 0 <= requested < 2**32:
+            raise ValueError('generation_seed must be an integer in [0, 2**32)')
+        if requested == source_seed:
+            raise ValueError('generation_seed must differ from workspace reset seed')
+        return requested
+    import secrets
+    while True:
+        seed = secrets.randbits(32)
+        if seed != source_seed:
+            return seed

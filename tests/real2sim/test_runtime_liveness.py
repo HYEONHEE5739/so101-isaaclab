@@ -126,3 +126,19 @@ def test_building_status_precedes_environment_work(tmp_path, monkeypatch):
     finally:
         r.writer.shutdown()
         r.bus.close()
+
+
+def test_disconnect_replies_then_cleans_up_without_tick(tmp_path):
+    app = Mock(); app.is_running.return_value = True
+    r = Runtime(SimpleNamespace(workspace=str(tmp_path)), app)
+    r.stop = Mock(); r.disconnect_hardware = Mock(); r.tick = Mock()
+    r.env = Mock()
+    r.bus.commands = Mock(return_value=iter([{'id': 'disconnect-test', 'command': 'disconnect', 'payload': {}}]))
+    r.run()
+    assert r.shutdown_requested
+    r.tick.assert_not_called()
+    r.env.close.assert_called_once()
+    assert r.bus.status()['state'] == 'CLOSED'
+    import json
+    reply = json.loads((r.bus.root / 'reply_disconnect-test.json').read_text())
+    assert reply['ok'] and 'shutting down' in reply['result']

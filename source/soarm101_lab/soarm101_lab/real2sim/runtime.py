@@ -37,6 +37,7 @@ class Runtime:
         self.follower = None
         self.cameras = {}
         self.running = False
+        self.shutdown_requested = False
         self.activated = False
         self.state = "IDLE"
         self.message = "Choose profile with field provenance and Connect in PyQt"
@@ -489,8 +490,9 @@ class Runtime:
         if name == "disconnect":
             self.stop()
             self.disconnect_hardware()
-            self.state = "IDLE"
-            return "Disconnected"
+            self.state = "CLOSING"
+            self.shutdown_requested = True
+            return "Disconnected; Isaac runtime shutting down"
         if name == "capture":
             if not self.follower:
                 raise ValueError("Connect first")
@@ -542,6 +544,10 @@ class Runtime:
                     finally:
                         # Publish completion/error before the first potentially slow render.
                         self.publish()
+                    if self.shutdown_requested:
+                        break
+                if self.shutdown_requested:
+                    break
                 try:
                     self.tick()
                 except Exception as exc:

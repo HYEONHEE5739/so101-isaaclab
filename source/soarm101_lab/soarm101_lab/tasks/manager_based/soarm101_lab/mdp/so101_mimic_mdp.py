@@ -91,6 +91,10 @@ def object_grasped(
         & object_is_close
         & gripper_is_closed
     )
+    env._grasp_diagnostics = dict(distance=distance.detach(), gripper=gripper_pos.detach(),
+        opened=env._gripper_opened_once.clone(), close=object_is_close.detach(),
+        closed=gripper_is_closed.detach(), distance_limit=distance_threshold,
+        closed_limit=gripper_closed_threshold, open_limit=gripper_open_threshold)
     new_grasp = grasp_state & ~env._grasp_completed
 
     # if new_grasp[0].item():

@@ -47,6 +47,9 @@ class LogTail:
         if self.traceback:
             if line and not line.startswith((' ', 'Traceback')): self.traceback = False
             return True
+        if line.lstrip().startswith('[DIAGNOSTIC]'): return False
+        # Encoder configuration is noise in the summary; retain warnings/errors.
+        if line.lstrip().lower().startswith('svt[info]'): return False
         return bool(re.search(r'\[WORKFLOW\]|error|exception|out of memory|failed|failure|✅|❌|🛑|'
                               r'episode|annotat|exported|processed|subtask|final task|reset|saving|saved|replay|'
                               r'success|generation|trial|step:|loss|checkpoint|learning.rate', line, re.I)) and not line.startswith(('|', '+'))
