@@ -5,8 +5,11 @@ def report_place(env, workspace):
     value = lambda key: float(d[key][0].item())
     flag = lambda key: 'PASS' if bool(d[key][0]) else 'FAIL'
     print(f"[DIAGNOSTIC] Place {d['pick']} -> {d['target']} ({'PASS' if bool(result[0]) else 'FAIL'})", flush=True)
-    print(f"[DIAGNOSTIC] 높이 {flag('height_ok')}: 꼭짓점 Z [{value('zmin')*1000:.2f}, {value('zmax')*1000:.2f}] mm; 컵 로컬 허용 ({d['lower']*1000:.2f}, {d['upper']*1000:.2f}) mm", flush=True)
-    print(f"[DIAGNOSTIC] 안쪽 벽 {flag('wall_ok')}: 최대 반경 초과 {value('radial_excess')*1000:.2f} mm (허용 {d['wall_tolerance']*1000:.2f} mm 이하)", flush=True)
+    if workspace['task']['success']['relation'] == 'inside_region_and_settled':
+        print(f"[DIAGNOSTIC] Target-local region {flag('wall_ok')}: {workspace['task']['success']['bounds_m']}", flush=True)
+    else:
+        print(f"[DIAGNOSTIC] 높이 {flag('height_ok')}: 꼭짓점 Z [{value('zmin')*1000:.2f}, {value('zmax')*1000:.2f}] mm; 컵 로컬 허용 ({d['lower']*1000:.2f}, {d['upper']*1000:.2f}) mm", flush=True)
+        print(f"[DIAGNOSTIC] 안쪽 벽 {flag('wall_ok')}: 최대 반경 초과 {value('radial_excess')*1000:.2f} mm (허용 {d['wall_tolerance']*1000:.2f} mm 이하)", flush=True)
     print(f"[DIAGNOSTIC] 속도 {flag('speed_ok')}: {value('speed')*1000:.2f} mm/s < {d['speed_limit']*1000:.2f} mm/s", flush=True)
 
 

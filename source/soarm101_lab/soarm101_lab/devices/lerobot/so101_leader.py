@@ -10,6 +10,7 @@ import os
 import logging
 
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import torch
 
@@ -25,7 +26,7 @@ from soarm101_lab.devices.lerobot.motors import (
     MotorNormMode,
 )
 from .motors.feetech import FeetechMotorsBus, OperatingMode
-from soarm101_lab.assets import SO101_FOLLOWER_USD_JOINT_LIMLITS
+from soarm101_lab.so101_robot_spec import SO101_FOLLOWER_USD_JOINT_LIMLITS
 
 @dataclass
 class SO101LeaderCfg:
@@ -38,6 +39,9 @@ class SO101LeaderCfg:
 
     calibration_file_name: str = "so101_leader.json"
     """Name of calibration JSON file."""
+    use_precision: bool = True
+    precision_profile_root: str | None = None
+    urdf_path: str | None = None
 
 # SO101의 모터 구성
 SO101_MOTORS = {
@@ -133,10 +137,16 @@ class SO101Leader(DeviceBase):
     def advance(self) -> torch.Tensor:
         """Read joint positions and return as torch.Tensor."""
         # Bus already returns calibrated degrees / gripper percent, not raw encoders.
-        calibrated = self._get_raw_data()
-        # Preserve legacy fallback here; Real2Sim's strict reader raises on missing data.
-        calibrated = {n: calibrated.get(n, 0.0) for n in SO101_MOTOR_NAMES}
-        target = calibrated_to_urdf(calibrated)
+        if getattr(self, 'precision_mapper', None):
+            raw = self._bus.sync_read('Present_Position', normalize=False)
+            normalized = self._bus._normalize({self._bus.motors[n].id:v for n,v in raw.items()})
+            native = {n:normalized[self._bus.motors[n].id] for n in SO101_MOTOR_NAMES}
+            target = self.precision_mapper.raw_to_urdf(raw, native)
+        else:
+            calibrated = self._get_raw_data()
+            # Preserve historical fallback only when no approved precision mapping is in use.
+            calibrated = {n: calibrated.get(n, 0.0) for n in SO101_MOTOR_NAMES}
+            target = calibrated_to_urdf(calibrated)
         return torch.tensor([target[n] for n in SO101_MOTOR_NAMES], dtype=torch.float32)
 
     @property
@@ -164,6 +174,19 @@ class SO101Leader(DeviceBase):
     def connect(self) -> None:
         """Connect the motor bus and configure motors."""
         self._bus.connect()
+        if self.cfg.use_precision and self._bus.calibration:
+            from types import SimpleNamespace
+            from soarm101_lab.real2sim.hardware import attach_active_precision, calibration_record
+            import hashlib
+            urdf = Path(self.cfg.urdf_path) if self.cfg.urdf_path else Path(__file__).resolve().parents[5]/'assets/SO101/urdf/so101_isaaclab.urdf'
+            adapter = SimpleNamespace(device=self, metadata={'port':self.cfg.port,
+                'calibration':calibration_record(self._bus.calibration, self.calibration_path)})
+            try:
+                if not self._bus.is_calibrated: raise ValueError('Motor calibration differs; no configuration applied')
+                self.precision_mapper = attach_active_precision(adapter, 'leader', self.cfg.precision_profile_root,
+                                                               hashlib.sha256(urdf.read_bytes()).hexdigest())
+            except BaseException:
+                self._bus.disconnect(); raise
         self.configure()
         logger.info("SO101-Leader connected.")
 

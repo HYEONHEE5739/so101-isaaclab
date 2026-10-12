@@ -36,28 +36,6 @@ def scene_objects(p):
     return {n: o for n, o in [("table", p["table"]), *p["objects"].items()] if o["render_enabled"]}
 
 
-def require_metric_geometry(p, frame):
-    """A rendering proxy is never a measured landmark constraint."""
-    o = p["table"] if frame == "table" else p["objects"][frame.removeprefix("object:")]
-    if o["shape"] in ("cup", "cup_proxy") or o.get("dimensions_m") is None:
-        raise ValueError(f"{frame}: incomplete/proxy geometry is excluded from metric fitting")
-    if provenance(o, "dimensions_m") in ("provisional", "unmeasured"):
-        raise ValueError(f"{frame}: provisional geometry is excluded from metric fitting")
-    if o["T_workspace"] is None:
-        raise ValueError(f"{frame}: provide an explicit provisional or measured pose before fitting")
-
-
-def mark_fitted(p, group):
-    if group in ("side", "wrist"):
-        node, key = p["cameras"][group], "T_parent_camera"
-    elif group in ("robot_base", "workspace"):
-        node, key = p[group], "T_world"
-    else:
-        node = p["table"] if group == "table" else p["objects"][group.removeprefix("object:")]
-        key = "T_workspace"
-    node["provenance"][key] = "numerically_fitted"
-
-
 def derived_measurements(p):
     """Computed on demand, never stored as independent measurements."""
     result = {}
@@ -82,43 +60,6 @@ def derived_measurements(p):
     return result
 
 
-def upgrade_legacy(p):
-    """Conservative in-memory migration. Never rewrite old revisions or trust a blanket label."""
-    if p.get("schema") != "so101.real2sim/1":
-        return p
-    q = copy.deepcopy(p)
-    q["schema"] = SCHEMA
-    q.pop("geometry_source", None)
-    q["migration"] = {
-        "parent_hash": digest(p),
-        "note": "Legacy numbers retained as provisional; measurement/calibration evidence must be reviewed.",
-    }
-    q["revision"] = {"kind": "legacy_import", "parent": digest(p)}
-    q["robot_asset"] = dict(ROBOT_ASSET)
-    for name in ("robot_base", "workspace"):
-        q[name]["provenance"] = {"T_world": "provisional"}
-        q[name]["calibrated"] = False
-    if "size_m" in q["workspace"]:
-        q["workspace"]["provenance"]["size_m"] = "provisional"
-    for c in q["cameras"].values():
-        c["provenance"] = {k: "provisional" for k in ("T_parent_camera", "K", "distortion", "resolution")}
-        c["intrinsics_calibrated"] = c["extrinsics_calibrated"] = False
-        c["source"] = "Legacy render initialization; physical camera ground truth is unknown"
-    for o in [q["table"], *q["objects"].values()]:
-        o["render_enabled"] = True
-        o["provenance"] = {k: "provisional" for k in ("dimensions_m", "T_workspace")}
-        o["appearance"]["provenance"] = {k: "provisional" for k in ("color", "roughness")}
-        if o["shape"] == "cup":
-            o["shape"] = "cup_proxy"
-            o["provenance"]["wall_m"] = "provisional"
-            o["approximation"] = (
-                "Legacy cylindrical preview: bottom radius and bottom thickness are NOT measured; "
-                "excluded from fitting."
-            )
-    q["appearance"]["provenance"] = {"light_intensity": "provisional"}
-    return q
-
-
 def digest(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
@@ -136,18 +77,6 @@ def transform(value):
     return t
 
 
-def pose6(t):
-    t = transform(t)
-    return np.r_[t[:3, 3], Rotation.from_matrix(t[:3, :3]).as_rotvec()]
-
-
-def matrix(x):
-    t = np.eye(4)
-    t[:3, 3] = x[:3]
-    t[:3, :3] = Rotation.from_rotvec(x[3:]).as_matrix()
-    return t
-
-
 def pose(t):
     t = transform(t)
     q = Rotation.from_matrix(t[:3, :3]).as_quat()
@@ -155,8 +84,12 @@ def pose(t):
 
 
 def validate(p):
+    if p.get('simulation_joint_offsets_rad') is not None:
+        from ..so101_robot_spec import simulation_joint_offsets
+        from ..so101_joint_mapping import JOINTS
+        simulation_joint_offsets(p['simulation_joint_offsets_rad'], JOINTS)
     if p.get("schema") != SCHEMA:
-        raise ValueError(f"Expected {SCHEMA}; use load() to read legacy profiles conservatively")
+        raise ValueError(f"Expected {SCHEMA}")
     if "geometry_source" in p:
         raise ValueError("Whole-profile geometry_source is forbidden; use field provenance")
     if p.get("robot_asset") != ROBOT_ASSET:
@@ -173,8 +106,10 @@ def validate(p):
         size = np.asarray(p["workspace"]["size_m"], float)
         if size.shape != (2,) or not np.isfinite(size).all() or np.min(size) <= 0:
             raise ValueError("Workspace marker size must be positive XY")
-    for n in ["side", "wrist"]:
-        c = p["cameras"][n]
+    if not p["cameras"]: raise ValueError("At least one camera required")
+    for n, c in p["cameras"].items():
+        if not re.fullmatch("[A-Za-z_][A-Za-z0-9_]*", n) or n == "overview":
+            raise ValueError("Invalid or reserved camera ID")
         for key in ("T_parent_camera", "K", "distortion", "resolution"):
             provenance(c, key)
         for flag, keys in (
@@ -197,7 +132,7 @@ def validate(p):
             raise ValueError("Invalid image dimensions")
         if len(c["distortion"]) not in (4, 5, 8) or not np.isfinite(c["distortion"]).all():
             raise ValueError("Use OpenCV Brown distortion (4/5/8)")
-        if c["parent"] != ("world" if n == "side" else "gripper"):
+        if c["parent"] not in ("world", "gripper"):
             raise ValueError("Camera parent must match inspected SO101 mount")
     if "table" in p["objects"]:
         raise ValueError("table is a reserved object name")
@@ -295,60 +230,7 @@ def validate(p):
 
 
 def load(path):
-    return validate(upgrade_legacy(json.loads(Path(path).read_text())))
-
-
-def get_group(p, group):
-    if group == "side":
-        return p["cameras"]["side"]["T_parent_camera"]
-    if group == "wrist":
-        return p["cameras"]["wrist"]["T_parent_camera"]
-    if group in ("robot_base", "workspace"):
-        return p[group]["T_world"]
-    if group == "table":
-        return p["table"]["T_workspace"]
-    if group.startswith("object:"):
-        return p["objects"][group[7:]]["T_workspace"]
-    raise ValueError("Unknown parameter group: " + group)
-
-
-def set_group(p, group, t):
-    t = transform(t).tolist()
-    if group in ("side", "wrist"):
-        p["cameras"][group]["T_parent_camera"] = t
-    elif group in ("robot_base", "workspace"):
-        p[group]["T_world"] = t
-    elif group == "table":
-        p["table"]["T_workspace"] = t
-    elif group.startswith("object:"):
-        p["objects"][group[7:]]["T_workspace"] = t
-    else:
-        raise ValueError(group)
-
-
-def initial(measurements, style=None):
-    """Create a revision without promoting field provenance. Legacy agent is UI-independent."""
-    p = validate(copy.deepcopy(measurements))
-    if style:
-        for row in style["styles"]:
-            target = p["table"] if row["id"] == "table" else p["objects"].get(row["id"])
-            if target is None:
-                raise ValueError("Agent named an unmeasured object: " + row["id"])
-            if "shape" in row:
-                target["shape"] = row["shape"]
-            target["appearance"] = {
-                "color": row["color"], "roughness": row["roughness"],
-                "provenance": {"color": "provisional", "roughness": "provisional"},
-            }
-        p["appearance"]["light_intensity"] = style["light_intensity"]
-        p["appearance"]["provenance"]["light_intensity"] = "provisional"
-        p["agent_notes"] = style["notes"]
-    p["revision"] = {
-        "kind": "initial",
-        "geometry": "field provenance preserved",
-        "appearance": "agent approximation" if style else "user choices",
-    }
-    return validate(p)
+    return validate(json.loads(Path(path).read_text()))
 
 
 def render_k(camera):

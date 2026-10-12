@@ -18,7 +18,7 @@ def test_incremental_utf8_and_progress_filter(tmp_path):
     assert tail.relevant('torch.OutOfMemoryError: CUDA out of memory')
 
 
-def test_pipeline_starts_at_source_and_separates_management(tmp_path, monkeypatch):
+def test_pipeline_starts_at_source_without_retired_publication(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     from soarm101_lab.workflow.artifacts import Registry
@@ -33,8 +33,8 @@ def test_pipeline_starts_at_source_and_separates_management(tmp_path, monkeypatc
     assert len(panel.shortcuts) == 2
     assert panel.controls['discard'].text().startswith('리셋')
     panel.section.setCurrentIndex(1)
-    assert panel.stage.currentData() == 'accept' and panel.stage.findData('publish') >= 0
-    panel.section.setCurrentIndex(2)
+    assert panel.section.count() == 2
+    assert panel.stage.findData('publish') == -1
     assert panel.stage.currentData() == 'real_eval'
     assert panel.feeds['sim_side'].isHidden() and not panel.feeds['real_side'].isHidden()
     panel.close()
@@ -148,5 +148,5 @@ def test_dashboard_navigation_selects_existing_stage(tmp_path, monkeypatch):
     assert panel.dashboard_title.text() == ui.LABELS['train']
     panel.section.setCurrentIndex(1)
     assert panel.navigation.count() == panel.stage.count()
-    assert panel.stage.currentData() == 'accept'
+    assert panel.stage.currentData() == 'real_eval'
     panel.close()

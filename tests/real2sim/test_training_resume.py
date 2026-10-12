@@ -87,3 +87,47 @@ def test_intermediate_checkpoint_import_uses_training_provenance(tmp_path):
     (run / 'request.json').unlink()
     with pytest.raises(ValueError, match='provenance missing'):
         import_checkpoint(dest, Registry())
+
+
+def test_resume_output_is_original_folder(tmp_path):
+    import shutil
+    from soarm101_lab.workflow.policy import resume_output
+    root, artifact = checkpoint(tmp_path)
+    dest = tmp_path / 'policy/checkpoints/040000'
+    dest.parent.mkdir(parents=True)
+    shutil.move(root, dest)
+    assert resume_output(dest) == tmp_path / 'policy'
+    assert resume_output(dest / 'pretrained_model') == tmp_path / 'policy'
+    (tmp_path / 'mini').mkdir()
+    for name in ('last.pt', 'best.pt'): (tmp_path / 'mini' / name).touch()
+    assert resume_output(tmp_path / 'mini/last.pt', 'minivla') == tmp_path / 'mini'
+
+
+def test_minivla_resume_can_extend_steps_but_not_change_model():
+    from dataclasses import asdict
+    from soarm101_lab.learning.minivla.config import MiniVLAConfig
+    from soarm101_lab.learning.minivla.train import validate_resume
+    cfg = MiniVLAConfig()
+    saved = {'config': asdict(cfg), 'statistics': {'mean': [0.]}, 'control_hz': 30, 'step': cfg.steps}
+    cfg.steps += 100
+    validate_resume(saved, cfg, saved['statistics'], 30)
+    cfg.horizon += 1
+    with pytest.raises(ValueError, match='config/stats'): validate_resume(saved, cfg, saved['statistics'], 30)
+
+
+@pytest.mark.parametrize('backend', ['isaac', 'mujoco'])
+def test_workflow_resume_plan_reuses_training_output(tmp_path, monkeypatch, backend):
+    import shutil
+    from soarm101_lab.workflow.operations import Operations
+    from soarm101_lab.workflow.artifacts import Registry
+    root, artifact = checkpoint(tmp_path)
+    dest = tmp_path / 'policy/checkpoints/040000'
+    dest.parent.mkdir(parents=True); shutil.move(root, dest)
+    artifact.update(type='dataset', id='dataset', tasks=[{'task_id': 'pick', 'language_instruction': 'Pick the cube'}])
+    registry = Registry(tmp_path / 'registry')
+    monkeypatch.setattr(registry, 'verify', lambda *args: None)
+    run = tmp_path / 'resume_run'; run.mkdir()
+    plan = Operations(registry).plan('train', artifact, '',
+        {'resume_checkpoint': str(dest), 'steps': 100000, 'backend': backend}, run_dir=run)
+    assert plan['output'] == str(tmp_path / 'policy')
+    assert json.loads((run / 'request.json').read_text())['output'] == str(tmp_path / 'policy')

@@ -1,0 +1,54 @@
+[
+  {
+    "id": "same_scene_red",
+    "split": "test",
+    "instruction": "pick up the red cube and place it in the bin",
+    "robot_state": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "free_joint_poses": {},
+    "target_body": "red_cube",
+    "distractor_bodies": [
+      "blue_cube"
+    ],
+    "destination_center": [
+      null,
+      null,
+      null
+    ],
+    "destination_radius": 0.025,
+    "destination_z_tolerance": 0.015,
+    "seed": 42
+  },
+  {
+    "id": "same_scene_blue",
+    "split": "test",
+    "instruction": "pick up the blue cube and place it in the bin",
+    "robot_state": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "free_joint_poses": {},
+    "target_body": "blue_cube",
+    "distractor_bodies": [
+      "red_cube"
+    ],
+    "destination_center": [
+      null,
+      null,
+      null
+    ],
+    "destination_radius": 0.025,
+    "destination_z_tolerance": 0.015,
+    "seed": 42
+  }
+]

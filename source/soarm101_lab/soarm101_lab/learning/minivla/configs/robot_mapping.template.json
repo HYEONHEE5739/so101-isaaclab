@@ -1,0 +1,93 @@
+{
+  "xml": "YOUR_SO101_SCENE.xml",
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "units": [
+    "rad",
+    "rad",
+    "rad",
+    "rad",
+    "rad",
+    "fraction"
+  ],
+  "mj_joints": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "mj_actuators": [
+    "shoulder_pan_position",
+    "shoulder_lift_position",
+    "elbow_flex_position",
+    "wrist_flex_position",
+    "wrist_roll_position",
+    "gripper_position"
+  ],
+  "mj_per_canonical": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    null
+  ],
+  "mj_offset": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "lower": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    0
+  ],
+  "upper": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    1
+  ],
+  "max_velocity": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "eef_site": "eef",
+  "cameras": {
+    "side": "side",
+    "wrist": "wrist"
+  },
+  "finger_geom_groups": [
+    [
+      "left_finger_contact"
+    ],
+    [
+      "right_finger_contact"
+    ]
+  ],
+  "render_height": 480,
+  "render_width": 640,
+  "approach_radius_m": 0.04,
+  "lift_threshold_m": 0.015,
+  "transport_threshold_m": 0.04
+}

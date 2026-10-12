@@ -6,12 +6,14 @@ from .environment import make_config, task_success
 from .demo import verify_dataset, coordinate_contract
 
 
-def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, randomization_seed=None):
+def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, randomization_seed=None, coordinates=None):
     from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
     from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
     from ...workflow.tasks import configured
     w = configured(load(workspace))
-    base = make_config(workspace, device, num_envs)
+    from ..precision import uses_urdf_frame
+    identity_sim = uses_urdf_frame(coordinates)
+    base = make_config(workspace, device, num_envs, identity_sim=identity_sim)
     from isaaclab.sensors import ContactSensorCfg
     # One sensor per rigid body: Isaac filtered contacts are one-to-many.
     for sensor, link in [('grasp_fixed_contact', 'gripper'), ('grasp_moving_contact', 'jaw')]:
@@ -36,7 +38,10 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, 
                 self._joint_position_targets[:] = target
                 self._asset.set_joint_position_target(target, joint_ids=self._joint_ids)
         cfg.actions.arm.class_type = RecordedJointAction
-    cfg.actions.arm.urdf_path = str(w['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf')
+    urdf = w['root'] / 'assets/SO101/urdf/so101_sim.urdf'
+    if identity_sim or not urdf.exists():
+        urdf = w['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf'
+    cfg.actions.arm.urdf_path = str(urdf)
     cfg.observations.policy = copy.deepcopy(base.observations.policy)
     from .grasp import object_stably_grasped
     cfg.observations.subtask_terms.grasp.func = object_stably_grasped
@@ -82,8 +87,9 @@ def preserve_metadata(source, output, workspace):
         group = h['data']
         updated = json.loads(group.attrs.get('env_args', '{}'))
         from ...representation import describe
-        updated.update(representation=describe(coordinate_contract(w)), workspace=metadata(w), workspace_path=str(w['root']),
-                       so101_coordinates=coordinate_contract(w),
+        coordinates = args.get('so101_coordinates', coordinate_contract(w))
+        updated.update(representation=describe(coordinates), workspace=metadata(w), workspace_path=str(w['root']),
+                       so101_coordinates=coordinates,
                        grasp_object=w['task']['pick'], place_bin=w['task']['place'],
                        source_dataset=str(source), source_env_args=args)
         try:

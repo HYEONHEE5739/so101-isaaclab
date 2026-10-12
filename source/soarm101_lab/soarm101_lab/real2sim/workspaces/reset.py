@@ -3,6 +3,16 @@ import copy
 import numpy as np
 
 
+def source_seed(requested=None):
+    """Fresh Source run by default; explicit seeds preserve reproducibility."""
+    if requested is None:
+        import secrets
+        return secrets.randbits(32)
+    if type(requested) is not int or not 0 <= requested < 2**32:
+        raise ValueError('Source seed must be an integer in [0, 2**32)')
+    return requested
+
+
 class WorkspaceRandomizer:
     def __init__(self, workspace, seed=None):
         self.workspace=workspace

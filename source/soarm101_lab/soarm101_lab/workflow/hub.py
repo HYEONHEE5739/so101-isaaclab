@@ -28,6 +28,10 @@ def publish(artifact, options, output, api=None):
     if options.get('create_branch', False):
         api.create_branch(repo_id=repo, repo_type=kind, branch=revision, exist_ok=False)
     folder = Path(artifact['path'])
+    if kind == 'dataset' and artifact.get('format') == 'so101.canonical/1':
+        folder = folder / 'lerobot'
+        if not (folder / 'meta/info.json').is_file():
+            raise ValueError('Convert the canonical dataset to LeRobot before upload')
     commit = api.upload_folder(repo_id=repo, repo_type=kind, folder_path=str(folder), revision=revision,
                                ignore_patterns=['.cache/**', '.git/**', '.env*'], commit_message='Publish SO101 workflow artifact')
     commit = api.upload_file(repo_id=repo, repo_type=kind, revision=revision,

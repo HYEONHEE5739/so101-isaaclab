@@ -8,7 +8,7 @@ known,rest=p.parse_known_args()
 if known.command in ('teleop','source-demo'):
     script='teleop_so101.py' if known.command=='teleop' else 'record_mimic_dataset.py'
     os.environ['PYTHONPATH']=str(ROOT/'source/soarm101_lab')+os.pathsep+os.environ.get('PYTHONPATH','')
-    os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/envs/teleoperation'/script),'--workspace',known.workspace,*rest])
+    os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/teleoperation'/script),'--workspace',known.workspace,*rest])
 p.add_argument('--report');p.add_argument('--dataset');p.add_argument('--episode',default='demo_0');p.add_argument('--steps',type=int,default=60)
 from isaaclab.app import AppLauncher
 AppLauncher.add_app_launcher_args(p);args=p.parse_args();args.enable_cameras=True
@@ -22,14 +22,19 @@ try:
     from soarm101_lab.real2sim.workspaces.package import load,metadata
     from soarm101_lab.real2sim.workspaces.demo import verify_dataset,restore_initial_state,coordinate_contract,replay_fields
     from soarm101_lab.so101_dataset_contract import current_contract,write_contract,MIMIC_SPACE,require_joint_replay
-    sys.path.insert(0,str(ROOT/'scripts/envs/teleoperation'))
+    sys.path.insert(0,str(ROOT/'scripts/teleoperation'))
     import record_mimic_dataset as recording
-    w=load(args.workspace);out=ROOT/'outputs/real2sim/workspace_runs'/w['manifest']['workspace_id'];out.mkdir(parents=True,exist_ok=True)
+    w=load(args.workspace)
+    # Workflow reports and preview images belong to the same run directory.
+    out=Path(args.report).resolve().parent if args.report else ROOT/'outputs/workflow/runs'/('workspace_'+w['manifest']['workspace_id'])
+    out.mkdir(parents=True,exist_ok=True)
     dataset=Path(args.dataset) if args.dataset else out/'smoke.hdf5'
     if args.command=='replay':verify_dataset(dataset,args.workspace);require_joint_replay(dataset)
     from soarm101_lab.tasks.manager_based.soarm101_lab import SO101TeleopEnvCfg
     legacy_before=SO101TeleopEnvCfg().scene.to_dict()
-    cfg=make_config(args.workspace,args.device)
+    from soarm101_lab.real2sim.precision import uses_urdf_frame
+    from soarm101_lab.so101_dataset_contract import read_contract
+    cfg=make_config(args.workspace,args.device,identity_sim=uses_urdf_frame(read_contract(dataset)) if args.command=='replay' else False)
     assert SO101TeleopEnvCfg().scene.to_dict()==legacy_before, 'Legacy scene mutated'
     from soarm101_lab.workflow.presentation import attach
     env=ManagerBasedEnv(cfg=cfg);attach(env);obs,_=env.reset()
@@ -65,7 +70,7 @@ try:
         joint_errors=[];object_errors=[];camera_errors=[]
         for t,action in enumerate(ep.data['joint_targets']):
             if t % 100 == 0: print(f'[WORKFLOW] Replay {args.episode}: {t}/{len(ep.data["joint_targets"])}', flush=True)
-            for camera in ['side_cam','wrist_cam']:
+            for camera in [k for k in recorded_obs if k.endswith('_cam')]:
                 if camera in recorded_obs:
                     expected=recorded_obs[camera][t];camera_errors.append(float((obs['policy'][camera][0].float()-expected.float()).abs().mean()))
             obs,_=env.step(action.unsqueeze(0));joint_errors.append(float((env.scene['robot'].data.joint_pos[0]-recorded_joints[t]).abs().max()))
@@ -78,7 +83,7 @@ try:
         report_path.write_text(json.dumps(result,indent=2));print('REPLAY_RESULT',result,flush=True);reader.close()
         print(f'[WORKFLOW] Replay {args.episode} 완료: passed={result["passed"]}', flush=True)
         if not result['passed']:raise RuntimeError('Workspace replay verification failed; see report')
-    for view in ['side_cam','wrist_cam']:Image.fromarray(obs['policy'][view][0].detach().cpu().numpy().astype('uint8')).save(out/(view+'.png'))
+    for view in [k for k in obs['policy'] if k.endswith('_cam')]:Image.fromarray(obs['policy'][view][0].detach().cpu().numpy().astype('uint8')).save(out/(view+'.png'))
     env.close()
 except BaseException:
     import traceback

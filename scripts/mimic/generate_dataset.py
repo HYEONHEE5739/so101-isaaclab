@@ -113,7 +113,7 @@ def main():
         from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
         from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
         from isaaclab.managers import DatasetExportMode
-        workspace, _ = validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
+        workspace, source_args = validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
         from soarm101_lab.real2sim.workspaces.reset import datagen_seed
         from soarm101_lab.real2sim.storage import atomic
         from pathlib import Path
@@ -122,7 +122,8 @@ def main():
                                      seed_mode='automatic' if args_cli.generation_seed is None else 'explicit')
         atomic(Path(args_cli.output_file).with_suffix('.generation.json'), generation_provenance)
         print(f'[WORKFLOW] Datagen seed={seed} (workspace seed={workspace["task"]["reset"]["seed"]})', flush=True)
-        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs, randomization_seed=seed)
+        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs, randomization_seed=seed,
+                                   coordinates=source_args.get('so101_coordinates'))
         env_name = env_cfg.env_name
         success_term = env_cfg.terminations.success
         env_cfg.terminations = None
@@ -165,7 +166,7 @@ def main():
     from soarm101_lab.workflow.presentation import attach
     bridge = attach(env)
     if bridge:
-        from soarm101_lab.workflow.progress import GenerationProgress
+        from soarm101_lab.workflow.presentation import GenerationProgress
         import isaaclab_mimic.datagen.generation as generation
         bridge.progress_provider = GenerationProgress(generation, env.cfg.datagen_config.generation_num_trials)
 

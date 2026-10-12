@@ -3,6 +3,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from soarm101_lab.utils.constant import ASSETS_ROOT
+from soarm101_lab.so101_robot_spec import SO101_POSITION_GAINS, SO101_POSITION_FORCE_LIMIT
 
 SO101_FOLLOWER_ASSET_PATH = Path(ASSETS_ROOT) / "SO101" / "usd" / "so101_isaaclab.usd"
 SO101_WORLD_POS = (0.0, 0.0, 0.6) 
@@ -52,49 +53,49 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
         # ROTATION (Gear: 1/191, Torque: 34.4 N-m)
         "rotation": ImplicitActuatorCfg(
             joint_names_expr=["shoulder_pan"],
-            effort_limit_sim=30,
-            stiffness=55,        
-            damping=0.7,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["shoulder_pan"][0],
+            damping=SO101_POSITION_GAINS["shoulder_pan"][1],
         ),
         
         # PITCH (Gear: 1/345, Torque: 62.1 N-m - HIGHEST)
         "pitch": ImplicitActuatorCfg(
             joint_names_expr=["shoulder_lift"],
-            effort_limit_sim=30,
-            stiffness=30,        
-            damping=0.8,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["shoulder_lift"][0],
+            damping=SO101_POSITION_GAINS["shoulder_lift"][1],
         ),
         
         # ELBOW (Gear: 1/191, Torque: 34.4 N-m)
         "elbow": ImplicitActuatorCfg(
             joint_names_expr=["elbow_flex"],
-            effort_limit_sim=30,
-            stiffness=25,        
-            damping=0.7,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["elbow_flex"][0],
+            damping=SO101_POSITION_GAINS["elbow_flex"][1],
         ),
         
         # WRIST PITCH (Gear: 1/147, Torque: 26.5 N-m)
         "wrist_pitch": ImplicitActuatorCfg(
             joint_names_expr=["wrist_flex"],
-            effort_limit_sim=30,
-            stiffness=12,        
-            damping=0.5,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["wrist_flex"][0],
+            damping=SO101_POSITION_GAINS["wrist_flex"][1],
         ),
         
         # WRIST ROLL (Gear: 1/147, Torque: 26.5 N-m)
         "wrist_roll": ImplicitActuatorCfg(
             joint_names_expr=["wrist_roll"],
-            effort_limit_sim=30,
-            stiffness=7,         
-            damping=0.5,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["wrist_roll"][0],
+            damping=SO101_POSITION_GAINS["wrist_roll"][1],
         ),
         
         # GRIPPER (Gear: 1/147, Torque: 26.5 N-m)
         "gripper": ImplicitActuatorCfg(
             joint_names_expr=["gripper"],
-            effort_limit_sim=30,
-            stiffness=4,         
-            damping=0.3,         
+            effort_limit_sim=SO101_POSITION_FORCE_LIMIT,
+            stiffness=SO101_POSITION_GAINS["gripper"][0],
+            damping=SO101_POSITION_GAINS["gripper"][1],
         ),
     },
 )

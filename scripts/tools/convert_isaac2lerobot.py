@@ -222,7 +222,8 @@ with h5py.File(input_file, "r") as h5:
 
     camera_paths = {}
 
-    for camera_name in ("side_cam", "wrist_cam"):
+    obs_group = first["obs/policy"] if exists(first, "obs/policy") else first["obs"]
+    for camera_name in sorted(k for k in obs_group if k.endswith("_cam")):
         candidates = [
             f"obs/policy/{camera_name}",
             f"obs/{camera_name}",

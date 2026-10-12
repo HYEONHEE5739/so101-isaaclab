@@ -80,6 +80,7 @@ def test_measured_pose_writes_mapped_targets_without_follower_command():
         def update(self,*args): pass
     r=Runtime.__new__(Runtime);r.ids=list(range(6));r.env=SimpleNamespace(scene=Scene(scene),device='cpu',step_dt=.03,
         sim=SimpleNamespace(forward=lambda:None,render=lambda:None))
+    r.profile={'cameras': {'side': {}, 'wrist': {}}}
     r.set_measured_pose(native)
     np.testing.assert_allclose(writes[0].numpy()[0],list(to_sim(native).values()),atol=1e-7)
     assert torch.equal(writes[0],writes[1])
@@ -118,7 +119,7 @@ def test_mimic_cartesian_delta_and_generated_joint_recorder_keep_model_coordinat
     monkeypatch.setitem(sys.modules,'isaaclab',SimpleNamespace(utils=SimpleNamespace(math=fake_math)))
     monkeypatch.setitem(sys.modules,'isaaclab.utils',SimpleNamespace(math=fake_math))
     monkeypatch.setitem(sys.modules,'isaaclab.utils.math',fake_math)
-    delta=function_from_source('scripts/envs/teleoperation/record_mimic_dataset.py','pose_delta_action',{})
+    delta=function_from_source('scripts/teleoperation/record_mimic_dataset.py','pose_delta_action',{})
     prev=torch.tensor([.1,.2,.3,1.,0,0,0]);nxt=prev.clone();nxt[:3]+=torch.tensor([.01,-.02,.03])
     g=torch.tensor(.37);a=delta(prev,nxt,g)
     torch.testing.assert_close(a,torch.tensor([.01,-.02,.03,0,0,0,.37]))

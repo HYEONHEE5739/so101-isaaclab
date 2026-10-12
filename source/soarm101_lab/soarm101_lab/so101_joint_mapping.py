@@ -11,6 +11,7 @@ import math
 import numpy as np
 
 JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper')
+POLICY_UNITS = ('rad',) * 5 + ('fraction',)
 
 
 @dataclass(frozen=True)
@@ -89,9 +90,56 @@ def urdf_to_calibrated(values):
 
 def require_capture_mapping(state):
     recorded = state.get('sim_joint_mapping')
+    if recorded and recorded.get('schema') == 'so101.precision-joint-mapping/1':
+        from .real2sim.precision import mapper_from_metadata
+        mapper_from_metadata(recorded)
+        return
     expected = DEFAULT_MAPPER.metadata()['sha256']
     if recorded is None:
         if expected != LEGACY_MAPPER.metadata()['sha256']:
             raise ValueError('Legacy capture has no mapping identity; explicit migration required')
     elif recorded.get('sha256') != expected:
         raise ValueError('Capture Sim joint mapping differs; explicit remapping/FK revision required')
+
+
+class RobotCoordinates:
+    def __init__(self, closed_rad=None, open_rad=None):
+        mapper = DEFAULT_MAPPER.metadata()
+        self.closed = mapper['gripper_zero_offset_rad'] if closed_rad is None else float(closed_rad)
+        self.open = self.closed + 100 * mapper['gripper_rad_per_percent'] if open_rad is None else float(open_rad)
+        if not np.isfinite([self.closed, self.open]).all() or self.open <= self.closed:
+            raise ValueError('Explicit finite increasing closed/open gripper endpoints required')
+        self.saturated_states = 0
+
+    def metadata(self):
+        return {'schema': 'so101.minivla-coordinates/1', 'joint_order': list(JOINTS),
+                'model_units': ['rad'] * 6, 'policy_units': list(POLICY_UNITS),
+                'gripper_closed_rad': self.closed, 'gripper_open_rad': self.open,
+                'source': 'configured endpoints; default is existing hardware-percent mapper, legacy_unverified',
+                'measured_gripper_saturation_tolerance_fraction': .02,
+                'measured_state_saturations': self.saturated_states}
+
+    @staticmethod
+    def _array(value):
+        q = np.array(value, dtype=np.float64, copy=True)
+        if q.ndim < 1 or q.shape[-1] != 6 or not np.isfinite(q).all():
+            raise ValueError('Expected finite (...,6) joint vector')
+        return q
+
+    def to_policy(self, model_rad, measured=False):
+        q = self._array(model_rad)
+        q[..., 5] = (q[..., 5] - self.closed) / (self.open - self.closed)
+        tolerance = .02 if measured else 1e-6
+        if np.any(q[..., 5] < -tolerance) or np.any(q[..., 5] > 1 + tolerance):
+            raise ValueError('Gripper outside declared canonical endpoints')
+        clipped = np.clip(q[..., 5], 0, 1)
+        self.saturated_states += int(np.count_nonzero(clipped != q[..., 5])) if measured else 0
+        q[..., 5] = clipped
+        return q.astype(np.float32)
+
+    def to_model(self, canonical):
+        q = self._array(canonical)
+        if np.any(q[..., 5] < 0) or np.any(q[..., 5] > 1):
+            raise ValueError('Canonical gripper must be fraction [0,1]')
+        q[..., 5] = self.closed + q[..., 5] * (self.open - self.closed)
+        return q

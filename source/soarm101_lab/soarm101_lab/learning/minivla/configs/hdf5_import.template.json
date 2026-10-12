@@ -1,0 +1,37 @@
+{
+  "raw_joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ],
+  "arm_units": "rad",
+  "raw_gripper_range": [
+    0,
+    100
+  ],
+  "image_order": "RGB",
+  "control_hz": 30,
+  "action_semantics": "absolute_target_after_observation",
+  "episodes": [
+    {
+      "id": "episode_000",
+      "file": "YOUR_DEMO.hdf5",
+      "split": "train",
+      "group_id": "source_demo_000",
+      "instruction": "pick up the red cube and place it in the bin",
+      "state_key": "observations/qpos",
+      "action_key": "action",
+      "timestamp_key": "timestamp",
+      "action_timestamp_key": "action_timestamp",
+      "cameras": {
+        "side": {
+          "image_key": "observations/images/side",
+          "timestamp_key": "camera_timestamp"
+        }
+      }
+    }
+  ]
+}

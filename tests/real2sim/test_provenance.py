@@ -1,4 +1,4 @@
-"""Bootstrap/schema regressions. No hardware, renderer, or network connection."""
+"""Profile provenance, scene authoring and UI isolation; no real hardware."""
 
 import copy
 import json
@@ -9,18 +9,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from soarm101_lab.real2sim import calibration, profile, scene, storage
+from soarm101_lab.real2sim import profile, scene, storage
 
 ROOT = Path(__file__).resolve().parents[2]
-TEMPLATE = ROOT / "docs/real2sim/measurements.example.json"
+TEMPLATE = ROOT / "tests/real2sim/fixtures/partial_profile.json"
 
 
-def bootstrap():
+def partial_profile():
     return profile.load(TEMPLATE)
 
 
 def legacy():
-    p = bootstrap()
+    p = partial_profile()
     p["schema"] = "so101.real2sim/1"
     p["geometry_source"] = "user_measured"
     p.pop("relations")
@@ -33,7 +33,7 @@ def legacy():
 
 
 def test_supplied_measurements_and_computed_values():
-    p = bootstrap()
+    p = partial_profile()
     assert p["robot_asset"]["source"] == "model_asset"
     assert p["objects"]["cube"]["dimensions_m"] == [0.024] * 3
     assert p["workspace"]["size_m"] == [0.150] * 2
@@ -56,8 +56,9 @@ def test_supplied_measurements_and_computed_values():
 
 
 def test_unknown_state_is_not_promoted_by_saving(tmp_path):
-    p = bootstrap()
-    path = storage.revision(tmp_path, p)
+    p = partial_profile()
+    path = tmp_path / "profile.json"
+    storage.atomic(path, profile.validate(p))
     saved = profile.load(path)
     assert saved == p
     assert "geometry_source" not in saved
@@ -75,48 +76,38 @@ def test_unknown_state_is_not_promoted_by_saving(tmp_path):
 
 
 def test_blanket_label_and_false_calibration_are_rejected(tmp_path):
-    p = bootstrap()
+    p = partial_profile()
     p["geometry_source"] = "user_measured"
     with pytest.raises(ValueError, match="Whole-profile"):
-        storage.revision(tmp_path, p)
+        profile.validate(p)
     assert not (tmp_path / "revisions").exists()
-    p = bootstrap()
+    p = partial_profile()
     p["cameras"]["side"]["intrinsics_calibrated"] = True
     with pytest.raises(ValueError, match="provisional"):
         profile.validate(p)
-    p = bootstrap()
+    p = partial_profile()
     p["objects"]["cup_a"]["provenance"]["bottom_outer_diameter_m"] = "user_measured"
     with pytest.raises(ValueError, match="null/unmeasured"):
         profile.validate(p)
 
 
-def test_legacy_migration_preserves_file_and_distrusts_blanket_label(tmp_path):
-    old = legacy()
+def test_retired_profile_schema_rejected_without_rewriting(tmp_path):
     path = tmp_path / "old.json"
-    path.write_text(json.dumps(old))
+    path.write_text(json.dumps(legacy()))
     original = path.read_bytes()
-    new = profile.load(path)
+    with pytest.raises(ValueError, match="so101.real2sim/2"):
+        profile.load(path)
     assert path.read_bytes() == original
-    assert new["schema"] == profile.SCHEMA
-    assert "geometry_source" not in new
-    assert new["table"]["provenance"]["dimensions_m"] == "provisional"
-    assert new["objects"]["container"]["shape"] == "cup_proxy"
-    assert new["objects"]["container"]["dimensions_m"] == old["objects"]["container"]["dimensions_m"]
-    assert not new["cameras"]["side"]["intrinsics_calibrated"]
-    with pytest.raises(ValueError, match="excluded"):
-        calibration.world_point(new, {"frame": "object:container", "_state": {}, "point_m": [0, 0, 0]})
 
 
-def test_partial_cup_and_unknown_table_cannot_be_rendered_or_fit():
-    p = bootstrap()
-    with pytest.raises(ValueError, match="excluded"):
-        calibration.world_point(p, {"frame": "object:cup_a", "_state": {}, "point_m": [0, 0, 0]})
+def test_partial_cup_and_unknown_table_cannot_be_rendered():
+    p = partial_profile()
     p["objects"]["cup_a"]["T_workspace"] = np.eye(4).tolist()
     p["objects"]["cup_a"]["provenance"]["T_workspace"] = "provisional"
     p["objects"]["cup_a"]["render_enabled"] = True
     with pytest.raises(ValueError, match="Partial cup"):
         profile.validate(p)
-    p = bootstrap()
+    p = partial_profile()
     p["table"].update(render_enabled=True, T_workspace=np.eye(4).tolist())
     p["table"]["provenance"]["T_workspace"] = "provisional"
     with pytest.raises(ValueError, match="Unknown dimensions"):
@@ -124,11 +115,11 @@ def test_partial_cup_and_unknown_table_cannot_be_rendered_or_fit():
 
 
 def test_derived_values_cannot_be_added_as_independent_measurements():
-    p = bootstrap()
+    p = partial_profile()
     p["objects"]["cup_a"]["top_inner_diameter_m"] = 0.066
     with pytest.raises(ValueError, match="derived"):
         profile.validate(p)
-    p = bootstrap()
+    p = partial_profile()
     p["relations"]["cup_spacing"]["top_edge_gap_m"] = 0.020
     with pytest.raises(ValueError, match="derived"):
         profile.validate(p)
@@ -140,7 +131,7 @@ def test_runtime_render_toggle_requires_reconnect():
     r = Runtime.__new__(Runtime)
     r.running = False
     r.env = object()
-    r.profile = bootstrap()
+    r.profile = partial_profile()
     changed = copy.deepcopy(r.profile)
     cube = changed["objects"]["cube"]
     cube.update(T_workspace=np.eye(4).tolist(), render_enabled=True)
@@ -150,44 +141,11 @@ def test_runtime_render_toggle_requires_reconnect():
     assert r.profile["objects"]["cube"]["T_workspace"] is None
 
 
-def test_existing_rerender_command_with_bootstrap_and_mock_sensor(tmp_path):
-    from types import SimpleNamespace
-    from unittest.mock import Mock
-    from soarm101_lab.real2sim.runtime import Runtime
-
-    p = bootstrap()
-    saved_profile = storage.revision(tmp_path, p)
-    image = np.zeros((480, 640, 3), dtype=np.uint8)
-    images = {name: image for name in ("real_side", "sim_side", "real_wrist", "sim_wrist")}
-    joints = {name: 0.0 for name in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")}
-    capture = storage.CaptureStore(tmp_path / "captures").save(images, {
-        "hardware_identity": "synthetic", "quality": {"eligible_for_calibration": True},
-        "physical_follower_measured_joint_state": joints,
-    })
-    r = Runtime.__new__(Runtime)
-    r.running = False
-    r.args = SimpleNamespace(workspace=str(tmp_path))
-    r.profile = p
-    r.hardware_identity = "synthetic"
-    r.apply = Mock()
-    r.publish = Mock()
-    r.set_measured_pose = Mock()
-    r.snapshot = Mock(return_value=({"sim_side": image, "sim_wrist": image}, None, None, {}, None, None))
-    result = r.command({"command": "render_dataset", "payload": {
-        "profile": str(saved_profile), "captures": [str(capture)],
-    }})
-    r.set_measured_pose.assert_called_once_with(joints)
-    assert result["poses"] == 1
-    summary = json.loads((Path(result["directory"]) / "summary.json").read_text())
-    assert summary[0]["profile_hash"] == profile.digest(p)
-    assert summary[0]["views"]["side"]["appearance_rgb_mae"] == 0
-
-
-def test_bootstrap_usd_and_explicit_cube_preview(tmp_path):
+def test_partial_profile_usd_and_explicit_cube_preview(tmp_path):
     from pxr import Usd
 
-    p = bootstrap()
-    path = scene.build_usd(tmp_path / "bootstrap.usda", p)
+    p = partial_profile()
+    path = scene.build_usd(tmp_path / "partial.usda", p)
     stage = Usd.Stage.Open(path)
     assert stage.GetPrimAtPath("/Real2Sim/Workspace")
     assert not stage.GetPrimAtPath("/Real2Sim/Workspace/table")
@@ -204,8 +162,8 @@ def test_bootstrap_usd_and_explicit_cube_preview(tmp_path):
     assert p["objects"]["cube"]["provenance"]["T_workspace"] == "provisional"
 
 
-def test_ui_is_api_free_and_saves_honest_revision(tmp_path):
-    # Fresh interpreter proves UI does not transitively import the retained agent module.
+def test_ui_is_api_free_and_loads_profile(tmp_path):
+    # Fresh interpreter proves UI does not transitively import any agent module.
     code = '''
 import os, sys, json, urllib.request
 from pathlib import Path
@@ -218,16 +176,88 @@ from PyQt6.QtWidgets import QApplication, QPushButton
 from soarm101_lab.real2sim.ui import Window
 app = QApplication([])
 w = Window(sys.argv[2])
-w.template()
-w.save_profile()
-p = w.profile()
+from soarm101_lab.real2sim.profile import load
+assert not w.fields["profile"].text()
+w.selected(Path(sys.argv[3]))
+p = load(w.profile_path())
 assert "geometry_source" not in p
 assert p["objects"]["cup_a"]["bottom_outer_diameter_m"] is None
 assert "model" not in w.fields and not hasattr(w, "measured")
 assert "soarm101_lab.real2sim.agent" not in sys.modules
 assert not any("GPT" in b.text() or "OpenAI" in b.text() for b in w.findChildren(QPushButton))
-assert all(hasattr(w, n) for n in ("connect_hw", "stop", "annotate", "metrics", "optimize", "rerender"))
+assert all(hasattr(w, n) for n in ("connect_hw", "stop", "capture_snapshot", "profile_path"))
 assert len(w.views) == 4
 w.close()
 '''
-    subprocess.run([sys.executable, "-B", "-c", code, json.dumps(sys.path), str(tmp_path)], check=True)
+    subprocess.run([sys.executable, "-B", "-c", code, json.dumps(sys.path), str(tmp_path), str(TEMPLATE)], check=True)
+
+
+HYPOTHESIS = ROOT / "tests/real2sim/fixtures/scene_profile.json"
+
+
+def test_reviewed_geometry_and_provenance():
+    p = profile.load(HYPOTHESIS)
+    assert p['robot_asset']['source'] == 'model_asset'
+    assert p['workspace']['size_m'] == [.15, .15]
+    for name in ['cube_red', 'cube_blue', 'cube_green']:
+        o = p['objects'][name]
+        assert o['dimensions_m'] == [.024]*3
+        assert o['provenance']['dimensions_m'] == 'user_measured'
+        assert np.all(np.abs(np.asarray(o['T_workspace'])[:2, 3]) + .012 < .075)
+        assert o['provenance']['T_workspace'] == 'provisional'
+    for name in ['cup_a', 'cup_b']:
+        o = p['objects'][name]
+        assert o['top_outer_diameter_m'] == .07 and o['height_m'] == .065
+        assert o['bottom_outer_diameter_m'] is None
+        assert o['provenance']['bottom_outer_diameter_m'] == 'unmeasured'
+    a,b = [np.asarray(p['objects'][n]['T_workspace'])[:3,3] for n in ['cup_a','cup_b']]
+    assert np.linalg.norm(a-b) == pytest.approx(.09)
+    for c in p['cameras'].values():
+        assert not c['intrinsics_calibrated'] and not c['extrinsics_calibrated']
+    assert profile.derived_measurements(p)['cup_a.top_inner_diameter_m']['value'] == pytest.approx(.066)
+
+
+def test_deterministic_scene(tmp_path):
+    from pxr import Usd
+    p=profile.load(HYPOTHESIS)
+    a=scene.build_usd(tmp_path/'a.usda',p);b=scene.build_usd(tmp_path/'b.usda',p)
+    assert Path(a).read_text() == Path(b).read_text()
+    stage=Usd.Stage.Open(a)
+    for name in ['table','marker','cube_red','cube_blue','cube_green','cup_a_visual','cup_b_visual','background_roller']:
+        assert stage.GetPrimAtPath('/Real2Sim/Workspace/'+name)
+    assert not stage.GetPrimAtPath('/Real2Sim/Workspace/cup_a')
+
+
+def test_taper_mesh_and_validation(tmp_path):
+    from pxr import Usd, UsdGeom
+    p=profile.load(HYPOTHESIS)
+    cup=p['objects']['cup_a_visual']
+    cup['bottom_diameter_m']=.052
+    cup['provenance']['bottom_diameter_m']='provisional'
+    path=scene.build_usd(tmp_path/'cup.usda',p)
+    stage=Usd.Stage.Open(path)
+    mesh=UsdGeom.Mesh(stage.GetPrimAtPath('/Real2Sim/Workspace/cup_a_visual/Surface_0'))
+    pts=np.asarray(mesh.GetPointsAttr().Get())
+    assert np.linalg.norm(pts[0,:2]) == pytest.approx(.026)
+    assert np.linalg.norm(pts[96,:2]) == pytest.approx(.035)
+    assert pts[:,2].max()-pts[:,2].min() == pytest.approx(.065)
+    assert not mesh.GetPrim().HasAPI(__import__('pxr.UsdPhysics',fromlist=['CollisionAPI']).CollisionAPI)
+    cup['provenance']['bottom_diameter_m']='user_measured'
+    with pytest.raises(ValueError,match='provisional'):
+        profile.validate(p)
+
+
+def test_mount_validation_and_visual_only(tmp_path):
+    from pxr import Usd, UsdPhysics
+    p=profile.load(HYPOTHESIS)
+    part=copy.deepcopy(p['objects']['cube_red'])
+    part['provenance']['dimensions_m']='provisional'
+    p['wrist_mount']={'parent':'gripper','source':'provisional','parts':{'body':part}}
+    profile.validate(p)
+    child=copy.deepcopy(p);child.pop('wrist_mount');child['objects']={'body':part};child['relations']={}
+    path=scene.build_usd(tmp_path/'mount.usda',child,visual_only=True)
+    stage=Usd.Stage.Open(path)
+    assert not stage.GetPrimAtPath('/Real2Sim/Workspace/body/Shape').HasAPI(UsdPhysics.CollisionAPI)
+    p['wrist_mount']['parent']='world'
+    with pytest.raises(ValueError,match='gripper'):
+        profile.validate(p)

@@ -74,6 +74,10 @@ def evaluate(request):
             from ..real2sim.workspaces.environment import make_config, task_success_details
             used_seed = evaluation_seed(opts)
             cfg = make_config(w['root'], device, task_definition=definitions[0])
+            from ..so101_dataset_contract import read_contract
+            from ..real2sim.precision import uses_urdf_frame
+            if uses_urdf_frame(read_contract(path)):
+                cfg.scene.robot.spawn.usd_path = str(w['root']/'assets/SO101/usd/so101_isaaclab.usd')
             cfg.seed = used_seed
             cfg.events.reset_episode.params['randomization_seed'] = used_seed
             print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
@@ -92,7 +96,8 @@ def evaluate(request):
                     obs, _ = env.reset(); policy.reset(); success = False
                     for step in range(int(opts.get('max_steps', 300))):
                         p = obs['policy']
-                        batch = observation(p['joint_pos'][0], p['side_cam'][0], p['wrist_cam'][0], task, device)
+                        batch = observation(p['joint_pos'][0], None, None, task, device,
+                                            images={k[:-4]:v[0] for k,v in p.items() if k.endswith('_cam')})
                         with torch.inference_mode():
                             action = post(policy.select_action(pre(batch))).reshape(1, 6)
                         if not torch.isfinite(action).all():
@@ -114,19 +119,30 @@ def evaluate(request):
             from ..real2sim.hardware import Follower
             from ..real2sim.cameras import CameraReader
             from ..representation import real_observation, real_action
-            follower = Follower(opts['port'], opts['follower_id'], opts.get('calibration_dir'))
+            import hashlib
+            model_hash = hashlib.sha256((w['root']/'assets/SO101/urdf/so101_isaaclab.urdf').read_bytes()).hexdigest()
+            follower = Follower(opts['port'], opts['follower_id'], opts.get('calibration_dir'), model_hash=model_hash)
             cameras = {}
             try:
-                for view in ('side', 'wrist'):
+                for view in w['task'].get('observation_cameras',list(w['profile']['cameras'])):
                     width, height = w['profile']['cameras'][view]['resolution']
-                    cameras[view] = CameraReader(opts[view + '_device'], width, height)
+                    device_path=opts.get('camera_devices',{}).get(view) or opts.get(view+'_device')
+                    if not device_path:raise ValueError('Real camera device required: '+view)
+                    cameras[view] = CameraReader(device_path, width, height)
                     cameras[view].start()
                 deadline = time.monotonic() + 10
                 while not all(c.nearest() is not None for c in cameras.values()):
                     if time.monotonic() > deadline:
                         raise TimeoutError('Cameras did not deliver frames; no motion started')
                     time.sleep(.02)
-                follower.connect(); follower.activate(); policy.reset()
+                follower.connect()
+                mapper = getattr(follower, 'precision_mapper', None)
+                from ..real2sim.precision import require_hardware_policy_frame
+                from ..so101_dataset_contract import read_contract
+                require_hardware_policy_frame(read_contract(path), w['profile'], mapper)
+                held, _ = follower.read()
+                real_action(real_observation({n+'.pos':v for n,v in held.items()}, mapper), mapper)
+                follower.activate(); policy.reset()
                 for definition, ep in [(d, e) for d in definitions for e in range(int(opts.get('episodes', 1)))]:
                     task = definition['language_instruction']; policy.reset()
                     if bridge:
@@ -142,11 +158,11 @@ def evaluate(request):
                         if bridge:
                             bridge.steps = step
                             bridge.publish({'real_' + v: f['rgb'] for v, f in frames.items()})
-                        q = real_observation({n + '.pos': v for n, v in native.items()})
-                        batch = observation(q, frames['side']['rgb'], frames['wrist']['rgb'], task, device)
+                        q = real_observation({n + '.pos': v for n, v in native.items()}, mapper)
+                        batch = observation(q, None, None, task, device, images={n:f['rgb'] for n,f in frames.items()})
                         with torch.inference_mode():
                             action = post(policy.select_action(pre(batch))).reshape(6).detach().cpu().numpy()
-                        command = real_action(action)
+                        command = real_action(action, mapper)
                         follower.send({n[:-4]: v for n, v in command.items()})
                         rows.append({'task_id': definition['task_id'], 'language_instruction': task, 'episode': ep, 'step': step, 'model_observation': q.tolist(), 'model_action': action.tolist()})
                         time.sleep(max(0, 1 / int(opts.get('fps', 30)) - (time.monotonic() - begin)))
@@ -164,6 +180,7 @@ def evaluate(request):
                 print(f"[WORKFLOW] 평가 완료 · {definition['task_id']} · 성공 {wins}/{len(subset)} · 성공률 {100*wins/len(subset):.1f}%", flush=True)
         atomic(request['output'], {'status': 'SUCCEEDED', 'mode': stage, 'workspace': metadata(w),
                'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
+               'hardware_mapping': follower.metadata.get('precision_mapping') if stage == 'real_eval' else None,
                'metrics_per_task': evaluation_metrics(definitions, rows, stage == 'sim_eval'), 'episodes' if stage == 'sim_eval' else 'steps': rows,
                'task_success': 'simulation geometric condition' if stage == 'sim_eval' else 'unmeasured; human review required'})
     except Exception:

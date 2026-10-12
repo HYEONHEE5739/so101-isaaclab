@@ -21,8 +21,8 @@
 5. [TESTING.md](TESTING.md)  
    실행 성공이 아니라 correctness를 증명하기 위한 테스트/metric 기준.
 
-6. [REAL2SIM_ITERATION.md](REAL2SIM_ITERATION.md)  
-   Codex/agent가 bootstrap → paired capture → fitting → validation → 다음 iteration으로 scene을 반복 개선하는 실제 작업 프로토콜.
+6. [CAPTURE_DATASET.md](CAPTURE_DATASET.md)
+   Start → Disconnect 세션의 Snapshot 수집과 독립 Builder import 절차.
 
 7. [CHANGELOG_AI.md](CHANGELOG_AI.md)  
    큰 AI-generated 변경에서 문제, 접근, 변경 파일, 테스트, 미검증 영역, 위험을 기록.
@@ -35,10 +35,10 @@
 .venv-real2sim-ui/bin/python scripts/real2sim/real2sim_ui.py
 ```
 
-UI와 Isaac runtime은 별도 프로세스이며 같은 `--workspace`의 file IPC를 사용한다.
+UI와 선택한 Isaac/MuJoCo runtime은 별도 프로세스이며 같은 `--workspace`의 file IPC를 사용한다. Real/Sim 4분할과 수동 단계 실행·Annotation 저장 정책은 [MINIVLA_INTEGRATION.md](MINIVLA_INTEGRATION.md) 및 [DATA_FLOW.md](DATA_FLOW.md)에 정리했다.
 **Connect** 또는 **Sim 미리보기 (장비 연결 없음)** 를 누르면 runtime이 없을 때
 UI가 자동 실행하고 준비 완료 후 연결한다. 별도 터미널 실행은 선택 사항이다.
-자동 실행에는 `4 · Workspace Pipeline`의 `실행 Python (Isaac / LeRobot)` 경로를
+자동 실행에는 `3 · Workspace Pipeline`의 `실행 Python (Isaac / LeRobot)` 경로를
 사용한다. GUI 전용 venv가 아닌 Isaac 환경의 Python을 지정해야 한다.
 같은 탭의 실행 모드가 Operator이면 headless로 시작하고, Developer이면 Isaac 창을 연다.
 두 모드는 동일 runtime과 Side/Wrist 카메라를 사용한다. 이미 실행 중인 runtime의 모드를
@@ -49,14 +49,16 @@ UI가 자동 실행하고 준비 완료 후 연결한다. 별도 터미널 실�
 자동 시작 대기 중에 누르면 예약된 연결을 취소하고 UI가 시작한 프로세스만 종료한다.
 Connect 이후 실제 조작은 기존처럼 Start로 시작한다.
 
-### Inspect의 역할
+### Snapshot Capture와 연결 설정
 
-`3 · Inspect`는 Real2Sim profile을 검사하고 수동으로 적용하는 고급 도구다.
-선택 revision과 runtime 적용 hash를 확인하고, Profile 열기/적용, USD + Profile
-내보내기, JSON 새 revision 저장을 제공한다. 선택적 측정 도구로 landmark 지정,
-정량 오차 계산, parameter 그룹 최적화 및 재렌더를 실행할 수도 있다.
-일반 Connect/Capture나 publish된 workspace에서 Source Demo를 수행할 때 필수 단계는 아니다.
-USD 내보내기와 Workspace Publish는 서로 다른 기능이다.
+Inspect 탭/JSON editor/수동 fitting UI는 제거했다. 필수 Profile 선택/적용 및 장치
+calibration 설정은 Real/Sim의 **연결 설정**에 있다. Profile/장치 보정 로드는 유지한다.
+현재 수집은 Snapshot만 사용하며 옛 paired/continuous 캡처와 내부 scene fitting/API agent는 제거했다.
+처음에는 대기하며 Capture 탭의 **Start · 카메라/로봇 연결**을 눌러야
+동일 runtime이 실제 장치만 연결한다. Sim은 실행하지 않는다.
+Capture 탭의 **현재 상태 캡처**는 원본 Side/Wrist + measured q + timestamp를 하나씩
+자동 저장한다. Teleop Start/Stop은 별도 안전 제어이며 Record/Event/Save UI는 없다.
+자세별 dataset/Builder import와 실행 환경은 [CAPTURE_DATASET.md](CAPTURE_DATASET.md)를 참고한다.
 
 ### Isaac runtime
 
@@ -71,10 +73,9 @@ python scripts/real2sim/real2sim_sim.py
 주요 entry point:
 
 ```text
-scripts/real2sim/publish_workspace.py
+scripts/real2sim/workflow.py import-builder
 scripts/real2sim/workspace.py
-scripts/real2sim/workflow.py
-scripts/real2sim/workflow_stage.py
+scripts/real2sim/workflow.py {list,register,run,ready,worker,import-builder,import-hdf5}
 scripts/real2sim/check_workspace_physics.py
 ```
 
@@ -102,15 +103,15 @@ LLM은 측정하거나 최적화할 수 있는 camera/object/physics 숫자를 �
 
 기존 SO-101 environment, teleoperation, Mimic, datagen, dataset, policy 구조는 가능한 유지한다.
 
-## Repository에서 유지하는 데이터/예제
+## Scene 제작과 실행 입력
 
-다음은 문서가 아니라 코드/테스트가 실제 사용하는 자료이므로 유지한다.
+Scene 제작/보정은 독립 `real2sim-builder`에서 수행한다. SO-101은 Snapshot 수집과
+선택한 Profile/Workspace의 엔진 실행을 담당한다. UI나 MuJoCo worker가 옛 bootstrap
+scene을 자동으로 생성하지 않는다. 새 UI에는 Profile을 명시적으로 선택해야 한다.
+현재 저장된 Workspace/profile 선택은 그대로 유지한다.
 
-- `measurements.example.json`
-- `VALIDATION.json`
-- `bootstrap/`
-
-이 파일들은 단순 설명 문서처럼 정리/삭제하면 안 된다.
+검증 전용 profile 입력은 `tests/real2sim/fixtures/`에 있다. production 코드에서는
+이 테스트 입력을 읽지 않는다. `VALIDATION.json`은 기존 검증 기록이다.
 
 ## AI/Codex 작업 규칙
 
@@ -223,3 +224,49 @@ EE 기준 상대 위치 6mm/회전 10도 이내를 0.20초 유지하면 grasp를
 접촉 데이터가 없으면 거리 조건으로 대체하지 않고 오류를 보고합니다.
 Physics offset과 collision geometry는 변경하지 않았습니다.
 기존 annotation 파일은 자동 변경되지 않으므로 다시 annotation해야 합니다.
+
+### Data Curation
+
+Workspace Pipeline 왼쪽의 Data Curation에서 완료된 Source/Datagen/Annotation
+HDF5를 엽니다. 초기 목표 물체 위치를 workspace 좌표로 표시하며 점과 목록에서
+episode를 선택하면 관절 목표값 그래프 및 마우스로 회전하는 EE 3D 경로를 봅니다.
+EE 경로는 기록된 ee_state 좌표계입니다. 이미지 재생이나 물리 replay는 아닙니다.
+
+확인 필요 표시는 task별 median ± 3 robust sigma(MAD, 최소 median의 10%) 기준입니다.
+5개 미만인 task는 통계적 이상치를 단정하지 않습니다. 시간 이상, EE 속도 2mm/s
+미만 비율, 모든 관절 목표 변화 1deg/s 미만 비율, arm 명령 가속도 RMS를 사용합니다.
+정지는 정상적인 grasp/place 대기일 수도 있으며 jitter는 실패의 확정 근거가 아닙니다.
+
+제외/복원으로 검토한 뒤 목표 개수를 지정하고 분포 유지 자동 선별을 실행합니다.
+남은 데이터의 task × XY 4x4 구간 빈도 비율을 largest-remainder로 배분해 정확한
+개수를 선택하고, 구간 내에서는 flag 수와 jitter가 작은 episode를 우선합니다.
+균등 분포를 새로 만들거나 학습 성능 향상을 보장하는 기능은 아닙니다.
+선택 데이터셋 저장은 원본 전체 episode 필드를 새 HDF5에 복사하며 원본은 보존합니다.
+좌표 contract, task metadata와 원본 hash/episode 대응을 남기고 workflow에 등록합니다.
+이후 LeRobot 변환에서 새 artifact를 선택하세요. 원본 영상도 복사하므로 디스크 공간이
+추가로 필요합니다. 분석/저장은 백그라운드에서 실행됩니다.
+
+### Curation 로봇/궤적 재생
+
+Data Curation에서 HDF5와 에피소드를 선택하면 workspace에 포함된 SO-101
+URDF visual mesh를 기록된 `obs/joint_pos`(radian)로 재생합니다.
+EE 궤적과 로봇은 모두 robot-base 좌표계입니다. 재생/일시정지, 시간 슬라이더,
+0.25/0.5/1/2배속, 휠 줌, 드래그 회전, XY/XZ/YZ 시점을 지원합니다.
+흰 점은 현재 EE 위치이고 관절 그래프의 흰 세로선도 같은 시간입니다.
+메시는 CPU 미리보기용으로 단순화하며 원본 asset/dataset은 변경하지 않습니다.
+이는 기록된 로봇 자세 검토용으로, 물체/접촉 물리를 재계산하는 Isaac Replay는 아닙니다.
+URDF 또는 기록된 관절 상태가 없으면 로봇 표시 없이 경로만 확인합니다.
+# 커스텀 MiniVLA / MuJoCo
+
+모델 코드는 기존 `source/soarm101_lab/soarm101_lab/learning/minivla/`에 통합했다.
+모델 단독 명령·설계·notebook은 [모델 문서](../minivla/README.md), outputs의 삭제
+판단 기준은 [DATA_FLOW.md](DATA_FLOW.md#13-outputsminivla-mujoco-real2sim을-삭제해도-되는가-2026-10-07)를 본다.
+
+기존 Isaac workflow와 함께 사용할 커스텀 정책의 수집·학습·sim 평가 경로는
+[MiniVLA 통합 안내](MINIVLA_INTEGRATION.md)를 참고한다. Real2Sim 데스크톱의
+기존 `Workspace Pipeline` 상단에서 `Isaac Sim / MuJoCo`를 선택한다. Source → Replay → Annotation → Datagen → Convert → Train → Eval → Upload와 실행·중지·로그·검수 화면은 공통이다. 모델 선택(ACT/SmolVLA/MiniVLA)은 엔진과 별개이며, 엔진·모델은 worker에서 로드한다. 공통 `Operations`가 모든 단계의 실행과 등록을 관리한다.
+
+
+실측 데이터 수집 → 독립 Builder: [Real2Sim Capture 계약과 운영](CAPTURE_DATASET.md).
+
+Builder에서 만든 scene을 기존 UI에서 사용하는 방법: [Builder Workspace 연결](BUILDER_WORKSPACE.md).

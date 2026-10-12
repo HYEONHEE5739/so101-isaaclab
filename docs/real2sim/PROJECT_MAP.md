@@ -7,15 +7,14 @@
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
 |---|---|
 | Real2Sim UI | `source/soarm101_lab/soarm101_lab/real2sim/ui.py` |
-| Isaac runtime / render / pose 적용 | `real2sim/runtime.py` |
+| 공통 Real/Sim runtime / render / pose 적용 | `real2sim/runtime.py` |
 | 실제 카메라 reader | `real2sim/cameras.py` |
 | 실제 follower/하드웨어 연결 | `real2sim/hardware.py` |
-| camera intrinsics/extrinsics 계산 | `real2sim/calibration.py` |
-| image/landmark metric | `real2sim/calibration.py` |
+| camera/geometry fitting · 비교 metric | 독립 `real2sim-builder/app/calibration/`, `app/reconstruction/` |
 | profile schema / provenance | `real2sim/profile.py` |
 | scene/profile을 Isaac에 적용 | `real2sim/scene.py` |
-| capture/revision/IPC 저장 | `real2sim/storage.py` |
-| bootstrap/reference 입력 | `real2sim/bootstrap.py`, `references.py` |
+| snapshot 세션/실측 저장 | `real2sim/capture_dataset.py` |
+| atomic 저장/IPC | `real2sim/storage.py` |
 
 ## Robot / joint
 
@@ -33,7 +32,7 @@
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
 |---|---|
 | dataset representation contract | `so101_dataset_contract.py` |
-| HDF5 recording | `datasets/lerobot_recorder.py` 및 teleop recorder script |
+| Isaac HDF5 recording | `scripts/teleoperation/record_mimic_dataset.py` |
 | demo annotation | `scripts/mimic/annotate_demos.py` |
 | Mimic datagen | `scripts/mimic/generate_dataset.py` |
 | joint-target replay | `scripts/tools/replay_joint_targets.py` |
@@ -44,7 +43,7 @@
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
 |---|---|
 | workspace package/version | `real2sim/workspaces/package.py` |
-| scene asset compile | `real2sim/workspaces/scene_assets.py` |
+| Builder export import | `real2sim/workspaces/builder.py` |
 | workspace env config | `real2sim/workspaces/environment.py` |
 | mass/friction/collision | `real2sim/workspaces/physics.py` |
 | reset/randomization | `real2sim/workspaces/reset.py` |
@@ -74,10 +73,10 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 ## CLI entry points
 
 - Real2Sim UI: `scripts/real2sim/real2sim_ui.py`
-- Isaac runtime: `scripts/real2sim/real2sim_sim.py`
-- workspace publish: `scripts/real2sim/publish_workspace.py`
+- Real/Sim runtime (Isaac/MuJoCo 선택): `scripts/real2sim/real2sim_sim.py`
+- Builder workspace import: `scripts/real2sim/workflow.py import-builder`
 - workspace tool: `scripts/real2sim/workspace.py`
-- workflow: `scripts/real2sim/workflow.py`, `workflow_stage.py`
+- workflow: `scripts/real2sim/workflow.py` (`list/register/ready/run/worker/publish/import-hdf5`)
 - physics check: `scripts/real2sim/check_workspace_physics.py`
 
 ## 어디부터 읽어야 하나
@@ -91,3 +90,20 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 5. 관련 `tests/real2sim/` 테스트
 
 전체 repository를 처음부터 끝까지 읽는 방식은 권장하지 않는다.
+
+## MuJoCo / MiniVLA
+
+| 바꾸고 싶은 것 | 먼저 볼 곳 |
+|---|---|
+| 공통 backend 선택·stage UI | `workflow/ui.py` |
+| 실행 계획·취소·등록 | `workflow/operations.py` |
+| MuJoCo stage request | `workflow/operations.py::mujoco_request/mujoco_plan` |
+| MuJoCo worker source/replay/train/eval | `workflow/mujoco.py` |
+| canonical recording/annotation/datagen/convert | `workflow/episodes.py` |
+| MJCF/CPU physics/RGB/FK/IK·명시적 MJCF adapter | `simulation/mjcf.py`, `simulation/mujoco_backend.py` |
+| policy gripper 좌표·joint 단위 변환 | `so101_joint_mapping.py::RobotCoordinates` |
+| 공통 카메라 화면 widget | `workflow/view.py::CameraView` |
+| Qwen + action head | `source/soarm101_lab/soarm101_lab/learning/minivla/` |
+| 공통 model-radian inference/train | `workflow/policy.py` |
+
+별도 MuJoCo UI mixin과 MiniVLA subprocess service는 공통 UI/Operations로 통합했다. [MINIVLA_INTEGRATION.md](MINIVLA_INTEGRATION.md)에 실제 구현/검증 범위를 기록한다.

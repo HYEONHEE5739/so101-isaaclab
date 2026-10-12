@@ -9,10 +9,11 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLa
 from .artifacts import Registry, browse_directory
 from .operations import Operations, STAGES, default_python
 from ..real2sim.workspaces.package import ROOT, load, metadata
+from ..real2sim.storage import atomic
 
-LABELS = {'accept': 'Revision 승인', 'publish': 'Publish Workspace', 'source': 'Source Demo',
+LABELS = {'source': 'Source Demo',
           'replay': 'Replay', 'annotate': 'Annotation', 'datagen': 'Mimic / Datagen',
-          'convert': 'LeRobot 변환', 'train': 'ACT / SmolVLA 학습', 'hf_dataset': 'Dataset 업로드',
+          'convert': 'LeRobot 변환', 'train': '모델 학습', 'hf_dataset': 'Dataset 업로드',
           'hf_policy': 'Policy 업로드', 'sim_eval': 'Sim 평가', 'real_eval': 'Real 평가 (모터 동작)'}
 
 
@@ -24,6 +25,9 @@ class WorkflowPanel(QWidget):
         self.setStyleSheet(STYLE)
         self.run_worker = run_worker; self.registry = Registry(); self.service = Operations(self.registry)
         self.busy = False
+        self.saved_stage_options = {}
+        self.options_context = None
+        self.configured_stage = None
         from .view import CameraView, LogTail
         self.log_tail = LogTail(); self.last_result = None
         outer = QVBoxLayout(self)
@@ -45,6 +49,9 @@ class WorkflowPanel(QWidget):
         nav_title = QLabel('WORKFLOW'); nav_title.setObjectName('eyebrow'); nav_layout.addWidget(nav_title)
         self.navigation = QListWidget(); self.navigation.setObjectName('stageNavigation')
         nav_layout.addWidget(self.navigation, 1)
+        curate = QPushButton('Data Curation')
+        curate.clicked.connect(self.open_curation)
+        nav_layout.addWidget(curate)
         nav_note = QLabel('단계를 선택하고\n입력을 확인한 뒤 실행하세요.'); nav_note.setWordWrap(True); nav_note.setObjectName('mutedLabel')
         nav_layout.addWidget(nav_note)
         body.addWidget(self.navigation_panel)
@@ -63,15 +70,15 @@ class WorkflowPanel(QWidget):
         content = QWidget(); scroll.setWidget(content)
         layout = QVBoxLayout(content)
         settings_title = QLabel('실행 설정'); settings_title.setObjectName('sectionTitle'); layout.addWidget(settings_title)
-        self.section = QComboBox(); self.section.addItems(['Sim 작업 파이프라인', '환경 관리', '실제 로봇 평가'])
+        self.section = QComboBox(); self.section.addItems(['Sim 작업 파이프라인', '실제 로봇 평가'])
         nav_layout.insertWidget(1, self.section)
         form = QFormLayout(); form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows); layout.addLayout(form)
         self.main_form = form
         self.workspace = QLineEdit(); form.addRow('Workspace ID / 경로', self.workspace)
-        self.python = QLineEdit(default_python()); form.addRow('실행 Python (Isaac / LeRobot)', self.python)
+        self.python = QLineEdit(default_python()); form.addRow('실행 Python', self.python)
         self.mode = QComboBox()
         self.mode.addItem('Operator — 통합 UI에서 영상/조작', 'operator')
-        self.mode.addItem('Developer — Isaac 창 함께 실행', 'developer')
+        self.mode.addItem('Developer — 시뮬레이터 창 함께 실행', 'developer')
         form.addRow('실행 모드', self.mode)
         self.real_enabled = QCheckBox('REAL 카메라 영상 연결 (로봇 모터 연결 아님)')
         form.addRow(self.real_enabled)
@@ -107,10 +114,17 @@ class WorkflowPanel(QWidget):
         self.architecture = QComboBox()
         self.architecture.addItem('SmolVLA — smolvla_base 파인튜닝', 'smolvla')
         self.architecture.addItem('ACT', 'act')
+        self.architecture.addItem('MiniVLA · Qwen3-VL', 'minivla')
         primary_form.addRow('학습 모델', self.architecture)
-        self.architecture.currentIndexChanged.connect(self.update_ready)
+        self.architecture.currentIndexChanged.connect(self.change_model)
+        self.minivla_head = QComboBox()
+        self.minivla_head.addItem('Flow matching (기본)', 'flow')
+        self.minivla_head.addItem('Deterministic', 'deterministic')
+        self.minivla_head.setToolTip('Frozen Qwen 기본 설정. model_config를 직접 지정하거나 Resume하면 해당 JSON 설정을 사용합니다.')
+        primary_form.addRow('MiniVLA head · Frozen', self.minivla_head)
+        self.minivla_head.currentIndexChanged.connect(self.update_ready)
         self.resume_training = QCheckBox('이어서 학습')
-        self.resume_training.setToolTip('모델·optimizer·scheduler·step을 체크포인트에서 복원합니다.')
+        self.resume_training.setToolTip('모델·optimizer·scheduler·step 복원. 저장 경로를 비우면 기존 학습 폴더에 계속 저장합니다.')
         primary_form.addRow('학습 방식', self.resume_training)
         self.resume_path = QLineEdit()
         self.resume_path.setPlaceholderText('checkpoint 폴더: checkpoints/040000')
@@ -215,7 +229,7 @@ class WorkflowPanel(QWidget):
         self.inputs.currentIndexChanged.connect(self.update_input_tooltip)
         self.navigation.currentRowChanged.connect(self.select_navigation)
         self.sync_navigation()
-        self.timer = QTimer(self); self.timer.timeout.connect(self.poll_preview); self.timer.start(100)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.poll_preview); self.timer.start(33)
         self.shortcuts = []
         for key, command in [('Right', 'save'), ('Left', 'discard')]:
             shortcut = QShortcut(QKeySequence(key), viewer)
@@ -230,19 +244,12 @@ class WorkflowPanel(QWidget):
             saved = json.loads(settings.read_text()); self.workspace.setText(saved.get('workspace', ''))
             self.python.setText(saved.get('python', default_python()))
             self.mode.setCurrentIndex(max(0, self.mode.findData(saved.get('mode', 'operator'))))
-        elif (ROOT / 'outputs/real2sim/environments/workspace_001/v1/manifest.json').exists():
-            self.workspace.setText(str(ROOT / 'outputs/real2sim/environments/workspace_001/v1'))
         self.stage.currentIndexChanged.connect(self.changed)
         self.inputs.currentIndexChanged.connect(self.sync_tasks)
         self.options.textChanged.connect(self.update_ready)
         self.workspace.editingFinished.connect(self.refresh)
-        # Existing selected revision/workspace can be imported without executing any stage.
+        # Register the selected imported workspace without starting any worker.
         try:
-            settings = ROOT / 'outputs/real2sim/ui_settings.json'
-            if settings.exists():
-                path = json.loads(settings.read_text()).get('profile')
-                if path and not any(a['path'] == str(Path(path).resolve()) for a in self.registry.all()):
-                    self.registry.register('revision', path)
             if self.workspace.text():
                 root = load(self.workspace.text())['root']
                 if not any(a['path'] == str(root) for a in self.registry.all()):
@@ -252,11 +259,49 @@ class WorkflowPanel(QWidget):
         for combo in self.findChildren(QComboBox):
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
+        self.setup_backends(header_layout)
         self.changed()
+
+    def setup_backends(self, header):
+        self.backend = QComboBox()
+        self.backend.addItem('Isaac Sim / Isaac Lab', 'isaac')
+        self.backend.addItem('MuJoCo', 'mujoco')
+        header.insertWidget(1, self.backend)
+        self.backend_pythons = {'isaac': self.python.text(), 'mujoco': default_python()}
+        saved_path = self.registry.root / 'ui.json'
+        saved = json.loads(saved_path.read_text()) if saved_path.exists() else {}
+        self.backend_pythons.update(saved.get('backend_pythons', {}))
+        self.backend.setCurrentIndex(max(0, self.backend.findData(saved.get('backend', 'isaac'))))
+        self.previous_backend = self.backend.currentData()
+        self.python.setText(self.backend_pythons[self.previous_backend])
+        self.backend.currentIndexChanged.connect(self.change_backend)
+
+    def is_mujoco(self):
+        return hasattr(self, 'backend') and self.backend.currentData() == 'mujoco'
+
+    def change_backend(self):
+        if self.busy: return
+        self.backend_pythons[self.previous_backend] = self.python.text()
+        self.previous_backend = self.backend.currentData()
+        self.python.setText(self.backend_pythons[self.previous_backend])
+        self.refresh()
+        self.save_backend_settings()
+
+    def save_backend_settings(self):
+        self.backend_pythons[self.backend.currentData()] = self.python.text()
+        atomic(self.registry.root / 'ui.json', {
+            'workspace': self.workspace.text(), 'python': self.python.text(), 'mode': self.mode.currentData(),
+            'backend': self.backend.currentData(), 'backend_pythons': self.backend_pythons})
 
     def guard(self, fn):
         try: fn()
         except Exception as exc: QMessageBox.warning(self, 'Workflow', str(exc))
+
+    def open_curation(self):
+        from .curation_ui import CurationDialog
+        dialog = CurationDialog(self.registry, self)
+        dialog.exec()
+        self.refresh()
 
     def toggle_connection_settings(self, expanded):
         for widget in (self.workspace, self.python):
@@ -287,6 +332,9 @@ class WorkflowPanel(QWidget):
     def changed(self):
         stage = self.stage.currentData()
         if not stage: return
+        if self.configured_stage and self.configured_stage != stage:
+            self.saved_stage_options[self.options_context] = json.loads(self.options.toPlainText())
+        self.configured_stage = stage
         self.sync_navigation()
         self.dashboard_title.setText(LABELS.get(stage, stage))
         self.configure_stage()
@@ -296,7 +344,8 @@ class WorkflowPanel(QWidget):
             widget.setVisible(visible); primary_form.labelForField(widget).setVisible(visible)
         from .option_help import help_html
         self.options_help.setHtml(help_html(stage))
-        self.reset_options()
+        self.reset_options(restore_saved=True)
+        self.show_model_controls()
         self.kind.clear(); self.kind.addItems(sorted(STAGES[stage][0])); self.refresh()
 
     def refresh(self):
@@ -305,9 +354,14 @@ class WorkflowPanel(QWidget):
         try: workspace = metadata(load(self.workspace.text())) if self.workspace.text() else None
         except Exception: workspace = None
         for a in self.registry.all():
-            if a['type'] in allowed and (not workspace or not a.get('workspace') or a['workspace'] == workspace):
+            if a.get('status', 'SUCCEEDED') != 'SUCCEEDED' or not Path(a['path']).exists():
+                continue
+            engine_match = a.get('backend', 'isaac') == self.backend.currentData() if hasattr(self, 'backend') else True
+            if a['type'] in allowed and (a['type'] == 'workspace' or engine_match or self.stage.currentData() in ('train', 'sim_eval', 'hf_dataset', 'hf_policy')) and (not workspace or not a.get('workspace') or a['workspace'] == workspace):
                 path = Path(a['path'])
-                label = path.parent.name + ' / ' + path.name
+                tasks = ','.join(t['task_id'] for t in a.get('tasks', []))
+                created = time.strftime('%m/%d %H:%M', time.localtime(a['created_at']))
+                label = f"{created} · {a.get('backend', 'isaac')} · {tasks or a['type']} · {path.parent.name}/{path.name}"
                 self.inputs.addItem(label, a['id'])
                 self.inputs.setItemData(self.inputs.count() - 1, a['path'], Qt.ItemDataRole.ToolTipRole)
         index = self.inputs.findData(selected)
@@ -315,9 +369,14 @@ class WorkflowPanel(QWidget):
         self.inputs.blockSignals(False); self.sync_tasks(); self.update_ready()
 
     def update_ready(self):
+        if hasattr(self, 'minivla_head') and hasattr(self, 'options'):
+            self.show_model_controls()
         if self.busy:
             self.status.setText('RUNNING — 완료 후 output 검증 및 등록'); self.run.setEnabled(False); return
         try:
+            live = getattr(self.window(), 'bus', None)
+            if self.stage.currentData() in ('source', 'real_eval') and live and live.owner_alive() and live.status().get('backend')=='calibration':
+                raise ValueError('Precision Calibration owns the motor ports; End Calibration Session first')
             if self.inputs.currentData() is None:
                 raise ValueError('입력 데이터를 선택하세요.')
             artifact = self.registry.get(self.inputs.currentData())
@@ -329,12 +388,12 @@ class WorkflowPanel(QWidget):
 
     def browse(self):
         kind = self.kind.currentText(); directory = browse_directory(kind, registry=self.registry)
-        if kind in ('workspace', 'dataset', 'policy'):
+        if kind in ('workspace', 'dataset', 'policy') or (self.is_mujoco() and kind in ('source', 'annotated', 'datagen')):
             path = QFileDialog.getExistingDirectory(self, 'Artifact 선택', directory)
         else:
             path, _ = QFileDialog.getOpenFileName(self, 'Artifact 선택', directory, 'Artifacts (*.json *.hdf5 *.h5)')
         if path:
-            if kind == 'policy':
+            if kind == 'policy' and not (Path(path) / 'project_provenance.json').is_file():
                 from .policy import import_checkpoint
                 artifact = import_checkpoint(path, self.registry)
             else:
@@ -343,9 +402,18 @@ class WorkflowPanel(QWidget):
             self.refresh(); self.inputs.setCurrentIndex(self.inputs.findData(artifact['id']))
 
     def browse_workspace(self):
-        path = QFileDialog.getExistingDirectory(self, 'manifest.json이 있는 version 폴더 선택', browse_directory('workspace', self.workspace.text()))
+        path = QFileDialog.getExistingDirectory(self, 'Workspace 또는 Builder export 폴더 선택', browse_directory('workspace', self.workspace.text()))
         if path:
+            if (Path(path)/'scene_manifest.yaml').is_file():
+                import subprocess
+                result = subprocess.run([self.python.text(), str(ROOT/'scripts/real2sim/workflow.py'),
+                    'import-builder', path], capture_output=True, text=True, timeout=180)
+                if result.returncode:
+                    raise RuntimeError('Builder 가져오기 실패: ' + result.stderr[-3000:])
+                path = result.stdout.strip().splitlines()[-1]
             w = load(path); self.workspace.setText(str(w['root'])); self.registry.register('workspace', path); self.refresh()
+            self.save_backend_settings()
+
 
     def open_folder(self):
         a = self.registry.get(self.inputs.currentData()); p = Path(a['path'])
@@ -354,13 +422,18 @@ class WorkflowPanel(QWidget):
     def execute(self):
         from ..real2sim.storage import atomic
         stage = self.stage.currentData(); artifact = self.registry.get(self.inputs.currentData())
+        live = getattr(self.window(), 'bus', None)
+        if stage in ('source', 'replay', 'annotate', 'datagen', 'sim_eval', 'real_eval') and live and live.owner_alive():
+            raise ValueError('Real/Sim을 Disconnect한 뒤 Workflow를 실행하세요. 장비·카메라 중복 연결을 방지합니다.')
         opts = self.stage_options(); opts['python'] = self.python.text(); opts['mode'] = self.mode.currentData()
         workspace = self.workspace.text()
-        atomic(self.registry.root / 'ui.json', {'workspace': workspace, 'python': self.python.text(), 'mode': self.mode.currentData()})
+        self.save_backend_settings()
         self.service.session = None
         from .view import LogTail
         self.log_tail = LogTail(); self.result.clear(); self.last_result = None
         self.section.setEnabled(False); self.stage.setEnabled(False)
+        self.backend.setEnabled(False)
+        self.navigation.setEnabled(False)
         self.active_stage = stage
         self.active_manual = stage == 'annotate' and not opts.get('auto', True)
         self.busy = True; self.task_selector.setEnabled(False); self.update_ready()
@@ -373,6 +446,8 @@ class WorkflowPanel(QWidget):
             self.busy = False; self.task_selector.setEnabled(True); self.last_result = result
             self.poll_log()
             self.section.setEnabled(True); self.stage.setEnabled(True)
+            self.backend.setEnabled(True)
+            self.navigation.setEnabled(True)
             self.result.appendPlainText(('완료: ' + result['artifact']['path']) if result['ok'] else ('오류: ' + result['error']))
             if result['ok']:
                 a = result['artifact']
@@ -384,7 +459,7 @@ class WorkflowPanel(QWidget):
                 if index >= 0: self.inputs.setCurrentIndex(index)
         try: self.run_worker(operation, done)
         except Exception:
-            self.busy = False; self.task_selector.setEnabled(True); self.section.setEnabled(True); self.stage.setEnabled(True); self.update_ready(); raise
+            self.busy = False; self.task_selector.setEnabled(True); self.section.setEnabled(True); self.stage.setEnabled(True); self.backend.setEnabled(True); self.navigation.setEnabled(True); self.update_ready(); raise
 
     def control(self, command):
         from .presentation import send
@@ -423,7 +498,7 @@ class WorkflowPanel(QWidget):
             signals = status.get('task_signals', {})
             word = lambda value: '충족' if value is True else '미충족' if value is False else '판정 없음'
             self.task_state.setText('접근: ' + ('TCP 거리 %.1f mm (성공 임계값 없음)' % signals['tcp_distance_mm'] if signals.get('tcp_distance_mm') is not None else '측정 없음')
-                + '   |   Grasp (휴리스틱): ' + word(signals.get('grasp')) + '   |   컵 안 정지: ' + word(signals.get('place'))
+                + '   |   Grasp (휴리스틱): ' + word(signals.get('grasp')) + '   |   작업 성공 조건: ' + word(signals.get('place'))
                 + '\nEpisode 결과: ' + status.get('episode_outcome', '진행 중' if active else '대기')
                 + '   ' + status.get('outcome_reason', '')
                 + (f" · 시도 {status['attempts']} / 성공 {status['successes']} / 실패 {status['failures']} · 성공률 " + (f"{status['success_rate'] * 100:.1f}%" if status.get('success_rate') is not None else "—") if 'attempts' in status else ''))
@@ -436,7 +511,7 @@ class WorkflowPanel(QWidget):
                 text += ' · 마지막 프레임 (새 프레임 대기)'
             self.preview_status.setText(f"{text} · {status.get('task_id', '')} · step {status.get('steps', 0)} · "
                                        f"episode {status.get('episode_index', '-')}/{status.get('episode_total', '-')} · action {status.get('action_index', '-')} · marks {status.get('marks', [])}"
-                                       + '\n' + ' · '.join(str(v) for k, v in status.items() if k.endswith('_camera_error')))
+                                       + '\n' + ' · '.join(str(v) for k, v in status.items() if k.endswith('_camera_error') or k == 'leader_limit_status'))
         elif root:
             self.preview_status.setText('실행 종료 · 마지막 SIM 프레임 표시 · 진행 로그에서 결과를 확인하세요.')
 
@@ -444,8 +519,14 @@ class WorkflowPanel(QWidget):
         from .tasks import from_artifact
         try:
             w = load(self.workspace.text())
+            self.scene_cameras = tuple(w['profile']['cameras'])
+            self.configure_stage()
             artifact = self.registry.get(self.inputs.currentData()) if self.inputs.currentData() else {}
             self.task_selector.configure(w, self.stage.currentData(), from_artifact(artifact, w))
+            builder = w.get('manifest', {}).get('builder')
+            if builder:
+                self.task_selector.summary.setText(self.task_selector.summary.text() +
+                    f"\nBuilder scene: {builder['status']} · 물성: 시뮬레이션 임시값 (실측 아님)")
         except (ValueError, OSError, TypeError, KeyError):
             self.task_selector.summary.setText('유효한 workspace와 입력 artifact를 선택하세요.')
         self.update_ready()
@@ -455,34 +536,58 @@ class WorkflowPanel(QWidget):
         if not isinstance(opts, dict):
             raise ValueError('실행 설정은 {"항목": 값} 형식의 JSON 객체여야 합니다.')
         stage = self.stage.currentData()
+        opts.update(backend=self.backend.currentData() if hasattr(self, 'backend') else 'isaac', python=self.python.text(), mode=self.mode.currentData())
         if stage == 'source': opts.update(port=self.port.text(), episodes=self.episodes.value(), episode_time_s=self.episode_time.value(), reset_time_s=self.reset_time.value())
         if stage in ('source', 'datagen') and self.resume_data.text().strip():
             opts['resume_data'] = self.resume_data.text().strip()
         if stage == 'sim_eval':
             opts.update(eval_seed_mode=self.eval_seed_mode.currentData(), eval_seed=self.eval_seed.value())
         if stage == 'train':
+            from .option_help import TRAIN_KEYS
+            opts = {k: v for k, v in opts.items() if k in TRAIN_KEYS[self.architecture.currentData()]
+                    or k in ('backend', 'python', 'mode')}
             opts['architecture'] = self.architecture.currentData()
+            if opts['architecture'] == 'minivla' and not opts.get('model_config'):
+                from ..learning.minivla.config import MODEL_ROOT
+                opts['model_config'] = str(MODEL_ROOT / 'configs' / ('frozen_' + self.minivla_head.currentData() + '.json'))
             opts.pop('resume_checkpoint', None)
             if self.resume_training.isChecked():
                 if not self.resume_path.text().strip():
                     raise ValueError('이어서 학습할 checkpoint를 선택하세요.')
                 opts['resume_checkpoint'] = self.resume_path.text().strip()
-        if stage == 'annotate': opts['auto'] = self.annotation_mode.currentIndex() == 0
+        if stage == 'annotate':
+            opts['auto'] = self.annotation_mode.currentIndex() == 0
         if stage in ('source', 'sim_eval', 'real_eval'):
             opts['tasks'] = self.task_selector.selection(evaluation=stage != 'source')
         return opts
 
     def browse_resume_data(self):
-        path, _ = QFileDialog.getOpenFileName(self, '이어 수집할 완료 HDF5', '', 'HDF5 (*.hdf5 *.h5)')
+        if self.is_mujoco():
+            path = QFileDialog.getExistingDirectory(self, '이어 수집할 완료 데이터셋')
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, '이어 수집할 완료 HDF5', '', 'HDF5 (*.hdf5 *.h5)')
         if path:
             self.resume_data.setText(path)
 
     def browse_checkpoint(self):
-        path = QFileDialog.getExistingDirectory(self, '체크포인트 폴더 선택 (예: checkpoints/040000)')
+        if self.architecture.currentData() == 'minivla':
+            path, _ = QFileDialog.getOpenFileName(self, 'MiniVLA 재개 체크포인트 선택', '', 'PyTorch (*.pt)')
+        else:
+            path = QFileDialog.getExistingDirectory(self, '체크포인트 폴더 선택 (예: checkpoints/040000)')
         if not path:
             return
         self.resume_path.setText(path)
         root = Path(path).resolve()
+        if root.suffix == '.pt':
+            try:
+                saved = json.loads((root.parent / 'config.json').read_text())
+                opts = json.loads(self.options.toPlainText())
+                opts['steps'] = saved['steps']
+                opts['model_config'] = str(root.parent / 'config.json')
+                self.options.setPlainText(json.dumps(opts, indent=2, ensure_ascii=False))
+            except (OSError, ValueError, KeyError): pass
+            self.resume_training.setChecked(True)
+            return
         if root.name == 'pretrained_model':
             root = root.parent
         try:
@@ -495,17 +600,39 @@ class WorkflowPanel(QWidget):
             pass  # readiness validation explains incomplete checkpoints
         self.resume_training.setChecked(True)
 
-    def reset_options(self):
-        from .option_help import template
+    def reset_options(self, checked=False, restore_saved=False):
+        from .option_help import template, TRAIN_KEYS
         self.options.set_stage(self.stage.currentData())
-        values = template(self.stage.currentData())
-        if self.stage.currentData() == 'train':
-            values.pop('architecture', None)
+        stage = self.stage.currentData()
+        model = self.architecture.currentData() if stage == 'train' else None
+        self.options_context = (stage, model)
+        self.options.allowed_keys = TRAIN_KEYS[model] if model else None
+        values = dict(self.saved_stage_options.get(self.options_context, template(stage))) if restore_saved else template(stage)
+        if model:
+            values = {k: v for k, v in values.items() if k in TRAIN_KEYS[model]}
         self.options.setPlainText(json.dumps(values, indent=2, ensure_ascii=False))
+
+    def change_model(self):
+        if not hasattr(self, 'options') or self.stage.currentData() != 'train':
+            return
+        if self.options_context:
+            self.saved_stage_options[self.options_context] = json.loads(self.options.toPlainText())
+        self.reset_options(restore_saved=True)
+        self.show_model_controls()
+        self.update_ready()
+
+    def show_model_controls(self):
+        custom = self.options.editors.get('model_config')
+        custom_path = bool(custom and custom[0].isChecked() and custom[1].text().strip())
+        visible = (self.stage.currentData() == 'train' and self.architecture.currentData() == 'minivla'
+                   and not custom_path and not self.resume_training.isChecked())
+        self.minivla_head.setVisible(visible)
+        self.primary.layout().labelForField(self.minivla_head).setVisible(visible)
+        self.minivla_head.setEnabled(not self.busy)
 
     def change_section(self):
         groups = [('source', 'replay', 'annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'),
-                  ('accept', 'publish'), ('real_eval',)]
+                  ('real_eval',)]
         self.stage.blockSignals(True); self.stage.clear()
         for key in groups[self.section.currentIndex()]: self.stage.addItem(LABELS[key], key)
         self.stage.blockSignals(False); self.changed()
@@ -528,10 +655,22 @@ class WorkflowPanel(QWidget):
         dialog.exec()
 
     def configure_stage(self):
+        from .view import CameraView
         from .stages import feeds, controls, SIM_STAGES, INSPECTION_STAGES
         if not hasattr(self, 'feeds'): return
         stage = self.stage.currentData()
         visible = feeds(stage)
+        cameras = getattr(self, 'scene_cameras', ('side','wrist'))
+        if stage == 'real_eval': visible = tuple('real_'+n for n in cameras)
+        if stage in SIM_STAGES:
+            visible = tuple('sim_'+n for n in cameras)
+            if stage in INSPECTION_STAGES: visible = ('sim_overview', *visible)
+        for name in visible:
+            if name not in self.feeds:
+                self.feeds[name] = CameraView(name.upper() + ' — 영상 없음')
+                self.feed_titles[name] = QLabel(name.upper().replace('_',' '))
+                self.feed_titles[name].setMaximumHeight(24)
+
         self.images.setVisible(bool(visible)); self.preview_status.setVisible(bool(visible))
         for name, label in self.feeds.items():
             show = name in visible
@@ -551,8 +690,8 @@ class WorkflowPanel(QWidget):
         allowed = controls(stage, self.annotation_mode.currentIndex() == 1)
         for name, button in self.controls.items(): button.setVisible(name in allowed)
         self.task_state.setVisible(stage in INSPECTION_STAGES)
-        self.task_state.setText('접근 / Grasp / 컵 안 정지: 실행 대기')
-        self.task_selector.setVisible(stage not in ('accept', 'publish', 'hf_dataset', 'hf_policy'))
+        self.task_state.setText('접근 / Grasp / 작업 성공 조건: 실행 대기')
+        self.task_selector.setVisible(stage not in ('hf_dataset', 'hf_policy'))
         for widget, show in ((self.mode, stage in SIM_STAGES), (self.kind, len(STAGES[stage][0]) > 1)):
             widget.setVisible(show); self.main_form.labelForField(widget).setVisible(show)
         self.browse_buttons[0].setText('Workspace 선택' if stage == 'source' else 'Policy 폴더 선택' if stage in ('sim_eval', 'real_eval', 'hf_policy') else 'Dataset 폴더 선택' if stage in ('train', 'hf_dataset') else '입력 파일 선택')

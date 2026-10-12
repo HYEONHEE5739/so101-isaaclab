@@ -1,4 +1,4 @@
-"""Desktop control, field provenance, raw-image landmarks and numerical fitting."""
+"""Desktop hardware control, measured capture datasets and workflow monitoring."""
 
 import argparse
 import json
@@ -7,7 +7,6 @@ import sys
 import time
 from threading import Event
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -24,14 +23,16 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QTabWidget,
     QComboBox,
-    QInputDialog,
-    QDialog,
+    QListWidget,
+    QGroupBox,
     QScrollArea,
+    QCheckBox,
+    QSplitter,
+    QSizePolicy,
 )
-from .profile import load, validate, upgrade_legacy, digest
-from .storage import Bus, atomic, revision
-from . import references
-from . import calibration
+from ..workflow.view import CameraView
+from .profile import load
+from .storage import Bus, atomic
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -52,561 +53,330 @@ class Worker(QThread):
             self.failed.emit(str(exc))
 
 
-class ImageLabel(QLabel):
-    clicked = pyqtSignal(float, float)
-
-    def __init__(self):
-        super().__init__()
-        self.source = QPixmap()
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(240, 160)
-
-    def show_image(self, path):
-        pix = QPixmap(str(path))
-        if not pix.isNull():
-            self.source = pix
-            self.refresh()
-
-    def refresh(self):
-        if not self.source.isNull():
-            self.setPixmap(
-                self.source.scaled(
-                    self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-            )
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self.refresh()
-
-    def mousePressEvent(self, e):
-        pix = self.pixmap()
-        if pix and not self.source.isNull():
-            x = e.position().x() - (self.width() - pix.width()) / 2
-            y = e.position().y() - (self.height() - pix.height()) / 2
-            if 0 <= x < pix.width() and 0 <= y < pix.height():
-                self.clicked.emit(x * self.source.width() / pix.width(), y * self.source.height() / pix.height())
-
-
 class Window(QMainWindow):
     def __init__(self, workspace):
         super().__init__()
-        self.workspace = Path(workspace).resolve()
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.bus = Bus(self.workspace / "ipc")
+        self.workspace=Path(workspace).resolve();self.workspace.mkdir(parents=True,exist_ok=True)
+        self.bus=Bus(self.workspace/'ipc')
         from .launcher import RuntimeLauncher
-        self.runtime_launcher = RuntimeLauncher(self.bus, self.workspace, ROOT)
-        self.worker = None
-        self.cancel = Event()
-        self.pending = {}
-        self.reference_files = []
-        self.setWindowTitle("SO-101 Real2Sim Control / Measurement")
-        self.resize(1280, 980)
-        root = QWidget()
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        self.status = QLabel("Isaac runtime 연결 대기")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs, 1)
-        reference = QWidget()
-        rl = QVBoxLayout(reference)
-        self.tabs.addTab(reference, "1 · Reference")
-        rl.addWidget(QLabel("실제 환경 사진 등록 → 외부 Codex로 provisional profile 준비 → Real / Sim에서 확인·Capture → Inspect"))
-        rl.addWidget(QLabel("실제 사진만 등록하세요. Sim screenshot과 paired capture는 별도 데이터입니다."))
-        self.reference_view = QComboBox()
-        self.reference_view.addItems(references.VIEWS)
-        self.reference_view.setCurrentText("unknown")
-        rl.addWidget(QLabel("이번에 선택할 사진 전체의 view (파일명에서 추측하지 않습니다)"))
-        rl.addWidget(self.reference_view)
-        self.button(rl, "실제 사진 가져오기 (여러 장)", self.import_media)
-        self.button(rl, "Reference 목록 새로고침", self.reload_references)
-        location = QLabel(str(self.workspace / "references"))
-        location.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        rl.addWidget(location)
-        self.reference_summary = QLabel()
-        rl.addWidget(self.reference_summary)
-        self.reference_list = QPlainTextEdit()
-        self.reference_list.setReadOnly(True)
-        rl.addWidget(self.reference_list)
-        live = QWidget()
-        live_l = QVBoxLayout(live)
-        self.tabs.addTab(live, "2 · Real / Sim")
-        grid = QGridLayout()
-        live_l.addLayout(grid, 1)
-        self.views = {}
-        for i, (name, title) in enumerate(
-            [
-                ("real_side", "REAL SIDE"),
-                ("sim_side", "SIM SIDE"),
-                ("real_wrist", "REAL WRIST"),
-                ("sim_wrist", "SIM WRIST"),
-            ]
-        ):
-            tile = QWidget()
-            vl = QVBoxLayout(tile)
-            vl.addWidget(QLabel(title))
-            label = ImageLabel()
-            label.setText("No frame")
-            vl.addWidget(label, 1)
-            grid.addWidget(tile, i // 2, i % 2)
-            self.views[name] = label
-        row = QHBoxLayout()
-        live_l.addLayout(row)
-        for title, fn in [
-            ("Connect", self.connect_hw),
-            ("Start", lambda: self.send("start")),
-            ("Stop", self.stop),
-            ("Capture", lambda: self.send("capture")),
-            ("Disconnect / Sim 종료", self.disconnect_sim),
-        ]:
-            self.button(row, title, fn)
-        settings = QWidget()
-        form = QFormLayout(settings)
-        settings_scroll = QScrollArea()
-        settings_scroll.setWidgetResizable(True)
-        settings_scroll.setWidget(settings)
-        settings_scroll.setMaximumHeight(260)
-        live_l.addWidget(settings_scroll)
-        self.live_details = QLabel()
-        self.live_details.setWordWrap(True)
-        live_l.addWidget(self.live_details)
-        self.capture_details = QLabel()
-        self.capture_details.setWordWrap(True)
-        self.capture_details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.capture_details.setToolTip("영상을 보며 자세가 안정된 뒤 Capture를 누르세요. 최종 품질 판정은 runtime이 수행합니다.")
-        capture_scroll = QScrollArea()
-        capture_scroll.setWidgetResizable(True)
-        capture_scroll.setWidget(self.capture_details)
-        capture_scroll.setMaximumHeight(110)
-        # Keep capture feedback immediately below the camera/control area.
-        live_l.insertWidget(2, capture_scroll)
-        inspect = QWidget()
-        il = QVBoxLayout(inspect)
-        self.tabs.addTab(inspect, "3 · Inspect")
-        self.profile_details = QLabel("Profile 미선택")
-        self.profile_details.setWordWrap(True)
-        il.addWidget(self.profile_details)
-        self.button(il, "Profile 열기", self.open_profile)
-        self.button(il, "Profile 적용", lambda: self.send("apply_profile", {"profile": self.profile_path()}))
-        self.button(il, "USD + Profile 내보내기", lambda: self.send("export", {"profile": self.profile_path()}))
-        self.advanced = QTabWidget()
-        il.addWidget(QLabel("Advanced / optional · 수동 JSON 및 측정·수치 보정"))
-        il.addWidget(self.advanced)
-        self.fields = {}
-        for key, title, default in [
-            ("profile", "Profile JSON", ""),
-            ("leader_port", "Leader port", ""),
-            ("follower_port", "Follower port", ""),
-            ("follower_id", "Follower calibration ID", ""),
-            ("leader_calibration", "Leader calibration JSON (absolute path or existing filename)", "so101_leader.json"),
-            ("follower_calibration_dir", "Follower calibration directory", ""),
-            ("side_camera", "Side camera index/path", ""),
-            ("wrist_camera", "Wrist camera index/path", ""),
-        ]:
-            edit = QLineEdit(default)
-            self.fields[key] = edit
-            form.addRow(title, edit)
-        for title, fn in [
-            ("Profile 열기", self.open_profile),
-            ("Sim 미리보기 (장비 연결 없음)", lambda: self.connect_hw(True)),
-            ("USD + Profile 내보내기", lambda: self.send("export", {"profile": self.profile_path()})),
-        ]:
-            b = QPushButton(title)
-            b.clicked.connect(lambda checked=False, f=fn: self.guard(f))
-            form.addRow(b)
-        editor = QWidget()
-        el = QVBoxLayout(editor)
-        self.advanced.addTab(editor, "Profile JSON")
-        self.button(el, "알려진 치수 템플릿 열기", self.template)
-        self.editor = QPlainTextEdit()
-        el.addWidget(self.editor)
-        el.addWidget(QLabel("필드별 provenance를 유지합니다. 초기 pose/K/조명은 provisional이며, null은 unmeasured입니다."))
-        r = QHBoxLayout()
-        el.addLayout(r)
-        self.button(r, "새 revision 저장", self.save_profile)
-        calibrate = QWidget()
-        cl = QVBoxLayout(calibrate)
-        self.advanced.addTab(calibrate, "측정 / 수치 보정")
-        cl.addWidget(QLabel("기존 optimizer의 intrinsic 선행 조건은 유지됩니다. 체커보드 기능은 선택적 도구이며 bootstrap 등록 조건이 아닙니다."))
-        self.dataset = QLineEdit(str(self.workspace / "landmarks.json"))
-        cl.addWidget(QLabel("측정 landmark dataset"))
-        cl.addWidget(self.dataset)
-        self.group = QComboBox()
-        self.group.addItems(["side", "robot_base", "wrist", "workspace", "table"])
-        cl.addWidget(self.group)
-        for title, fn in [
-            ("선택 도구: Side 체커보드 보정", lambda: self.intrinsics("side")),
-            ("선택 도구: Wrist 체커보드 보정", lambda: self.intrinsics("wrist")),
-            ("사진에서 측정점 지정", self.annotate),
-            ("정량 오차 계산", self.metrics),
-            ("선택 그룹 최적화 + 재렌더", self.optimize),
-            ("현재 Profile로 데이터 재렌더", self.rerender),
-            ("Profile 적용", lambda: self.send("apply_profile", {"profile": self.profile_path()})),
-        ]:
-            b = QPushButton(title)
-            b.clicked.connect(lambda checked=False, f=fn: self.guard(f))
-            cl.addWidget(b)
-        cl.addWidget(
-            QLabel(
-                "정지한 여러 자세에서 캡처 → raw 사진에 알려진 3D 점 지정.\n고정 world 기준점으로 side부터 보정. capture 전체를 train/validation으로 분리.\nStop은 마지막 목표를 유지합니다. Disconnect는 토크를 해제합니다."
-            )
-        )
-        cl.addStretch()
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(150)
-        layout.addWidget(self.log)
-        settings_path = self.workspace / "ui_settings.json"
+        self.runtime_launcher=RuntimeLauncher(self.bus,self.workspace,ROOT)
+        self.runtime_enabled=False
+        self.runtime_session=None
+        self.requested_backend=None
+        self.teleop_start_buttons=[]
+        self.worker=None;self.cancel=Event();self.pending={};self.last_reply=None
+        self.setWindowTitle('SO-101 Real2Sim · Snapshot Capture');self.resize(1280,900)
+        root=QWidget();self.setCentralWidget(root);layout=QVBoxLayout(root)
+        self.status=QLabel('장치 연결 대기');self.status.setWordWrap(True);layout.addWidget(self.status)
+        self.content=QSplitter(Qt.Orientation.Horizontal);layout.addWidget(self.content,1)
+        self.tabs=QTabWidget();self.tabs.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Expanding);self.content.addWidget(self.tabs)
+        capture=QWidget();cap=QVBoxLayout(capture)
+        self.capture_scroll=QScrollArea();self.capture_scroll.setWidgetResizable(True);self.capture_scroll.setWidget(capture)
+        self.tabs.addTab(self.capture_scroll,'1 · Real2Sim Capture')
+        cameras=QHBoxLayout();cap.addLayout(cameras,1);self.capture_views={}
+        for name,title in [('real_side','REAL SIDE CAMERA'),('real_wrist','REAL WRIST CAMERA')]:
+            tile=QWidget();column=QVBoxLayout(tile);column.addWidget(QLabel(title))
+            image=CameraView(minimum=(240, 160));image.setText('No live frame');column.addWidget(image,1)
+            cameras.addWidget(tile,1);self.capture_views[name]=image
+        self.capture_readiness=QLabel();self.capture_readiness.setWordWrap(True);cap.addWidget(self.capture_readiness)
+        self.capture_session_label=QLabel('세션: Start 후 첫 캡처부터 같은 폴더에 저장합니다.')
+        self.capture_session_label.setWordWrap(True);cap.addWidget(self.capture_session_label)
+        capture_controls=QHBoxLayout();cap.addLayout(capture_controls)
+        self.capture_start=self.button(capture_controls,'Start · 카메라/로봇 연결',self.start_capture)
+        self.teleop_start_buttons.append(self.button(capture_controls,'Start Teleop',lambda:self.send('start')))
+        self.button(capture_controls,'Stop Teleop',self.stop)
+        self.button(capture_controls,'Disconnect',self.disconnect_sim)
+        hint=QLabel('Start는 실제 장치만 연결합니다. Sim은 실행하지 않습니다. 로봇 추종은 Start Teleop으로 시작하세요.');hint.setWordWrap(True);cap.addWidget(hint)
+        self.capture_button=self.button(cap,'현재 상태 캡처',self.capture_snapshot)
+        self.capture_result=QLabel('아직 캡처하지 않았습니다.');self.capture_result.setWordWrap(True);cap.addWidget(self.capture_result)
+        self.snapshot_list=QListWidget();self.snapshot_list.setMaximumHeight(130);cap.addWidget(self.snapshot_list)
+        hint=QLabel('물체 배치와 robot base는 유지하고 로봇 자세만 바꾸세요. 배치가 달라지면 Scene state를 변경하세요.');hint.setWordWrap(True);cap.addWidget(hint)
+        self.capture_options=QGroupBox('Snapshot 저장 설정');opts=QFormLayout(self.capture_options)
+        opts.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.capture_name=QLineEdit('Scene');opts.addRow('Scene 이름',self.capture_name)
+        self.capture_output=QLineEdit(str(self.workspace/'snapshots'));opts.addRow('저장 위치',self.capture_output)
+        folder_buttons=QHBoxLayout();self.capture_output_browse=self.button(folder_buttons,'폴더 선택',self.choose_capture_output);opts.addRow(folder_buttons)
+        self.capture_scene_state=QLineEdit('static_001');opts.addRow('Scene state (물체 배치)',self.capture_scene_state)
+        live=QWidget();live_l=QVBoxLayout(live)
+        self.live_scroll=QScrollArea();self.live_scroll.setWidgetResizable(True);self.live_scroll.setWidget(live)
+        self.tabs.addTab(self.live_scroll,'2 · Real / Sim')
+        backend_row=QHBoxLayout();live_l.addLayout(backend_row)
+        backend_row.addWidget(QLabel('Simulation backend'))
+        self.live_backend=QComboBox();self.live_backend.addItem('Isaac Sim / Isaac Lab','isaac');self.live_backend.addItem('MuJoCo','mujoco');backend_row.addWidget(self.live_backend,1)
+        grid=QGridLayout();live_l.addLayout(grid,1);self.live_grid=grid;self.live_tiles={};self.views={}
+        for i,(name,title) in enumerate([('real_side','REAL SIDE'),('sim_side','SIM SIDE'),('real_wrist','REAL WRIST'),('sim_wrist','SIM WRIST')]):
+            tile=QWidget();column=QVBoxLayout(tile);column.addWidget(QLabel(title));image=CameraView(minimum=(240, 160))
+            image.setText('No live frame');column.addWidget(image,1);grid.addWidget(tile,i//2,i%2);self.views[name]=image;self.live_tiles[name]=tile
+        controls=QHBoxLayout();live_l.addLayout(controls)
+        self.button(controls,'Connect',self.connect_hw)
+        self.teleop_start_buttons.append(self.button(controls,'Start Teleop',lambda:self.send('start')))
+        self.button(controls,'Stop Teleop',self.stop)
+        self.button(controls,'Disconnect',self.disconnect_sim)
+        self.pair_button=self.button(controls,'현재 상태 Pair 캡처',self.capture_pair)
+        self.pair_result=QLabel('Pair 저장 위치/Scene state는 Real2Sim Capture의 저장 설정을 사용합니다.');self.pair_result.setWordWrap(True);live_l.addWidget(self.pair_result)
+        hint=QLabel('Connect는 새 follower 목표를 보내지 않습니다. Start가 Teleop을 활성화하고 Stop은 새 목표 전송을 멈춥니다.');hint.setWordWrap(True);live_l.addWidget(hint)
+        settings=QWidget();settings_layout=QVBoxLayout(settings)
+        self.connection_group=QGroupBox('연결 설정');form=QFormLayout(self.connection_group);self.connection_form=form
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        settings_layout.addWidget(self.connection_group)
+        self.sim_options=QGroupBox('Simulation');sim_form=QFormLayout(self.sim_options)
+        sim_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows);form.addRow(self.sim_options)
+        self.live_workspace=QCheckBox('Pipeline Workspace 사용');self.live_workspace.setChecked(True);sim_form.addRow(self.live_workspace)
+        self.live_real_preview=QCheckBox('미리보기에서 REAL 카메라 연결');sim_form.addRow(self.live_real_preview)
+        self.live_renderer=QComboBox();self.live_renderer.addItems(['software-egl','egl','osmesa']);sim_form.addRow('MuJoCo renderer',self.live_renderer)
+        self.live_renderer.setCurrentText('egl')
+        from .launcher import resolve_live_renderer
+        if resolve_live_renderer('osmesa') != 'osmesa':
+            item=self.live_renderer.model().item(self.live_renderer.findText('osmesa'))
+            item.setEnabled(False);item.setToolTip('OSMesa 라이브러리 없음 · software-egl로 CPU 렌더링을 사용하세요.')
+        self.fields={}
+        for key,title,default in [('profile','Profile / camera calibration',''),('leader_port','Leader port',''),('follower_port','Follower port',''),('follower_id','Follower calibration ID',''),('leader_calibration','Leader calibration file','so101_leader.json'),('follower_calibration_dir','Follower calibration directory',''),('side_camera','Side camera index/path',''),('wrist_camera','Wrist camera index/path','')]:
+            self.fields[key]=QLineEdit(default);form.addRow(title,self.fields[key])
+        buttons=QVBoxLayout();form.addRow(buttons)
+        self.button(buttons,'Profile 선택',self.open_profile)
+        self.button(buttons,'선택 Profile 적용',lambda:self.send('apply_profile',{'profile':self.profile_path()}))
+        self.sim_preview_button=self.button(buttons,'Sim 미리보기',lambda:self.connect_hw(True))
+        self.use_precision=QCheckBox('저장된 관절 보정 사용 (다음 Connect)');form.addRow(self.use_precision)
+        self.identity_sim=QCheckBox('URDF 관절 기준 사용 · 예전 Scene 영점 보정 제외');form.addRow(self.identity_sim)
+        has_precision=any((self.workspace/'joint_calibration'/role/'active.json').is_file() for role in ('leader','follower'))
+        self.use_precision.setChecked(has_precision);self.identity_sim.setChecked(has_precision)
+        settings_layout.addWidget(self.capture_options);settings_layout.addStretch()
+        # Capture and Real/Sim share one right-hand configuration panel.
+        self.settings_scroll=QScrollArea();self.settings_scroll.setWidgetResizable(True);self.settings_scroll.setWidget(settings)
+        self.settings_scroll.setMinimumWidth(320);self.content.addWidget(self.settings_scroll)
+        self.content.setChildrenCollapsible(False)
+        self.content.setStretchFactor(0,1);self.content.setStretchFactor(1,0)
+        self.content.setSizes([880,360])
+        self.live_details=QLabel();self.live_details.setWordWrap(True);live_l.addWidget(self.live_details)
+        self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumHeight(100);layout.addWidget(self.log)
+        settings_path=self.workspace/'ui_settings.json'
         if settings_path.exists():
-            for k, v in json.loads(settings_path.read_text()).items():
-                if k in self.fields:
-                    self.fields[k].setText(v)
+            for k,v in json.loads(settings_path.read_text()).items():
+                if k in self.fields:self.fields[k].setText(v)
         from ..workflow.ui import WorkflowPanel
-        self.workflow_panel = WorkflowPanel(self.work, self)
-        self.tabs.addTab(self.workflow_panel, "4 · Workspace Pipeline")
-        self.tabs.currentChanged.connect(lambda _: self.log.setVisible(self.tabs.currentWidget() is not self.workflow_panel))
-        self.reload_references()
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(200)
-        self.refresh()
+        self.workflow_panel=WorkflowPanel(self.work,self)
+        self.live_backend.setCurrentIndex(self.live_backend.findData(self.workflow_panel.backend.currentData()))
+        self.live_backend.currentIndexChanged.connect(lambda i:self.workflow_panel.backend.setCurrentIndex(i))
+        self.workflow_panel.backend.currentIndexChanged.connect(lambda i:self.live_backend.setCurrentIndex(i))
+        self.tabs.addTab(self.workflow_panel,'3 · Workspace Pipeline')
+        from .precision_ui import PrecisionPanel
+        self.precision_panel=PrecisionPanel(self);self.tabs.addTab(self.precision_panel,'4 · Precision Calibration')
+        self.tabs.currentChanged.connect(self.change_tab);self.change_tab(0)
+        self.timer=QTimer(self);self.timer.timeout.connect(self.refresh);self.timer.start(200);self.refresh()
 
-    def guard(self, fn):
-        try:
-            return fn()
+    def guard(self,fn):
+        try:return fn()
         except Exception as exc:
-            self.log.appendPlainText(str(exc))
-            QMessageBox.warning(self, "확인 필요", str(exc))
+            self.log.appendPlainText(str(exc));QMessageBox.warning(self,'확인 필요',str(exc))
 
-    def button(self, row, title, fn):
-        b = QPushButton(title)
-        b.clicked.connect(lambda checked=False: self.guard(fn))
-        row.addWidget(b)
-        return b
+    def button(self,row,title,fn):
+        button=QPushButton(title);button.clicked.connect(lambda checked=False:self.guard(fn));row.addWidget(button);return button
+
+    def sync_scene_cameras(self):
+        path = self.workflow_panel.workspace.text().strip()
+        if not path or path == getattr(self,'_live_scene_path',None): return
+        from .workspaces.package import load as load_workspace
+        try: workspace = load_workspace(path)
+        except (ValueError,OSError,KeyError): return
+        if 'profile' not in workspace: return
+        names = list(workspace['profile']['cameras'])
+        self._live_scene_path = path
+        for i,name in enumerate(names):
+            for prefix in ('real_','sim_'):
+                key = prefix+name
+                if key not in self.views:
+                    tile=QWidget();column=QVBoxLayout(tile);column.addWidget(QLabel(key.upper().replace('_',' ')))
+                    image=CameraView(minimum=(240,160));image.setText('No live frame');column.addWidget(image,1)
+                    self.views[key]=image;self.live_tiles[key]=tile
+        for key,tile in self.live_tiles.items():
+            tile.setVisible(key.removeprefix('real_').removeprefix('sim_') in names)
+            self.live_grid.removeWidget(tile)
+        for i,name in enumerate(names):
+            for col,prefix in enumerate(('real_','sim_')): self.live_grid.addWidget(self.live_tiles[prefix+name],i,col)
+        bindings = workspace['task'].get('real_camera_bindings', {})
+        for name in names:
+            key=bindings.get(name,name+'_camera')
+            if key not in self.fields:
+                settings_path=self.workspace/'ui_settings.json'
+                saved=json.loads(settings_path.read_text()) if settings_path.exists() else {}
+                edit=QLineEdit(saved.get(key,''));self.fields[key]=edit
+                self.connection_form.addRow(name+' camera index/path',edit)
+            self.fields[key].setToolTip('Metadata camera ID: '+name+'; select the actual connected device')
 
     def profile_path(self):
-        path = self.fields["profile"].text().strip()
-        if not path:
-            raise ValueError("측정 Profile을 먼저 선택하거나 저장하세요")
+        path=self.fields['profile'].text().strip()
+        if not path:raise ValueError('연결 설정에서 Profile을 선택하세요')
         return str(Path(path).resolve())
 
-    def profile(self):
-        return load(self.profile_path())
-
-    def selected(self, path):
-        self.fields["profile"].setText(str(path))
-        p = load(path)
-        self.editor.setPlainText(json.dumps(p, indent=2, ensure_ascii=False))
-        self.group.clear()
-        self.group.addItems(
-            ["side", "robot_base", "wrist", "workspace", "table", *["object:" + n for n in p["objects"]]]
-        )
-
-    def send(self, name, payload=None):
-        if name in ("start", "connect", "apply_profile") and self.worker and self.worker.isRunning():
-            raise ValueError("보정 작업 중에는 Start/장면 변경을 할 수 없습니다")
-        identifier = self.bus.send(name, payload)
-        self.pending[identifier] = name
-        return identifier
-
-    def stop(self):
-        self.cancel.set()
-        if self.runtime_launcher.pending is not None:
-            self.runtime_launcher.cancel_connect()
-            self.log.appendPlainText("자동 Connect 취소 · Isaac 프로세스는 유지됩니다.")
-            return
-        self.send("stop")
-
-    def connect_hw(self, preview=False):
-        if self.worker and self.worker.isRunning():
-            raise ValueError("진행 중인 보정 작업이 끝난 뒤 연결하세요")
-        hardware = {k: v.text().strip() for k, v in self.fields.items() if k != "profile"}
-        payload = {"profile": self.profile_path(), "hardware": hardware, "preview_only": preview}
-        identifier = self.runtime_launcher.connect(payload, self.workflow_panel.python.text().strip(),
-                                                   headless=self.workflow_panel.mode.currentData() == 'operator')
-        if identifier:
-            self.pending[identifier] = "connect"
-        else:
-            self.log.appendPlainText("Isaac 자동 시작 · 준비 후 Connect 실행 · 로그: " + str(self.runtime_launcher.log_path))
-        atomic(self.workspace / "ui_settings.json", {k: v.text() for k, v in self.fields.items()})
-
-    def disconnect_sim(self):
-        if self.worker and self.worker.isRunning():
-            raise ValueError("보정 작업이 끝난 뒤 Disconnect를 실행하세요.")
-        identifier = self.runtime_launcher.disconnect()
-        if identifier:
-            self.pending[identifier] = "disconnect"
-        else:
-            self.log.appendPlainText("자동 연결 취소 · 시작 중인 Isaac 종료 요청")
-
-    def refresh(self):
-        atomic(self.bus.root / "ui_heartbeat.json", {"time": time.time()})
-        try:
-            identifier = self.runtime_launcher.poll()
-            if identifier:
-                self.pending[identifier] = "connect"
-                self.log.appendPlainText("Isaac 준비 완료 · Connect 요청 전송")
-        except Exception as exc:
-            self.log.appendPlainText("ERROR: " + str(exc))
-        s = self.bus.status()
-        fresh = self.bus.responsive(s)
-        self.status.setText(
-            (
-                f"{s.get('state')} · Capture {s.get('capture_number', 0):06d} · Real {s.get('real_connected')} / Sim {s.get('sim_connected')}\n{s.get('message', '')}\nJoint: {s.get('joint_error')}\n{s.get('error') or ''}"
-                if fresh
-                else "Isaac 연결 끊김 / 시작 대기 · 마지막 영상은 실시간이 아닙니다"
-            )
-        )
-        if self.runtime_launcher.pending is not None:
-            self.status.setText("Isaac 자동 시작 중 · 준비 후 연결됩니다.\n로그: " + str(self.runtime_launcher.log_path))
-        availability = s.get("availability", {}) if fresh else {}
-        quality = s.get("capture_quality") if fresh else None
-        self.live_details.setText(
-            f"Hardware: {availability.get('robot_state', '확인 불가')} · "
-            f"Side: {availability.get('real_side', '확인 불가')} · Wrist: {availability.get('real_wrist', '확인 불가')}\n"
-            f"적용 profile hash: {s.get('profile_hash') if fresh else '확인 불가'}")
-        self.capture_details.setText(
-            f"Session: {s.get('capture_session', '확인 불가')} · 저장 수: {s.get('capture_number', 0)}\n"
-            f"상태 (최근 관측 기준): {availability or 'runtime 확인 불가'}\n"
-            f"Capture 품질: {json.dumps(quality, ensure_ascii=False) if quality else '아직 평가되지 않음'}\n"
-            f"최근 저장: {s.get('last_capture') or '없음'}")
-        self.profile_details.setText(
-            f"선택 profile/revision: {self.fields['profile'].text() or '미선택'}\n"
-            f"Runtime 적용 hash: {s.get('profile_hash') if fresh else '확인 불가'}\n"
-            "Provenance와 보정 상태는 아래 Profile JSON에서 확인하고, metrics 결과는 하단 로그에서 확인하세요.")
-        if not fresh:
-            for label in self.views.values():
-                label.source = QPixmap()
-                label.setText("No live frame")
-        if fresh:
-            for name, label in self.views.items():
-                f = self.bus.root / (name + ".jpg")
-                connected = s.get("real_connected") if name.startswith("real_") else s.get("sim_connected")
-                if connected and f.exists() and time.time() - f.stat().st_mtime < 2:
-                    label.show_image(f)
-                else:
-                    label.source = QPixmap()
-                    label.setText("No live frame")
-        for identifier, name in list(self.pending.items()):
-            path = self.bus.root / ("reply_" + identifier + ".json")
-            if path.exists():
-                reply = json.loads(path.read_text())
-                self.log.appendPlainText(name + ": " + json.dumps(reply, ensure_ascii=False))
-                path.unlink()
-                del self.pending[identifier]
-
-    def work(self, fn, done=None):
-        if self.worker and self.worker.isRunning():
-            raise ValueError("다른 작업이 진행 중입니다")
-        self.cancel.clear()
-        self.worker = Worker(fn)
-        self.worker.progress.connect(self.log.appendPlainText)
-        self.worker.failed.connect(lambda s: self.log.appendPlainText("ERROR: " + s))
-        self.worker.done.connect(
-            done or (lambda result: self.log.appendPlainText(json.dumps(result, ensure_ascii=False, indent=2)))
-        )
-        self.worker.start()
+    def selected(self,path):
+        load(path);self.fields['profile'].setText(str(Path(path).resolve()))
 
     def open_profile(self):
         from ..workflow.artifacts import browse_directory
-        path, _ = QFileDialog.getOpenFileName(self, "Profile 선택", browse_directory("revision"), "JSON (*.json)")
-        if path:
-            self.selected(path)
+        path,_=QFileDialog.getOpenFileName(self,'Profile / camera calibration',browse_directory('profile'),'JSON (*.json)')
+        if path:self.selected(path)
 
-    def template(self):
-        path = ROOT / "docs/real2sim/measurements.example.json"
-        self.editor.setPlainText(path.read_text())
-        self.tabs.setCurrentIndex(2)
-        self.advanced.setCurrentIndex(0)
+    def choose_capture_output(self):
+        path=QFileDialog.getExistingDirectory(self,'Snapshot 저장 위치',self.capture_output.text())
+        if path:self.capture_output.setText(path)
 
-    def save_profile(self):
-        p = json.loads(self.editor.toPlainText())
-        p = upgrade_legacy(p)
-        parent = self.fields["profile"].text().strip()
-        p["revision"] = {"kind": "manual", "parent": digest(load(parent)) if parent else None}
-        path = revision(self.workspace, validate(p))
-        self.selected(path)
-        self.log.appendPlainText("Saved " + str(path))
+    def capture_snapshot(self):
+        self.send('capture_snapshot',{'output':self.capture_output.text(),'name':self.capture_name.text(),'scene_state':self.capture_scene_state.text().strip()})
 
-    def reload_references(self):
-        records, warnings = references.discover(self.workspace / "references")
-        self.reference_files = [r["path"] for r in records if r["role"] == "real_reference"]
-        counts = {v: sum(r["role"] == "real_reference" and r["view"] == v for r in records)
-                  for v in references.VIEWS}
-        legacy = sum(r["role"] == "unclassified" for r in records)
-        self.reference_summary.setText(" · ".join(f"{v}: {n}" for v, n in counts.items()) + f" · legacy 미분류: {legacy}")
-        self.reference_list.setPlainText("\n".join(
-            [f"{r['role']} / {r['view']} · {r['original_filename']} · {r['path']}" for r in records]
-            + ["확인 필요: " + w for w in warnings]))
+    def capture_pair(self):
+        self.send('capture_pair',{'output':self.capture_output.text(),'name':self.capture_name.text(),
+            'scene_state':self.capture_scene_state.text().strip()})
+        self.capture_result.setText('현재 observation 확보 및 저장 중…')
 
-    def import_media(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "실제 환경 사진 선택 (선택한 전체 batch에 view 적용)", "", "Images (*.jpg *.jpeg *.png)"
-        )
-        if not files:
-            return
-        view = self.reference_view.currentText()
-        self.work(
-            lambda notify: references.import_images(self.workspace / "references", files, view),
-            lambda result: (self.reload_references(), self.log.appendPlainText(f"실제 reference {len(result['items'])}장 등록")),
-        )
+    def send(self,name,payload=None):
+        if not self.runtime_enabled or self.runtime_session != self.bus.status().get('session'):
+            raise RuntimeError('Capture의 Start 또는 Real/Sim의 Connect로 먼저 연결하세요.')
+        identifier=self.bus.send(name,payload);self.pending[identifier]=name;return identifier
 
-    def intrinsics(self, view):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "같은 카메라의 체커보드 사진 (10장 이상)", "", "Images (*.png *.jpg *.jpeg)"
-        )
-        if not files:
-            return
-        text, ok = QInputDialog.getText(self, "보드 규격", "내부 코너 열, 행, 칸 한 변(m) 예: 9,6,0.025")
-        if not ok:
-            return
-        cols, rows, square = map(float, text.split(","))
-        p = self.profile()
+    def change_tab(self,index):
+        if index == 1 and hasattr(self, 'workflow_panel'): self.sync_scene_cameras()
+        self.log.setVisible(index!=2)
+        self.settings_scroll.setVisible(index!=2)
+        self.capture_options.setVisible(index==0)
+        self.sim_options.setVisible(index==1);self.sim_preview_button.setVisible(index==1)
 
-        def task(notify):
-            p["cameras"][view].update(calibration.calibrate_intrinsics(files, int(cols), int(rows), square))
-            p["cameras"][view]["extrinsics_calibrated"] = False
-            for key in ("K", "distortion"):
-                p["cameras"][view]["provenance"][key] = "numerically_fitted"
-            p["cameras"][view]["provenance"]["resolution"] = "derived"
-            return revision(self.workspace, p, p["cameras"][view]["intrinsics_report"])
+    def start_capture(self):
+        self.connect_hw(backend='real')
 
-        self.work(task, self.selected)
+    def connect_precision(self, payload):
+        if self.workflow_panel.busy: raise ValueError('Workflow을 중지하고 장치를 해제하세요.')
+        s=self.bus.status()
+        if self.bus.owner_alive() and s.get('backend')!='calibration':
+            raise ValueError('먼저 Capture/Real-Sim에서 Disconnect하세요. Calibration은 Teleop과 장치를 공유하지 않습니다.')
+        if self.runtime_enabled and self.runtime_session==s.get('session') and s.get('backend')=='calibration':
+            return self.send('precision.connect',payload)
+        identifier=self.runtime_launcher.connect({'precision':payload},self.workflow_panel.python.text().strip(),backend='calibration',headless=True)
+        self.runtime_enabled=True;self.requested_backend='calibration';self.runtime_session=s.get('session') if identifier else None
+        if identifier:self.pending[identifier]='connect'
 
-    def annotate(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "COMPLETE가 있는 capture 폴더 선택", str(self.workspace / "captures")
-        )
-        if not folder:
-            return
-        if not (Path(folder) / "COMPLETE").exists():
-            raise ValueError("완료된 캡처가 아닙니다")
-        view, ok = QInputDialog.getItem(self, "Camera", "Raw real camera", ["side", "wrist"], 0, False)
-        if not ok:
-            return
-        dataset_path = Path(self.dataset.text())
-        dataset = {"observations": []}
-        if dataset_path.exists():
-            dataset = json.loads(dataset_path.read_text())
-        existing = [
-            r["split"]
-            for r in dataset["observations"]
-            if str((dataset_path.parent / r["capture"]).resolve()) == str(Path(folder).resolve())
-        ]
-        split = (
-            existing[0]
-            if existing
-            else QInputDialog.getItem(self, "데이터 분할", "이 capture 전체의 용도", ["train", "validation"], 0, False)[
-                0
-            ]
-        )
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Raw pixel 선택 → 실측 3D 좌표 입력")
-        dialog.resize(1000, 800)
-        layout = QVBoxLayout(dialog)
-        label = ImageLabel()
-        label.show_image(Path(folder) / ("real_" + view + ".png"))
-        layout.addWidget(label)
-        info = QLabel("점 좌표 frame: world / workspace / table / object:이름 / robot:링크이름")
-        layout.addWidget(info)
-
-        def clicked(u, v):
-            text, ok = QInputDialog.getText(dialog, "실측점", "frame, x(m), y(m), z(m) 예: world,0.1,0.2,0.6")
-            if not ok:
-                return
-            try:
-                parts = text.split(",")
-                frame = parts[0].strip()
-                xyz = list(map(float, parts[1:]))
-                if len(xyz) != 3:
-                    raise ValueError("XYZ 3개를 입력하세요")
-                dataset["observations"].append(
-                    {
-                        "capture": str(Path(folder).resolve()),
-                        "view": view,
-                        "split": split,
-                        "frame": frame,
-                        "point_m": xyz,
-                        "uv": [u, v],
-                    }
-                )
-                atomic(dataset_path, dataset)
-                info.setText(f"저장 {len(dataset['observations'])}점 · pixel ({u:.1f}, {v:.1f})")
-            except Exception as exc:
-                QMessageBox.warning(dialog, "입력 오류", str(exc))
-
-        label.clicked.connect(clicked)
-        dialog.exec()
-
-    def metrics(self):
-        p = self.profile()
-        path = self.dataset.text()
-        self.work(lambda notify: calibration.evaluate(p, calibration.load_dataset(path)))
-
-    def ensure_stopped(self):
-        s = self.bus.status()
-        if s.get("state") not in ("STOPPED", "CONNECTED"):
-            raise ValueError("장비 연결 후 Stop 상태에서 실행하세요")
-
-    def optimize(self):
-        self.ensure_stopped()
-        p = self.profile()
-        path = self.dataset.text()
-        group = self.group.currentText()
-
-        def task(notify):
-            rows = calibration.load_dataset(path)
-            candidate, report = calibration.optimize(p, rows, group)
-            dest = revision(self.workspace, candidate, report)
-            if not report["accepted"]:
-                notify(json.dumps(report))
-                return None
-            identifier = self.bus.send(
-                "render_dataset", {"profile": str(dest), "captures": sorted({r["capture"] for r in rows})}
-            )
-            result = self.bus.wait(identifier, 300)
-            notify(json.dumps(result))
-            return dest
-
-        self.work(
-            task,
-            lambda result: (
-                self.selected(result) if result else self.log.appendPlainText("후보 거부: 기존 profile 유지")
-            ),
-        )
-
-    def rerender(self):
-        self.ensure_stopped()
-        path = self.dataset.text()
-        profile = self.profile_path()
-        self.work(
-            lambda notify: self.bus.wait(
-                self.bus.send(
-                    "render_dataset",
-                    {"profile": profile, "captures": sorted({r["capture"] for r in calibration.load_dataset(path)})},
-                ),
-                300,
-            )
-        )
-
-    def closeEvent(self, event):
-        self.runtime_launcher.cancel_connect()
+    def stop(self):
         self.cancel.set()
-        self.workflow_panel.service.cancel()
+        if self.runtime_launcher.pending is not None or self.runtime_launcher.replacement is not None:
+            self.disconnect_sim();return
+        self.send('stop')
+
+    def connect_hw(self,preview=False,backend=None):
+        if self.workflow_panel.busy:raise ValueError('Workflow 실행을 중지한 뒤 연결하세요. 중복 장치 연결을 방지합니다.')
+        if self.bus.owner_alive() and self.bus.status().get('backend')=='calibration':
+            raise ValueError('Precision 장치를 Disconnect한 뒤 Runtime을 Disconnect하세요. 중복 포트 연결을 하지 않습니다.')
+        if backend != 'real': self.sync_scene_cameras()
+        hardware={k:v.text().strip() for k,v in self.fields.items() if k!='profile'}
+        payload={'hardware':hardware,'preview_only':preview,'real_camera_preview':self.live_real_preview.isChecked()}
+        backend=backend or self.live_backend.currentData()
+        profile=None
+        if backend != 'real' and self.live_workspace.isChecked() and self.workflow_panel.workspace.text().strip():
+            from .workspaces.package import load as load_workspace
+            w=load_workspace(self.workflow_panel.workspace.text());profile=str(w['root']/'profile.json');payload['workspace']=str(w['root'])
+            selected=self.workflow_panel.task_selector.selection()
+            if selected:payload['task_definition']=selected[0]
+        payload['profile']=profile or self.profile_path()
+        payload['precision_options']={'use_precision':self.use_precision.isChecked(),
+                                      'identity_sim_for_validation':self.identity_sim.isChecked()}
+        renderer=self.live_renderer.currentText()
+        if backend=='mujoco':
+            from .launcher import resolve_live_renderer
+            resolved=resolve_live_renderer(renderer)
+            if resolved!=renderer:
+                self.log.appendPlainText(f'{renderer} 사용 불가 · {resolved}로 렌더링합니다.')
+                self.live_renderer.setCurrentText(resolved)
+            renderer=resolved
+        identifier=self.runtime_launcher.connect(payload,self.workflow_panel.python.text().strip(),headless=self.workflow_panel.mode.currentData()=='operator',backend=backend,renderer=renderer)
+        # A superseded connection may never reply after its worker is cancelled.
+        self.pending={key:value for key,value in self.pending.items() if value!='connect'}
+        self.runtime_enabled=True
+        self.requested_backend=backend
+        self.runtime_session=self.bus.status().get('session') if identifier else None
+        if identifier:self.pending[identifier]='connect'
+        atomic(self.workspace/'ui_settings.json',{k:v.text() for k,v in self.fields.items()})
+
+    def disconnect_sim(self):
+        identifier=self.runtime_launcher.disconnect()
+        self.pending={key:value for key,value in self.pending.items() if value!='connect'}
+        if identifier:self.pending[identifier]='disconnect'
+        self.runtime_enabled=False
+        self.runtime_session=None
+
+    def refresh(self):
+        if self.runtime_enabled and self.runtime_session == self.bus.status().get('session'):
+            atomic(self.bus.root/'ui_heartbeat.json',{'time':time.time()})
         try:
-            self.bus.send("stop")
-        except RuntimeError:
-            pass
-        if self.worker and self.worker.isRunning():
-            QMessageBox.information(
-                self, "작업 종료 대기", "중지 요청을 보냈습니다. 현재 계산 작업이 끝난 뒤 닫아주세요."
-            )
-            event.ignore()
-            return
-        atomic(self.workspace / "ui_settings.json", {k: v.text() for k, v in self.fields.items()})
-        event.accept()
+            identifier=self.runtime_launcher.poll()
+            if identifier:
+                self.pending[identifier]='connect'
+                self.runtime_session=self.bus.status().get('session')
+        except Exception as exc:self.log.appendPlainText(str(exc))
+        s=self.bus.status()
+        starting=self.runtime_launcher.pending is not None or self.runtime_launcher.replacement is not None or self.runtime_launcher.stopping
+        connecting=starting or 'connect' in self.pending.values()
+        backend=self.requested_backend if starting else s.get('backend')
+        # Choice is for the next explicit Connect; old status must not override or lock it.
+        self.live_backend.setEnabled(not starting and not self.workflow_panel.busy)
+        self.workflow_panel.backend.setEnabled(not starting and not self.workflow_panel.busy);self.live_renderer.setEnabled(not starting)
+        fresh=bool(self.runtime_enabled and self.runtime_session == s.get('session') and self.bus.responsive(s))
+        self.precision_panel.refresh(s.get('precision') if fresh else {})
+        availability=s.get('availability',{}) if fresh else {}
+        data=(s.get('snapshot_dataset') or {}) if fresh else {};count=data.get('count',0)
+        session=(s.get('snapshot_session') or {}) if fresh else {}
+        self.capture_session_label.setText('세션: '+str(data.get('root') or session.get('id') or 'Start 후 첫 캡처부터 같은 폴더에 저장합니다.'))
+        for widget in (self.capture_output,self.capture_output_browse,self.capture_name):
+            widget.setEnabled(not bool(data))
+        connected=bool(fresh and s.get('real_connected'))
+        side=connected and availability.get('real_side')=='frame received';wrist=connected and availability.get('real_wrist')=='frame received'
+        feedback=connected and availability.get('robot_state')
+        self.capture_start.setEnabled(not connecting and not self.workflow_panel.busy and not (connected and backend=='real'))
+        for button in self.teleop_start_buttons:
+            button.setEnabled(bool(connected and not connecting and s.get('precision_teleop_ready',True)))
+        self.capture_readiness.setText(f"Robot: {'Connected' if connected else 'Disconnected'} · Side: {'Connected' if side else 'Disconnected'} · Wrist: {'Connected' if wrist else 'Disconnected'}\nJoint Feedback: {'Receiving' if feedback else 'Unavailable'} · Captured Snapshots: {count}")
+        self.capture_button.setEnabled(bool(feedback and side and wrist and not connecting and 'capture_snapshot' not in self.pending.values()))
+        self.pair_button.setEnabled(bool(feedback and side and wrist and s.get('sim_connected') and not connecting
+            and 'capture_pair' not in self.pending.values()))
+        self.status.setText(f"{backend or 'runtime'} · {s.get('state')} · {s.get('message','')}\n{s.get('error') or ''}" if fresh else '대기 · Capture Start 또는 Real/Sim Connect를 눌러 시작하세요.')
+        self.live_details.setText(f"적용 profile hash: {s.get('profile_hash') if fresh else '없음'} · Real: {connected} / Sim: {bool(fresh and s.get('sim_connected'))}")
+        if self.runtime_launcher.pending is not None:self.status.setText('Runtime 시작 중 · 로그: '+str(self.runtime_launcher.log_path))
+        elif self.runtime_launcher.stopping:self.status.setText('이전 Runtime 종료 중 · 장치 재연결은 종료 후에 진행합니다.')
+        elif not self.runtime_enabled and self.bus.owner_alive():
+            self.status.setText('대기 · 이전 '+str(s.get('backend'))+' Runtime이 남아 있습니다. Start/Connect 시 모드를 전환하거나 Disconnect로 종료하세요.')
+        self.snapshot_list.clear()
+        for item in s.get('snapshot_results',[]) if fresh else []:self.snapshot_list.addItem(item['id']+' — '+item['status']+' · '+item['path'])
+        for name,label in [*self.views.items(),*self.capture_views.items()]:
+            path=self.bus.root/(name+'.jpg');ready=(s.get('real_camera_connected') if name.startswith('real_') else s.get('sim_connected'))
+            if fresh and ready and path.exists() and time.time()-path.stat().st_mtime<2:label.show_image(path)
+            else:label.clear();label.setText('No live frame')
+        for identifier,name in list(self.pending.items()):
+            path=self.bus.root/('reply_'+identifier+'.json')
+            if not path.exists():continue
+            reply=json.loads(path.read_text());path.unlink();del self.pending[identifier]
+            if name.startswith('precision.'):
+                self.precision_panel.reply(name,reply)
+                self.log.appendPlainText(name+': '+self.precision_panel.operation_status.text())
+            else:self.log.appendPlainText(name+': '+json.dumps(reply,ensure_ascii=False))
+            if name in ('capture_snapshot','capture_pair'):
+                if reply.get('ok'):
+                    result=reply['result'];self.capture_result.setText(f"{result['id']} — {result['status']} · {result['timestamp_ns']} ns\n{result['path']}\n"+'; '.join(result['warnings']))
+                else:self.capture_result.setText('Capture 실패 · 저장 완료로 등록하지 않음 · '+str(reply.get('error',reply.get('result')))+' · 정지 자세에서 다시 캡처하세요.')
+                if name=='capture_pair':self.pair_result.setText(self.capture_result.text())
+
+    def work(self,fn,done=None):
+        if self.worker and self.worker.isRunning():raise ValueError('다른 작업이 진행 중입니다')
+        self.cancel.clear();self.worker=Worker(fn);self.worker.progress.connect(self.log.appendPlainText)
+        self.worker.failed.connect(lambda s:self.log.appendPlainText('ERROR: '+s));self.worker.done.connect(done or (lambda r:self.log.appendPlainText(json.dumps(r,ensure_ascii=False,indent=2))));self.worker.start()
+
+    def closeEvent(self,event):
+        self.cancel.set();self.workflow_panel.service.cancel()
+        try:
+            if self.runtime_launcher.pending is not None:self.runtime_launcher.disconnect()
+            elif self.runtime_enabled:
+                if self.requested_backend=='calibration':self.runtime_launcher.disconnect()
+                else:self.bus.send('stop')
+        except RuntimeError:pass
+        self.runtime_launcher.cancel_connect()
+        if self.worker and self.worker.isRunning():event.ignore();return
+        atomic(self.workspace/'ui_settings.json',{k:v.text() for k,v in self.fields.items()});event.accept()
 
 
 def main():

@@ -14,19 +14,19 @@ Physical SO-101
 source/.../real2sim/
   ├─ hardware.py / cameras.py
   ├─ runtime.py
-  ├─ calibration.py
+  ├─ capture_dataset.py
   ├─ profile.py
   ├─ scene.py
   └─ storage.py
            │
-           ├─ paired Real/Sim capture + metrics
-           ├─ profile revisions
-           └─ accepted Real2Sim profile
+           ├─ REAL Snapshot → 독립 Builder 보정/비교/export
+           ├─ Isaac/MuJoCo Real/Sim 프리뷰와 Teleop
+           └─ Profile/Workspace 로드
                          │
                          ▼
 source/.../real2sim/workspaces/
   ├─ package.py
-  ├─ scene_assets.py
+  ├─ builder.py
   ├─ environment.py
   ├─ physics.py
   ├─ reset.py
@@ -39,34 +39,45 @@ Published Workspace Environment
                          ▼
 source/.../workflow/
   ├─ artifacts.py / operations.py / stages.py
+  ├─ mujoco.py / episodes.py
   ├─ tasks.py / task_ui.py
   ├─ policy.py / evaluation.py / hub.py
   └─ ui.py / view.py / presentation.py
                          │
                          ▼
 Demo → Annotation → Datagen → Convert → Train → Evaluate
+  │                │
+  ▼                ▼
+source/.../simulation/          source/.../learning/minivla/
+  mujoco_backend.py              config.py / data.py / train.py
+  mjcf.py / workspace_scene.py   backbone.py / head.py / policy.py
 ```
+
+Workflows의 공통 worker·Builder workspace import·HDF5 import는
+`scripts/real2sim/workflow.py`의 subcommand로 실행한다. 실물 상주 Runtime,
+Isaac AppLauncher가 필요한 Mimic/teleoperation, 독립 물리 검사는 서로 다른
+실행 경계라 별도 진입점을 유지한다.
 
 ## 2. Real2Sim core
 
 경로: `source/soarm101_lab/soarm101_lab/real2sim/`
 
-- `runtime.py`: Isaac runtime과 실제 장비/카메라를 연결하는 핵심 실행 계층. pose 적용, render, capture와 runtime 상태를 담당한다.
+- `runtime.py`: real-only 또는 Isaac/MuJoCo와 실제 장비/카메라를 연결한다. Teleop, 실측 pose 프리뷰, snapshot 요청과 연결 세션을 담당한다.
 - `hardware.py`: follower 등 실제 SO-101 하드웨어 경계.
 - `cameras.py`: 실제 카메라 frame 획득과 capture timestamp 경계.
 - `core.py`: Real/Sim 공통 수치 처리, pose/joint 관련 핵심 helper.
 - `profile.py`: camera, workspace, robot/object/scene 파라미터와 provenance를 가진 Real2Sim profile의 검증/로드.
-- `calibration.py`: intrinsics/extrinsics, landmark, image metric 등 측정/최적화 로직.
+- `capture_dataset.py`: 원본 REAL 두 이미지/실측 관절/타이밍을 검증하고 세션의 공유 모델·보정 및 개별 snapshot을 원자적으로 저장한다.
 - `scene.py`: profile을 Isaac Sim scene/USD 표현으로 적용하는 계층.
-- `references.py`: 실제 reference 입력 관리.
-- `storage.py`: revision, capture, IPC 상태 등 파일 기반 저장.
-- `bootstrap.py`: 초기 scene/profile bootstrap 지원.
-- `agent.py`: 외부 agent orchestration용 보조 계층. 수치 파라미터를 임의 추측하는 용도가 아니다.
+- `storage.py`: atomic 저장, 디렉터리 fsync, 파일 IPC와 runtime 소유권 잠금.
 - `ui.py`: Real2Sim UI. Isaac runtime과 별도 프로세스로 동작하며 workspace의 file IPC를 사용한다.
 
 진입점:
 - `scripts/real2sim/real2sim_ui.py`
 - `scripts/real2sim/real2sim_sim.py`
+
+옛 paired capture/continuous recorder/변환/Reference import/API agent/수치 fitting은 제거했다.
+scene 재구성·landmark fitting·render 비교·dual export는 독립 `real2sim-builder`에서 수행한다.
 
 ## 3. Workspace Environment
 
@@ -75,7 +86,7 @@ Demo → Annotation → Datagen → Convert → Train → Evaluate
 Real2Sim으로 맞춘 한 실제 작업공간을 재사용 가능한 environment package로 만드는 계층이다.
 
 - `package.py`: versioned workspace package 로드/메타데이터.
-- `scene_assets.py`: workspace의 scene asset 구성.
+- `builder.py`: Builder export 검증 및 기존 런타임용 asset 참조 구성.
 - `environment.py`: workspace package를 Isaac Lab environment 설정에 연결.
 - `physics.py`: mass/friction/collision 등 simulation physics 설정.
 - `reset.py`: workspace/object reset 정책.
@@ -98,7 +109,11 @@ Real2Sim으로 맞춘 한 실제 작업공간을 재사용 가능한 environment
 - Hugging Face: `hub.py`
 - UI: `ui.py`, `view.py`, `presentation.py`
 
-Real2Sim이 Mimic/datagen/policy 알고리즘을 재작성하는 구조가 아니다.
+두 backend는 같은 WorkflowPanel, Operations, Registry, Presentation을 사용한다. 엔진 선택은 raw physics stage의 worker만 바꾸며 모델 선택(ACT/SmolVLA/MiniVLA)은 별개다. `workflow/operations.py`는 요청 계획, `workflow/mujoco.py`는 worker 실행, `workflow/episodes.py`는 canonical recording/annotation/datagen/conversion을 담당한다. MuJoCo에는 `workflow/mujoco_ui.py`나 별도 실행 service가 없다. MuJoCo 환경과 명시적 MJCF adapter는 `simulation/mujoco_backend.py`, policy 좌표 변환은 `so101_joint_mapping.py`에서 관리한다. `learning/minivla/`는 모델·학습·추론 코드를 담당한다.
+
+`RuntimeLauncher → real2sim_sim.py`는 Real/Sim과 Snapshot Capture가 공유하는 장치 연결이다. real backend는 Sim 없이 실제 장치를 연결하며, 비교 시 선택한 Isaac/MuJoCo 엔진을 별도 프로세스로 실행한다. Inspect UI는 제거했고 Profile/device 설정은 유지하고 scene fitting은 독립 Builder에 둔다. Workflow stage들은 각자 엔진 worker를 실행하며 이 상주 runtime을 사용하지 않는다. MuJoCo worker는 Isaac/omni/pxr를 import하지 않는다.
+
+MuJoCo Datagen은 object-relative target + bounded IK + physical success filtering이며 Isaac MimicGen과 다른 구현이다. 구체적인 기능/검증 범위는 [MINIVLA_INTEGRATION.md](MINIVLA_INTEGRATION.md)를 참조한다.
 
 ## 5. 중요한 경계
 
@@ -106,6 +121,6 @@ Real2Sim이 Mimic/datagen/policy 알고리즘을 재작성하는 구조가 아�
 2. **Isaac boundary**: Isaac articulation/action은 model-space radians를 사용.
 3. **Dataset boundary**: HDF5에 어떤 field가 어떤 의미와 좌표계를 갖는지 contract로 고정.
 4. **Real2Sim boundary**: image에서 숫자를 임의 추측하지 않고 measured/calibrated/optimized/configured/assumed provenance를 구분.
-5. **Workspace boundary**: accepted profile을 versioned package로 publish하고 기존 task code와 분리.
+5. **Workspace boundary**: Builder export를 checksummed runtime package로 가져오고 task/physics/engine 실행을 연결.
 
 세부 데이터 단위와 흐름은 [DATA_FLOW.md](DATA_FLOW.md), 절대 깨지면 안 되는 규칙은 [INVARIANTS.md](INVARIANTS.md)를 본다.

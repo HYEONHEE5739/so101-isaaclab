@@ -266,7 +266,7 @@ so101-isaaclab/
 ├── assets/SO101/                  # SO-101 URDF and meshes
 │
 ├── scripts/
-│   ├── envs/teleoperation/        # Teleoperation and demonstration recording
+│   ├── teleoperation/        # Teleoperation and demonstration recording
 │   ├── mimic/                     # Mimic annotation and generation
 │   ├── inference/                 # ACT simulation evaluation
 │   └── tools/                     # Dataset conversion / inspection utilities
@@ -274,9 +274,16 @@ so101-isaaclab/
 └── source/soarm101_lab/
     └── soarm101_lab/
         ├── devices/               # Physical SO-101 interface
+        ├── learning/minivla/      # Custom VLA model, training and inference
+        ├── simulation/            # MuJoCo backend and workspace scene compiler
+        ├── real2sim/              # Paired Real/Sim view and measured workspaces
+        ├── workflow/              # Shared Isaac / MuJoCo pipeline UI
         ├── tasks/                 # Isaac Lab environments and MDP terms
         └── utils/                 # Randomization and Pinocchio kinematics
 ```
+
+Custom model: [MiniVLA usage](docs/minivla/README.md).
+Generated data and cleanup guidance: [outputs directory roles](docs/real2sim/DATA_FLOW.md#13-outputsminivla-mujoco-real2sim을-삭제해도-되는가-2026-10-07).
 
 ---
 
@@ -412,32 +419,17 @@ Evaluate ACT in Isaac Lab
 Control the simulated SO-101 follower using a physical SO-101 leader arm.
 
 ```bash
-python scripts/envs/teleoperation/teleop_so101.py \
+python scripts/teleoperation/teleop_so101.py \
     --port /dev/ttyACM0
 ```
 
 ---
 
-## 2. Record Directly to LeRobotDataset
+## 2. Dataset recording and conversion
 
-```bash
-python scripts/envs/teleoperation/record_lerobot_dataset.py \
-    --repo_id <user>/<dataset-name> \
-    --single_task "pick red cube and place in bin a" \
-    --repo_root ./datasets \
-    --num_episodes 50 \
-    --episode_time_s 20 \
-    --reset_time_s 5 \
-    --port /dev/ttyACM0
-```
-
-Recording controls:
-
-| Key     | Action                                |
-| ------- | ------------------------------------- |
-| `RIGHT` | Save current episode                  |
-| `LEFT`  | Discard and retry the current episode |
-| `Q`     | Quit                                  |
+Use Workspace Pipeline → Source → Annotation → Datagen → Convert, or the HDF5
+recording/conversion commands below. The former direct LeRobot recorder was removed;
+it imported a dataset package that no longer exists.
 
 ---
 
@@ -446,7 +438,7 @@ Recording controls:
 Record teleoperated demonstrations in Isaac Lab HDF5 format.
 
 ```bash
-python scripts/envs/teleoperation/record_mimic_dataset.py \
+python scripts/teleoperation/record_mimic_dataset.py \
     --dataset_file ./datasets/demo_20ep.hdf5 \
     --mimic_task SO101-PickPlace-Mimic-v1 \
     --grasp_object cube_red \

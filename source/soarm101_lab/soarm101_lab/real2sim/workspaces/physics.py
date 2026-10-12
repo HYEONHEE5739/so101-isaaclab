@@ -43,6 +43,15 @@ def compile_physics(profile, task):
                     mass_provenance=provenance if role == 'DYNAMIC_MANIPULAND' else 'not_applicable',
                     inertia='derived_by_PhysX_from_collision_and_mass' if role == 'DYNAMIC_MANIPULAND' else 'not_applicable',
                     collision_approximation='open_segmented_walls_and_bottom' if role == 'FIXED_TARGET' else 'profile_primitive')
+    for name, values in task.get('object_physics', {}).items():
+        item = objects[name]
+        item['field_provenance'] = copy.deepcopy(values.get('field_provenance', {}))
+        item['workflow_provenance'] = copy.deepcopy(task.get('workflow_provenance', {}).get('physics', {}))
+        if item['role'] == 'DYNAMIC_MANIPULAND' and 'mass_kg' in values:
+            item['mass_kg'] = values['mass_kg']; item['mass_provenance'] = values.get('provenance','provisional')
+        if item['material'] is not None:
+            item['material'].update({k:values[k] for k in material if k in values})
+            item['material_provenance'] = values.get('provenance','provisional')
     return {'schema': 'so101.workspace-physics/1', 'objects': objects}
 
 

@@ -1,5 +1,125 @@
 # AI Change Log
 
+## 2026-10-12 — Real-only Capture의 수동 관측과 구동 한계 분리
+
+STOPPED Capture에서도 구동용 URDF guard로 반환해 이미지/측정 갱신이 막히던 문제를 수정했다.
+passive 관측은 구별 가능한 reference encoder branch의 계산각을 그대로 기록하며 범위 초과 경고를 저장한다.
+Snapshot feedback/history/image 정렬에도 같은 관측 변환을 사용한다. passive 상태의 motor command는 거절한다.
+Teleop/physics/goal 제한과 encoder ambiguity 검사는 유지한다. 사용자 보정/원본/장치는 변경하지 않았다.
+검사 결과는 precision_calibration/REPORT.md 최신 항목 참조.
+
+## 2026-10-12 — 관절 보정을 Source/Teleop/실물 정책 경계에 통합
+
+hardware 어댑터와 standalone SO101Leader가 Connect 시 승인 active를 검증/로드한다.
+Real/Sim UI는 저장값이 있으면 Precision 및 원본 URDF 관절 기준을 기본 선택한다.
+새 Source는 보정된 model rad, hardware_mapping, simulation_joint_frame을 기록한다.
+두 엔진의 Annotation/Datagen/Convert/Train/Sim Eval은 기록된 기준을 따라가며 원본 rad를 다시 보정하지 않는다.
+real_eval은 현재 Follower 보정으로 관측/정책 goal을 변환하고 기존 명시적 motion 활성화·안전을 유지한다.
+원본 LeRobot 파일/Workspace/기존 데이터는 변경하지 않으며 보정이 바뀐 Source resume은 거절한다.
+검사 결과와 초기 실패/환경 제한은 precision_calibration/REPORT.md 최신 항목 참조.
+
+## 2026-10-12 — 이전 Calibration 실행 경로 정리
+
+현재 UI 호출을 확인한 뒤 미사용 precision.validate worker 명령과 그 reply/오류 안내를 제거했다.
+새 record는 수동 기준각만 받아 train/angle로 고정하며 이전 validation/open/closed/opening 입력 생성 경로를 제거했다.
+UI 내부 버튼 키를 review로 통일하고 읽히지 않는 last_saved 상태를 삭제했다.
+기존 Profile의 validate_joint/legacy_endpoints 증거 reader는 로드·복구에 실제 사용되므로 유지한다.
+현재 인수인계의 여러 버전 설명을 하나로 통합하고 상세 이력은 기존 Report/Changelog로 연결했다.
+사용자 보정/Profile/원본 데이터와 다른 프로젝트 기능은 변경하지 않았다. 검사 결과는 Calibration Report 참조.
+
+## 2026-10-12 — 보정 기준점과 URDF 사용 범위 분리
+
+0°/90°에서 계산한 보정식을 기록 구간 밖의 음수/90° 이후에도 URDF limit 안에서 사용한다.
+UI/Calibration/Runtime/Compare에서 URDF 역 raw 구간의 유일한 encoder branch를 공유한다.
+기존 Profile/raw_domain은 증거로 보존하며 재저장하지 않는다. Precision gripper의 기록 구간 clamp도 제거했다.
+goal은 기존 모터 calibration 범위/URDF limit/branch 검사를 유지하며 URDF 경계의 정수 raw 양자화를 확인한다.
+UI는 선택 joint의 표시 범위를 보여준다. 실제 장치 연결/구동 및 사용자 데이터 변경 없음.
+검사 결과와 저장된 6관절 offline 점검은 precision_calibration/REPORT.md 최신 항목 참조.
+
+## 2026-10-12 — 현재 저장값으로 재보정 비교 / 반복 저장 재사용
+
+보정 전 표시와 표 계산의 기준을 현재 active joint로 변경했다. 새 계산이 없으면 전/후/현재가 같다.
+raw 간격을 현재 비율의 예상값과 비교하는 진단을 추가하고 0.5°가 fit residual임을 명확히 표시했다.
+2점은 그대로 통과하므로 residual로 raw 간격 이상을 검증할 수 없다는 설명과 테스트를 추가했다.
+같은 identity/model/entries 저장은 파일 재사용, 같은 active 적용은 이전 pointer 이력을 늘리지 않는다.
+실제 변경은 새 버전을 만들고 다른 관절/기존 사용자 파일은 보존한다.
+관련 회귀 151 passed/1 skipped. 하드웨어 연결/모터 명령/사용자 active 변경 없음.
+
+## 2026-10-12 — 관절 보정 누적 저장/세션 복원 및 사용자 6관절 복구
+
+save는 현재 role의 모든 확인한 Candidate를 기존 active에 합친다. partial activate로 다른 관절을 버리지 않고
+별도의 합친 Profile을 만든다. Connect 시 같은 identity/model의 활성 기준 기록을 새 세션 표에 복사한다.
+loaded_profile_id를 남기며 원본/Profile/exclusion 이력을 보존한다.
+원본 6관절 기록 중 기존 활성 4관절은 그대로 두고 wrist_flex/gripper만 angle mode로 재계산했다.
+사용자 요청으로 새 Follower 6관절 Profile을 software activate했으며 Calibration worker가 읽은 것을 확인했다.
+모터 명령/새 hardware 연결 없음. Leader 데이터를 임의로 만들지 않았다.
+경로/근거/검사와 복구 결과는 precision_calibration/REPORT.md 및 saved_profile_recovery.json 참조.
+
+## 2026-10-12 — 재시작 후 활성 보정 각도 표시
+
+Calibration worker는 active Profile을 이미 읽고 있었으나 UI가 빈 Candidate만 보정 후 표시로 사용했다.
+맨 위 현재 각도는 worker의 적용된 urdf_angle_rad를 표시하고 새 후보가 없을 때 active joint 계산을 보여준다.
+기존 보정 전 baseline은 작은 비교 표시로 유지한다. 범위/변환 실패와 해당 joint 미보정은 구분한다.
+새 재시작 회귀는 기존 Fake worker를 종료/재연결해 Candidate가 없어도 saved 각도 표시를 확인한다.
+사용자 active/저장 파일은 읽기 전용 진단만 수행했다. 실제 하드웨어 연결 없음.
+결과·미적용 파일과 활성 Profile의 차이는 precision_calibration/REPORT.md 참조.
+
+## 2026-10-12 — 그리퍼도 기준각으로만 Calibration
+
+PrecisionPanel의 gripper reference kind/opening 입력을 제거하고 모든 관절에서 angle 기준만 기록한다.
+fit_joint 기본 angle mode는 gripper endpoint/mm 검사를 요구하지 않는다.
+reference_mode를 저장하며 이전 필드 없는 saved Profile의 endpoint 검사는 그대로 유지한다.
+SDK RANGE_0_100/native-percent↔raw 계약과 모터 register는 변경하지 않는다.
+Fake Leader/Follower gripper raw→각도→native goal 왕복/저장·적용과 기존 worker+Qt 그리퍼 전체 절차를 확인했다.
+실제 하드웨어 연결 없음. 결과/검사 수치는 precision_calibration/REPORT.md 참조.
+
+## 2026-10-12 — Calibration 잘못된 자세 제외·재기록
+
+기존 기록 표에 선택 자세 삭제를 추가했다. 안정된 reference ID로 행을 선택하고 승인 후
+계산에서 제외하며 원본 measurement는 journal.references, 제외 결정은 journal.exclusions에 보존한다.
+해당 미적용 Candidate만 초기화하고 기존 active/다른 관절/기존 사용자 파일은 자동 변경하지 않는다.
+삭제 후 올바른 기준을 재기록하고 다시 계산·저장·적용한다. 파일 실패 시 원래 계산 상태 유지.
+기존 worker+Qt Fake에서 선택 유지/취소/삭제/재기록/원본 보존/활성 보정 유지, core에서
+중복/잘못된 관절/쓰기 실패/빈 기록 계산 거절을 확인했다. 하드웨어 연결·명령은 수행하지 않았다.
+검사 수치와 사용법은 precision_calibration/REPORT.md, PRECISION_CALIBRATION.md 참조.
+
+## 2026-10-12 — Calibration 전체 기준 fit / live 수동 자세 확인
+
+사용 목적 선택 제거, 새 기록은 모두 train. 자세 검증은 별도 validation 자료 대신 raw/보정 전·후
+현재각과 차이를 손으로 움직이며 확인한다. 기본 허용 오차는 기록 재현 0.5°다.
+기존 precision.py에 review_joint와 REVIEWED_MANUAL을 추가하고 수동 검토와 독립 검증을 구분했다.
+승인/identity/hash/계수 검사는 유지하며 이전 saved VALIDATED_MANUAL evidence도 계속 읽는다.
+이동 중 표시는 CalibrationDevice의 같은 raw packet normalization, Record는 기존 정지 검사를 사용한다.
+하단 Calibration 로그는 요약, 상세 JSON은 접힌 영역이다. 원본/active/실제 장비에 자동 쓰기 없음.
+전체 관련 회귀 **145 passed / 1 skipped**; 실제 장비 연결 없이 Fake worker+Qt/core live 검증.
+세부 결과·한계·변경 경로는 precision_calibration/REPORT.md와 PRECISION_CALIBRATION.md 참조.
+
+## 2026-10-12 — Calibration 현재각·검증 결과 표시 개선
+
+기존 PrecisionPanel에서 현재 적용각과 미적용 Candidate 현재각을 degree로 크게 표시하고,
+기록된 기준각/계산각/차이를 표로 보여준다. 검증 결과·허용값·다음 행동과 번호/한국어 버튼을 추가했다.
+gripper 전용 필드는 해당 joint에서만 보이며 JSON/Fake/복구·허용오차 설정은 상세 영역으로 접었다.
+원본 사용자 기록의 validation +90°와 사용자 설명 −90°의 차이를 확인했으나 기록/active/모터 상태를 변경하지 않았다.
+기존 worker+Fake와 관련 회귀 **143 passed, 1 skipped**. 실제 장치 검증은 수행하지 않았다.
+후속 REPORT.md 및 PRECISION_CALIBRATION.md에 사용법·새 세션 재기록 제한을 기록했다.
+
+## 2026-10-12 — Joint Precision Calibration UI / software coordinate profiles
+
+기존 PyQt UI에 네 번째 Calibration 탭을 추가했다. 기존 launcher/worker의 calibration mode를
+재사용하며 raw-register single-joint reference, sign/scale/offset/wrap, 별도 validation,
+immutable candidate/approved software activation/restore를 구현했다. LeRobot의 range-mid degree
+정규화와 firmware Homing 이후 raw를 구분한다. motor calibration/Scene/사용자 데이터를 고치지 않았다.
+
+실제 reference 계산은 real2sim/precision.py, UI는 precision_ui.py, device 읽기/torque release는
+hardware.py다. Real/Sim/Capture Runtime에 opt-in common coordinates와 원본 mapping metadata를
+연결하고 nonzero Scene offsets는 명시 session-only validation 설정 없이는 거절한다.
+기존 standalone Source/real_eval coordinate 계약은 유지한다. actual robot은 연결하지 않았다.
+
+Fake SDK/실제 worker+offscreen Qt 전 과정과 MuJoCo FK preview, 관련 기존 회귀 **142 passed, 1 skipped**.
+실물 encoder/torque/지그/serial exclusivity/추종 및 Isaac 새 session 설정은 **HARDWARE_NOT_TESTED**.
+사용법/정확한 경로/실패 수정/한계: docs/real2sim/PRECISION_CALIBRATION.md와
+outputs/workflow_validation/precision_calibration/REPORT.md. dependency 설치·버전 변경 없음.
+
 AI/Codex가 큰 변경을 만들 때 사람이 전체 diff를 처음부터 읽지 않아도 변경의 의도와 검증 근거를 추적할 수 있도록 남기는 로그다.
 
 ## 작성 규칙

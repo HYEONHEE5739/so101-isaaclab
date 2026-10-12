@@ -5,7 +5,57 @@ from soarm101_lab.real2sim.runtime import Runtime
 from soarm101_lab.real2sim.core import JOINTS
 
 
-def test_outside_measured_pose_keeps_images_but_rejects_capture(tmp_path, monkeypatch):
+def test_mujoco_bounds_both_commands_without_stopping_and_rejects_nonfinite(tmp_path):
+    from types import SimpleNamespace
+    from soarm101_lab.real2sim.core import from_sim, to_sim, stamp
+    from soarm101_lab.simulation.mujoco_backend import MujocoBackend
+    backend = MujocoBackend.__new__(MujocoBackend)
+    backend.limits = np.array([[-2., 2.]] * 3 + [[-1.65806, 1.65806], [-2., 2.], [0., 1.74533]])
+    r = Runtime(SimpleNamespace(workspace=str(tmp_path), backend='mujoco'), None)
+    r.env = SimpleNamespace(limits=backend.limits, _target=backend._target, step=Mock())
+    r.leader = Mock(); r.follower = Mock()
+    interval = {'start': stamp(), 'end': stamp()}
+    measured = dict(zip(JOINTS, [0.] * 5 + [30.]))
+    r.follower.read.return_value = measured, interval
+    r.follower.send.side_effect = lambda target: (dict(target), interval)
+    r.leader.metadata = r.follower.metadata = {}
+    r.profile = {'workspace': {'T_world': np.eye(4).tolist()}, 'objects': {}}
+    r.hardware_identity = 'fixture'
+    rgb = np.zeros((8, 8, 3), np.uint8)
+    r.snapshot = lambda: ({'sim_side': rgb, 'sim_wrist': rgb}, interval,
+        dict(zip(JOINTS, r.env.step.call_args.args[0])), {}, {}, np.eye(4).tolist())
+    r.start()
+    try:
+        requested = dict(zip(JOINTS, [0., 0., 0., 1.672447, 0., .5]))
+        r.leader.read.return_value = from_sim(requested), interval
+        r.tick()
+        sent = r.follower.send.call_args.args[0]
+        model_target = np.array(list(to_sim(sent).values()))
+        np.testing.assert_allclose(r.env.step.call_args.args[0], model_target, atol=1e-12)
+        assert r.running and r.state == 'RUNNING'
+        assert 1.65805 < model_target[3] <= 1.65806
+        assert r.target_limits['wrist_flex']['requested_rad'] == requested['wrist_flex']
+        assert '목표 제한' in r.message
+        # Returning the leader into range resumes tracking without another Start.
+        interval.update(start=stamp(), end=stamp())
+        requested['wrist_flex'] = 1.6
+        r.leader.read.return_value = from_sim(requested), interval
+        r.tick()
+        assert r.running and not r.target_limits
+        assert abs(r.env.step.call_args.args[0][3] - 1.6) < 1e-12
+        # Invalid input still stops before any physical command is sent.
+        interval.update(start=stamp(), end=stamp())
+        native = from_sim(requested); native['wrist_flex'] = float('nan')
+        r.leader.read.return_value = native, interval
+        calls = r.follower.send.call_count
+        r.tick()
+        assert not r.running and r.state == 'STOPPED'
+        assert r.follower.send.call_count == calls and 'Non-finite' in r.message
+    finally:
+        r.writer.shutdown(); r.bus.close()
+
+
+def test_outside_measured_pose_keeps_preview_and_reports_invalid_sim_pose(tmp_path, monkeypatch):
     import soarm101_lab.real2sim.runtime as module
     r = Runtime.__new__(Runtime)
     r.env = Mock()
@@ -25,12 +75,12 @@ def test_outside_measured_pose_keeps_images_but_rejects_capture(tmp_path, monkey
         c.nearest.return_value = {'rgb': rgb}
         c.metadata = {}
     r.real_history = Mock()
+    r.real_history.history = []
     r.sim_history = Mock()
     r.step = 0
     r.profile = {'workspace': {'T_world': []}, 'objects': {}}
     r.hardware_identity = 'test'
     r.leader.metadata = r.follower.metadata = {}
-    r.capture_requests = [{'id': 'capture'}]
     r.pending = None
     r.bus = Mock()
     r.bus.root = tmp_path
@@ -40,5 +90,5 @@ def test_outside_measured_pose_keeps_images_but_rejects_capture(tmp_path, monkey
     assert len(list(tmp_path.glob('*.jpg'))) == 4
     assert not r.snapshot_data['quality']['eligible_for_calibration']
     assert 'Measured pose' in r.snapshot_data['quality']['reasons'][0]
-    assert r.bus.reply.call_args.args[:2] == ('capture', False)
+    r.bus.reply.assert_not_called()
     r.follower.send.assert_not_called()

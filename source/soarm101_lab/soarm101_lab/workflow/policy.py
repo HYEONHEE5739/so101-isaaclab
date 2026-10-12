@@ -5,6 +5,9 @@ from ..representation import require_policy
 
 
 def load_policy(path, expected, device):
+    if (Path(path) / 'best.pt').is_file():
+        require_policy(path, expected)
+        return MiniVLAJointPolicy(path, device), lambda batch: batch, lambda action: action
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
     require_policy(path, expected)
@@ -18,10 +21,13 @@ def load_policy(path, expected, device):
     return policy, pre, post
 
 
-def observation(q, side, wrist, task, device):
+def observation(q, side, wrist, task, device, *, images=None):
     import torch
     out = {'observation.state': torch.as_tensor(q, dtype=torch.float32, device=device), 'task': task}
-    for key, image in [('side_cam', side), ('wrist_cam', wrist)]:
+    images = images if images is not None else {'side':side,'wrist':wrist}
+    for name, image in images.items():
+        if image is None: continue
+        key = name + '_cam'
         value = torch.as_tensor(image, device=device)[..., :3].to(torch.float32) / 255.
         out['observation.images.' + key] = value.permute(2, 0, 1)
     return out
@@ -55,11 +61,33 @@ def resume_checkpoint(path, artifact, options):
     return model / 'train_config.json', config, step
 
 
+def resume_output(path, architecture='smolvla'):
+    """Resolve the existing training directory, rather than creating a resume copy."""
+    root = Path(path).expanduser().resolve()
+    if architecture == 'minivla':
+        if root.is_dir(): root = root / 'last.pt'
+        if not root.is_file() or root.suffix != '.pt' or not (root.parent / 'best.pt').is_file():
+            raise ValueError('MiniVLA resume requires last.pt and best.pt in the policy directory')
+        return root.parent
+    if root.name == 'train_config.json': root = root.parent
+    if root.name == 'pretrained_model': root = root.parent
+    config = json.loads((root / 'pretrained_model/train_config.json').read_text())
+    if root.parent.name != 'checkpoints':
+        raise ValueError('Resume checkpoint must be under the original output/checkpoints directory')
+    output = root.parent.parent
+    if config.get('output_dir') and Path(config['output_dir']).expanduser().resolve() != output:
+        raise ValueError('Saved training output differs from checkpoint location')
+    return output
+
+
 def train(artifact, options, output):
     import subprocess
     import sys
     from ..so101_dataset_contract import write_contract, JOINT_SPACE
     from ..representation import describe
+    if options.get('architecture') == 'minivla':
+        from .mujoco import train_from_lerobot
+        return train_from_lerobot(artifact, options, Path(output))
     coordinates = artifact['coordinates']
     if coordinates['action_space'] != JOINT_SPACE:
         raise ValueError('Training requires joint-radian targets')
@@ -81,8 +109,8 @@ def train(artifact, options, output):
     config['policy'].update(overrides)
     base_model = options.get('base_model') or (
         'lerobot/smolvla_base' if config['policy']['type'] == 'smolvla' else None)
-    default_map = {'observation.images.side_cam': 'observation.images.camera1',
-                   'observation.images.wrist_cam': 'observation.images.camera2'}
+    camera_keys = [k for k in info.get('features', {}) if k.startswith('observation.images.')]
+    default_map = {key:'observation.images.camera'+str(i+1) for i,key in enumerate(camera_keys)}
     config['rename_map'] = options.get('rename_map', default_map if config['policy']['type'] == 'smolvla' else {})
     if not isinstance(config['rename_map'], dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in config['rename_map'].items()):
@@ -115,7 +143,7 @@ def train(artifact, options, output):
         raise ValueError('Training did not produce a complete checkpoint')
     write_contract(checkpoint, coordinates)
     atomic(checkpoint / 'workflow_provenance.json', {'workspace': artifact.get('workspace'),
-           'source_dataset_artifact': artifact, 'training': config, 'representation': describe(coordinates),
+           'source_dataset_artifact': artifact, 'backend': options.get('backend', artifact.get('backend', 'isaac')), 'training': config, 'representation': describe(coordinates),
            'task_definitions': artifact.get('tasks') or options.get('tasks', [])})
 
 
@@ -156,3 +184,41 @@ def import_checkpoint(path, registry):
         'training': config, 'task_definitions': artifact.get('tasks', []),
         'checkpoint_import': True})
     return registry.register('policy', model, parents=[artifact['id']])
+
+
+class MiniVLAJointPolicy:
+    """Expose MiniVLA's canonical actions through the workflow's model-radian API."""
+    def __init__(self, path, device):
+        import numpy as np
+        from ..learning.minivla.policy import MiniVLA, ActionGuard
+        from ..so101_joint_mapping import RobotCoordinates
+        self.policy = MiniVLA(Path(path) / 'best.pt')
+        self.device = device
+        provenance = json.loads((Path(path) / 'project_provenance.json').read_text())
+        coords = provenance['coordinates']
+        self.coordinates = RobotCoordinates(coords['gripper_closed_rad'], coords['gripper_open_rad'])
+        limits = np.asarray(provenance.get('joint_limits_rad') or provenance.get('scene', {}).get('joint_limits_rad'), dtype=float)
+        if limits.shape != (6, 2): raise ValueError('MiniVLA checkpoint is missing model joint limits')
+        self.guard = ActionGuard(np.r_[limits[:5, 0], 0.], np.r_[limits[:5, 1], 1.], [2.] * 5 + [1.], self.policy.control_hz)
+        self.reset()
+
+    def reset(self):
+        self.remaining = []
+        self.guard.reset()
+
+    def select_action(self, batch):
+        import numpy as np
+        import torch
+        q = batch['observation.state'].detach().cpu().numpy().reshape(6)
+        if not self.remaining:
+            images = []
+            for camera in self.policy.cfg.cameras:
+                value = batch['observation.images.' + camera + '_cam'].detach().cpu().numpy()
+                images.append(np.clip(value.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8))
+            chunk, _ = self.policy.predict(images, self.coordinates.to_policy(q, measured=True), batch['task'])
+            chunk = np.asarray(chunk)
+            if chunk.shape != (self.policy.cfg.horizon, 6) or not np.isfinite(chunk).all():
+                raise ValueError('MiniVLA must output a finite [H,6] action chunk')
+            self.remaining = list(chunk[:self.policy.cfg.replan_steps])
+        action = self.guard.apply(self.remaining.pop(0), self.coordinates.to_policy(q, measured=True))
+        return torch.as_tensor(self.coordinates.to_model(action), device=self.device, dtype=torch.float32)

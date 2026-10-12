@@ -47,14 +47,17 @@ def require_policy(path, expected):
     return require_compatible(read_contract(path), expected, JOINT_SPACE)
 
 
-def real_observation(native):
+def real_observation(native, mapper=None):
     """LeRobot .pos degree/% dictionary -> ordered model rad vector."""
-    return DEFAULT_MAPPER.calibrated_to_urdf([native[n + '.pos'] for n in JOINTS]).astype(np.float32)
+    mapper = mapper or DEFAULT_MAPPER
+    q = mapper.calibrated_to_urdf({n:native[n + '.pos'] for n in JOINTS})
+    return np.asarray([q[n] for n in JOINTS],dtype=np.float32)
 
 
-def real_action(model_radians):
+def real_action(model_radians, mapper=None):
     """Postprocessed policy rad -> LeRobot degree/% dictionary, once."""
-    result = DEFAULT_MAPPER.urdf_to_calibrated(model_radians)
-    if result.shape != (6,):
+    q = np.asarray(model_radians)
+    if q.shape != (6,):
         raise ValueError('Expected one six-joint policy action')
-    return {n + '.pos': float(v) for n, v in zip(JOINTS, result)}
+    result = (mapper or DEFAULT_MAPPER).urdf_to_calibrated(dict(zip(JOINTS,q)))
+    return {n + '.pos': float(result[n]) for n in JOINTS}

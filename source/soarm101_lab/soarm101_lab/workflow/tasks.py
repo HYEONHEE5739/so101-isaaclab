@@ -11,13 +11,18 @@ TASK_ENV = 'SO101_TASK_SELECTION'
 def catalog(workspace):
     task = workspace['task']
     reset_hash = hashlib.sha256(json.dumps(task['reset'], sort_keys=True).encode()).hexdigest()
+    if task.get('tasks'):
+        return [dict(schema='so101.task-definition/1', task_id=t['id'], pick_object_id=t['pick'],
+                     target_object_id=t['place'], language_instruction=t['instruction'],
+                     success_condition=copy.deepcopy(t.get('success',task['success'])),
+                     randomization_spec={'path':'task.json#/reset','sha256':reset_hash}) for t in task['tasks']]
     return [dict(schema='so101.task-definition/1', task_id=f'{pick}_to_{target}',
                  pick_object_id=pick, target_object_id=target,
-                 language_instruction=f"Pick up the {pick.removeprefix('cube_')} cube and place it in cup {target.removeprefix('cup_').upper()}.",
+                 language_instruction=f"Pick up {pick} and place it in {target}.",
                  success_condition=copy.deepcopy(task['success']),
                  randomization_spec={'path': 'task.json#/reset', 'sha256': reset_hash})
-            for pick in ('cube_red', 'cube_blue', 'cube_green') if pick in task['dynamic']
-            for target in ('cup_a', 'cup_b') if target in task['targets']]
+            for pick in task['dynamic']
+            for target in task['targets']]
 
 
 def validate(definition, workspace):
@@ -98,6 +103,6 @@ def evaluation_metrics(definitions, rows, simulation):
         result[definition['task_id']] = {
             'episodes': episodes, 'steps': sum(r['steps'] for r in samples) if simulation else len(samples),
             'successes': successes, 'success_rate': successes / episodes if simulation and episodes else None,
-            'success_measurement': 'contained_and_settled' if simulation else 'unmeasured',
+            'success_measurement': definition['success_condition']['relation'] if simulation else 'unmeasured',
             'language_instruction': definition['language_instruction']}
     return result

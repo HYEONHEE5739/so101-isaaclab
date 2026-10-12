@@ -43,13 +43,19 @@ Demo → replay → annotation → datagen → conversion → train/eval artifac
 주요 예:
 - `test_joint_mapping.py`: hardware/model coordinate 경계
 - `test_camera_prim.py`: camera config/prim
-- `test_pipeline.py`: Real2Sim pipeline
+- `test_pipeline.py`: file IPC와 USD scene 생성
+- `test_snapshots.py`: Snapshot 계약/저장/세션/UI와 독립 Builder import·FK·fit·rollback
 - `test_provenance.py`: measured/provisional provenance
 - `test_runtime_liveness.py`: UI/runtime IPC와 liveness
 - `test_workspaces.py`: workspace package/environment
 - `test_workflow.py`, `test_workflow_view.py`: workflow operation/UI
 - `test_task_definitions.py`: task definition contract
-- `test_bootstrap.py`, `test_bootstrap_visuals.py`: bootstrap/reference
+- `test_provenance.py` (기존 Profile/visual 검사 통합): 현재 기본 Profile/scene geometry와 visual
+
+옛 paired/continuous capture와 Reference/API-agent/fitting 전용 테스트는 제거했다.
+MuJoCo는 import 후 GL 모드를 바꿀 수 없으므로 Builder rendering 검사와
+`test_mujoco_backend.py`/`test_minivla_integration.py`의 physics-only 검사는 별도
+프로세스에서 실행한다. Renderer guard를 테스트 때문에 우회하지 않는다.
 
 ## 3. Joint 변경 시 최소 검증
 

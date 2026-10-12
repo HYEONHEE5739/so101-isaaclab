@@ -11,12 +11,14 @@ FIELDS = {
     'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
     'output': ('문자열', '', '선택. 비우면 고유 run 폴더에 자동 저장합니다. 직접 지정할 때는 아직 존재하지 않는 경로를 사용하세요.'),
     'device': ('문자열', 'cuda:0', '실행 장치. 예: cuda:0. Isaac 작업에는 현재 NVIDIA GPU 설정을 유지하세요.'),
-    'workspace_id': ('문자열', 'workspace_002', '필수. 새 workspace 이름. 기존 ID/version을 덮어쓰지 않습니다.'),
-    'version': ('정수', 1, 'Workspace 버전 번호.'),
-    'task_file': ('문자열', '', '필수. 실제 존재하는 task JSON 파일 경로를 입력하세요.'),
     'num_successful_demos': ('정수', 10, '만들 성공 데이터 수. 예: 10이면 성공 episode 10개까지 재시도합니다. 실패 시도는 포함하지 않으며 중지 버튼으로 중단할 수 있습니다.'),
     'repo_id': ('문자열', '', '필수. 예: my-account/so101-demo. 변환에서는 로컬 dataset 식별자이며 업로드는 별도 단계입니다.'),
-    'architecture': ('문자열', 'smolvla', '학습 모델: smolvla 또는 act.'),
+    'architecture': ('문자열', 'smolvla', '학습 모델: smolvla, act 또는 minivla. 엔진 선택과 독립적으로 고릅니다.'),
+    'renderer': ('문자열', 'egl', 'MuJoCo RGB 렌더 경로: egl(GPU), software-egl(Mesa CPU), osmesa. Isaac은 기존 렌더러를 사용합니다.'),
+    'model_config': ('문자열', None, 'MiniVLA 모델 JSON 경로. 생략하면 UI의 MiniVLA head 선택에 따라 frozen_flow.json 또는 frozen_deterministic.json을 사용합니다. 직접 지정한 JSON과 재개 checkpoint 설정이 head 선택보다 우선합니다.'),
+    'include_failed': ('true/false', False, 'MuJoCo 변환에서 실패로 기록된 데모도 명시적으로 포함합니다. 기본값은 성공 데모만 포함합니다.'),
+    'max_attempts': ('정수', None, 'MuJoCo Datagen 최대 시도 수. 미달이면 실패 보고서를 저장하며 성공 수를 부풀리지 않습니다.'),
+    'source_groups': ('객체', None, 'MiniVLA용 generated LeRobot 데이터의 원본 group 매핑. 예: {"0":"source_a","1":"source_a","2":"source_b"}. 자동 기록된 매핑이 있으면 생략합니다.'),
     'steps': ('정수', 10000, '총 목표 학습 step 수. Resume에서 40000 → 100000이면 추가 60000 step 학습합니다.'),
     'batch_size': ('정수', 8, '학습 batch 크기. GPU 메모리가 부족하면 줄이세요.'),
     'num_workers': ('정수', 0, '데이터 로더 worker 수. 0은 별도 worker 없이 실행합니다.'),
@@ -29,6 +31,7 @@ FIELDS = {
     'max_steps': ('정수', 300, 'episode당 최대 평가 step 수.'),
     'private': ('true/false', True, '업로드 repository 공개 여부. true는 비공개. 기존 repository의 설정과 일치해야 합니다.'),
     'create_repo': ('true/false', False, 'true면 새 Hugging Face repository를 생성합니다. 기존 repo에는 false를 사용하세요.'),
+    'camera_devices': ('객체', {}, 'Camera ID → 실제 장치 경로. 예: {"front": "/dev/cam_side"}. Workspace 카메라 metadata에 맞춰 지정합니다.'),
     'revision': ('문자열', 'main', '업로드할 Hugging Face branch 이름.'),
     'create_branch': ('true/false', False, '지정한 업로드 branch를 새로 만들지 여부.'),
     'port': ('문자열', '', '필수. 실제 follower serial 장치 경로. 예: /dev/so101_follower.'),
@@ -40,18 +43,23 @@ FIELDS = {
     'enable_motion': ('true/false', False, '실제 모터 동작 허용. 실제 평가를 의도할 때만 true로 변경하세요.'),
 }
 KEYS = {
-    'accept': ['output'],
-    'publish': ['workspace_id', 'version', 'task_file'],
-    'source': ['device', 'output'],
-    'replay': ['device', 'output'],
-    'annotate': ['device', 'output'],
-    'datagen': ['num_successful_demos', 'generation_seed', 'device', 'output'],
-    'convert': ['repo_id', 'output'],
-    'train': ['architecture', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
-    'sim_eval': ['episodes', 'max_steps', 'device', 'output'],
-    'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'episodes', 'max_steps', 'fps', 'enable_motion', 'device', 'output', 'calibration_dir'],
+    'source': ['device', 'renderer', 'output'],
+    'replay': ['device', 'renderer', 'output'],
+    'annotate': ['device', 'renderer', 'output'],
+    'datagen': ['num_successful_demos', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],
+    'convert': ['repo_id', 'include_failed', 'output'],
+    'train': ['architecture', 'model_config', 'source_groups', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
+    'sim_eval': ['episodes', 'max_steps', 'device', 'renderer', 'output'],
+    'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'camera_devices', 'episodes', 'max_steps', 'fps', 'enable_motion', 'device', 'output', 'calibration_dir'],
     'hf_dataset': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
     'hf_policy': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
+}
+
+# Only options consumed by each trainer belong in its execution form.
+TRAIN_KEYS = {
+    'minivla': {'model_config', 'source_groups', 'steps', 'output'},
+    'act': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups'},
+    'smolvla': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups'},
 }
 
 

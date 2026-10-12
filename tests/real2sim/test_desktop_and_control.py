@@ -19,10 +19,17 @@ def test_qt_startup_layout_and_heartbeat(tmp_path):
     app.processEvents()
     w.refresh()
     assert list(w.views) == ["real_side", "sim_side", "real_wrist", "sim_wrist"]
-    assert (ROOT / "docs/real2sim/measurements.example.json").exists()
-    assert (tmp_path / "ipc/ui_heartbeat.json").exists()
-    w.template()
-    assert '"schema": "so101.real2sim/2"' in w.editor.toPlainText()
+    assert (ROOT / "tests/real2sim/fixtures/partial_profile.json").exists()
+    assert not (tmp_path / "ipc/ui_heartbeat.json").exists()
+    assert w.capture_start.isEnabled() and w.live_backend.isEnabled()
+    from soarm101_lab.real2sim.profile import load
+    assert not w.fields['profile'].text()
+    with pytest.raises(ValueError, match='Profile'):
+        w.profile_path()
+    w.selected(ROOT / 'tests/real2sim/fixtures/partial_profile.json')
+    assert load(w.profile_path())['schema'] == 'so101.real2sim/2'
+    assert not hasattr(w, 'editor')
+    assert w.tabs.count() == 4
     assert "model" not in w.fields
     assert not hasattr(w, "measured")
     assert not hasattr(w, "initial_gpt")
@@ -39,7 +46,6 @@ def runtime_stub():
     r.activated = False
     r.limits = np.array([[-2.0, 2.0]] * 6)
     r.follower.limits = {n: [-180, 180] for n in JOINTS}
-    r.capture_requests = []
     r.env = Mock()
     r.bus = Mock()
     real = {n: 0.0 for n in JOINTS}
@@ -105,12 +111,6 @@ def test_leader_missing_file_never_auto_calibrates(monkeypatch):
         hardware.Leader(None, "fake", "missing.json")
 
 
-def test_stop_cancels_pending_capture_requests():
-    r = runtime_stub()
-    r.capture_requests = [{"id": "a"}, {"id": "b"}]
-    r.stop()
-    assert not r.capture_requests
-    assert r.bus.reply.call_count == 2
 
 
 def test_hold_readback_precedes_torque_enable():
@@ -128,7 +128,7 @@ def test_scene_apply_rolls_back_on_api_failure(monkeypatch):
     from pathlib import Path
     from soarm101_lab.real2sim import profile, runtime
 
-    p = profile.load(Path(__file__).resolve().parents[2] / "docs/real2sim/measurements.example.json")
+    p = profile.load(Path(__file__).resolve().parents[2] / "tests/real2sim/fixtures/partial_profile.json")
     r = runtime_stub()
     r.profile = p
     changed = copy.deepcopy(p)
@@ -145,3 +145,62 @@ def test_scene_apply_rolls_back_on_api_failure(monkeypatch):
         r.apply(changed)
     assert calls == [changed, p]
     assert r.profile == p
+
+
+def test_capture_and_real_sim_share_scrollable_right_settings(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication, QPushButton
+    from PyQt6.QtCore import QPoint
+    from soarm101_lab.real2sim.ui import Window
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
+    app = QApplication.instance() or QApplication([])
+    w = Window(tmp_path / 'live')
+    w.resize(1280, 720); w.show(); app.processEvents()
+    try:
+        assert not any(b.text() == '연결 설정' for b in w.findChildren(QPushButton))
+        fields = dict(w.fields)
+        for index in (0, 1, 0):
+            w.tabs.setCurrentIndex(index); app.processEvents()
+            assert w.settings_scroll.isVisible() and w.log.isVisible()
+            assert w.fields == fields
+            assert w.settings_scroll.mapTo(w, QPoint()).x() >= w.tabs.mapTo(w, QPoint()).x()+w.tabs.width()
+            assert w.log.mapTo(w, QPoint()).y() >= w.content.mapTo(w, QPoint()).y()+w.content.height()
+            bar = w.settings_scroll.verticalScrollBar()
+            assert bar.maximum() > 0
+            bar.setValue(bar.maximum()); app.processEvents()
+            target = w.capture_scene_state if index == 0 else w.connection_group.findChildren(QPushButton)[-1]
+            assert w.settings_scroll.viewport().rect().intersects(target.rect().translated(target.mapTo(w.settings_scroll.viewport(), QPoint())))
+        assert not w.runtime_enabled and w.runtime_launcher.process is None
+        w.tabs.setCurrentIndex(2); app.processEvents()
+        assert w.settings_scroll.isHidden()
+    finally:
+        w.close(); app.processEvents()
+
+
+def test_workspace_connection_does_not_replace_capture_profile(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.real2sim.ui import Window, ROOT
+    from soarm101_lab.real2sim.workspaces import package
+    app = QApplication.instance() or QApplication([])
+    window = Window(tmp_path)
+    camera_profile = ROOT/'tests/real2sim/fixtures/partial_profile.json'
+    window.selected(camera_profile)
+    scene = tmp_path/'builder_workspace'
+    window.workflow_panel.workspace.setText(str(scene))
+    window.live_workspace.setChecked(True)
+    monkeypatch.setattr(package, 'load', lambda p: {'root':scene})
+    window.runtime_launcher.connect = Mock(return_value='request')
+    window.connect_hw(backend='isaac')
+    payload = window.runtime_launcher.connect.call_args.args[0]
+    assert payload['workspace'] == str(scene)
+    assert payload['profile'] == str(scene/'profile.json')
+    assert window.profile_path() == str(camera_profile)
+    window.runtime_launcher.connect.reset_mock()
+    window.start_capture()
+    payload = window.runtime_launcher.connect.call_args.args[0]
+    assert 'workspace' not in payload
+    assert payload['profile'] == str(camera_profile)
+    window.runtime_enabled = False
+    window.close()
+    app.processEvents()

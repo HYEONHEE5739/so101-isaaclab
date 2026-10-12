@@ -132,7 +132,7 @@ def test_stage_specific_ui(tmp_path, monkeypatch):
 
 def test_generation_progress_uses_completed_attempts():
     from types import SimpleNamespace
-    from soarm101_lab.workflow.progress import GenerationProgress
+    from soarm101_lab.workflow.presentation import GenerationProgress
     counters = SimpleNamespace(num_attempts=0, num_success=0, num_failures=0)
     progress = GenerationProgress(counters)
     assert progress()['episode_outcome'] == '진행 중'
@@ -154,7 +154,7 @@ def test_observation_diagnostics_preserve_policy(tmp_path, monkeypatch):
 
 def test_generation_success_target_progress():
     from types import SimpleNamespace
-    from soarm101_lab.workflow.progress import GenerationProgress
+    from soarm101_lab.workflow.presentation import GenerationProgress
     g = SimpleNamespace(num_attempts=12, num_success=3, num_failures=9)
     status = GenerationProgress(g, target=10)()
     assert status['outcome_reason'] == '성공 데이터 3/10개'
@@ -163,7 +163,7 @@ def test_generation_success_target_progress():
 
 def test_generation_success_rate():
     from types import SimpleNamespace
-    from soarm101_lab.workflow.progress import GenerationProgress
+    from soarm101_lab.workflow.presentation import GenerationProgress
     g = SimpleNamespace(num_attempts=0, num_success=0, num_failures=0)
     progress = GenerationProgress(g, 10)
     assert progress()['success_rate'] is None

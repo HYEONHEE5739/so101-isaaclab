@@ -42,6 +42,8 @@ class SettingsForm(QWidget):
                 item.widget().deleteLater()
         self.editors = {}
         keys = [k for k in KEYS[self.stage] if k != 'architecture']
+        if getattr(self, 'allowed_keys', None) is not None:
+            keys = [k for k in keys if k in self.allowed_keys]
         self.extra = {k: v for k, v in values.items() if k not in keys}
         for key in keys:
             kind, default, description = FIELDS[key]

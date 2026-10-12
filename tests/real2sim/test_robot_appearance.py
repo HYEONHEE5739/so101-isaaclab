@@ -26,7 +26,7 @@ def test_local_color_override_restores_asset_and_preserves_motor(tmp_path):
 
 
 def test_color_requires_valid_value_and_provenance():
-    p = load(Path(__file__).resolve().parents[2] / 'docs/real2sim/measurements.example.json')
+    p = load(Path(__file__).resolve().parents[2] / 'tests/real2sim/fixtures/partial_profile.json')
     p['appearance']['robot_print_color'] = [.1, .2, .3]
     with pytest.raises(ValueError):
         validate(p)

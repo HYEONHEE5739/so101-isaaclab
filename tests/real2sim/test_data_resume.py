@@ -52,3 +52,26 @@ def test_interrupt_is_deferred_until_boundary(monkeypatch):
     handlers[signal.SIGINT](signal.SIGINT, None)
     with pytest.raises(KeyboardInterrupt):
         boundary()
+
+
+def test_lossless_compression_keeps_dtype_attrs_and_hard_links(tmp_path):
+    from soarm101_lab.workflow.data_resume import compress
+    path = tmp_path / 'frames.hdf5'
+    rgb = np.full((8, 240, 320, 3), 127, dtype=np.uint8)
+    state = np.arange(48, dtype=np.float32).reshape(8, 6)
+    with h5py.File(path, 'w') as f:
+        f.attrs['contract'] = 'preserved'
+        g = f.create_group('data/demo_0'); g.attrs['success'] = True
+        d = g.create_dataset('rgb', data=rgb); d.attrs['encoding'] = 'RGB'
+        g['same_rgb'] = d
+        g.create_dataset('joint_pos', data=state)
+    result = compress(path)
+    assert result['saved_bytes'] > rgb.nbytes * .9
+    with h5py.File(path) as f:
+        g = f['data/demo_0']
+        assert f.attrs['contract'] == 'preserved' and g.attrs['success']
+        assert g['rgb'].dtype == np.uint8 and g['rgb'].compression == 'gzip'
+        assert g['rgb'].attrs['encoding'] == 'RGB' and g['same_rgb'].id == g['rgb'].id
+        np.testing.assert_array_equal(g['rgb'], rgb)
+        np.testing.assert_array_equal(g['joint_pos'], state)
+    assert compress(path)['saved_bytes'] == 0

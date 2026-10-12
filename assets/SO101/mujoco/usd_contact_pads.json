@@ -1,0 +1,103 @@
+{
+  "schema": "so101.usd-contact-pads/1",
+  "source": "offline USD extraction; no worker USD dependency",
+  "source_sha256": {
+    "usd/configuration/so101_isaaclab_base.usd": "c0e046c99292a50f7486b2bd2ae24560740ee45f2c03b36352cbb949d5e1aa0d",
+    "usd/configuration/so101_isaaclab_physics.usd": "c67f2c7577294763755a1df8a6cbbc130c0711b72baacab62dc626060d473b00",
+    "usd/configuration/so101_isaaclab_robot.usd": "cf36ce1dc28ad78d0867acd62ef952d0f4a9be4ab061439f1dafe5e6acc79adc",
+    "usd/configuration/so101_isaaclab_sensor.usd": "d1b72fe8342c246cbfcdf303f93fb471e0d1237a1e5f9b9562dd0675f6baa580",
+    "usd/so101_isaaclab.usd": "e2fc4e39d219c4bb407f8c5b081fcf4e0ef020b6174f26bbebf77e67b64314c2"
+  },
+  "pads": [
+    {
+      "link": "gripper",
+      "source_prim": "/so101_calibrated/gripper/Cube",
+      "T_link": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.00832
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.00051
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          -0.09936
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "dimensions_m": [
+        0.001,
+        0.01,
+        0.01
+      ],
+      "collision": true,
+      "dynamic_friction": 1.0,
+      "static_friction": 1.0,
+      "rgba": [
+        0.18,
+        0.18,
+        0.18,
+        1
+      ],
+      "appearance_source": "provisional matte gray; USD has no display material"
+    },
+    {
+      "link": "jaw",
+      "source_prim": "/so101_calibrated/jaw/Cube",
+      "T_link": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.01225
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          -0.07589
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.01818
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "dimensions_m": [
+        0.001,
+        0.01,
+        0.01
+      ],
+      "collision": true,
+      "dynamic_friction": 1.0,
+      "static_friction": 1.0,
+      "rgba": [
+        0.18,
+        0.18,
+        0.18,
+        1
+      ],
+      "appearance_source": "provisional matte gray; USD has no display material"
+    }
+  ]
+}

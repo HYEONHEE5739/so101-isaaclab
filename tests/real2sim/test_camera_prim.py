@@ -38,7 +38,7 @@ def test_generated_camera_config_tracks_pose_after_robot_or_profile_moves(monkey
     monkeypatch.setitem(sys.modules, 'isaaclab.sim', sim)
     monkeypatch.setitem(sys.modules, 'isaaclab.assets', SimpleNamespace(AssetBaseCfg=SimpleNamespace))
     monkeypatch.setitem(sys.modules, 'isaaclab.sensors', SimpleNamespace(CameraCfg=CameraConfig))
-    p = load(Path(__file__).resolve().parents[2] / 'docs/real2sim/measurements.example.json')
+    p = load(Path(__file__).resolve().parents[2] / 'tests/real2sim/fixtures/partial_profile.json')
     cfg = SimpleNamespace(scene=SimpleNamespace(
         robot=SimpleNamespace(init_state=SimpleNamespace()),
         dome_light=SimpleNamespace(spawn=SimpleNamespace())))

@@ -9,6 +9,7 @@ import hashlib
 import importlib.metadata
 import inspect
 import json
+import time
 from pathlib import Path
 import numpy as np
 from .core import JOINTS, NATIVE_UNITS, stamp, values, to_sim
@@ -58,7 +59,8 @@ def calibration_record(device, path):
 
 
 class Leader:
-    def __init__(self, env, port, calibration_file_name, recalibrate=False):
+    def __init__(self, env, port, calibration_file_name, recalibrate=False, *, use_precision=True, precision_root=None, model_hash=None):
+        self.use_precision = use_precision; self.precision_root = precision_root; self.model_hash = model_hash
         from soarm101_lab.devices import SO101Leader, SO101LeaderCfg
 
         class StrictLeader(SO101Leader):
@@ -73,7 +75,7 @@ class Leader:
                 inner.last_native = native
                 return native
 
-        cfg = SO101LeaderCfg(port=port, calibration_file_name=calibration_file_name, recalibrate=recalibrate)
+        cfg = SO101LeaderCfg(port=port, calibration_file_name=calibration_file_name, recalibrate=recalibrate, use_precision=False)
         params = inspect.signature(SO101Leader.__init__).parameters
         kwargs = {"cfg": cfg}
         if "env" in params:
@@ -99,6 +101,10 @@ class Leader:
                 "Leader hardware calibration does not match its file; use existing leader calibration procedure"
             )
         self.metadata["calibration"] = calibration_record(self.device._bus.calibration, self.device.calibration_path)
+        if self.use_precision:
+            try: attach_active_precision(self, 'leader', self.precision_root, self.model_hash)
+            except BaseException:
+                self.close(); raise
 
     def activate(self):
         if not self.device.is_calibrated:
@@ -107,6 +113,13 @@ class Leader:
 
     def read(self):
         start = stamp()
+        if getattr(self, 'precision_mapper', None):
+            raw = self.device._bus.sync_read('Present_Position', normalize=False)
+            bus = self.device._bus
+            normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
+            native = values({n: normalized[bus.motors[n].id] for n in JOINTS})
+            self.last_raw = raw
+            return native, {'start': start, 'end': stamp()}
         action = self.device.advance()
         end = stamp()
         native = values(self.device.last_native)
@@ -125,8 +138,9 @@ class Leader:
 
 class Follower:
     def __init__(
-        self, port, identifier, calibration_dir=None, allow_calibration=False
+        self, port, identifier, calibration_dir=None, allow_calibration=False, *, use_precision=True, precision_root=None, model_hash=None
     ):
+        self.use_precision = use_precision; self.precision_root = precision_root; self.model_hash = model_hash
         cls, cfg_cls, audit = audit_lerobot()
 
         class CheckedFollower(cls):
@@ -184,12 +198,19 @@ class Follower:
             hi = bus._normalize({c.id: c.range_max for c in cal.values()})
             self.limits = {n: sorted([lo[cal[n].id], hi[cal[n].id]]) for n in JOINTS}
             self.metadata["normalized_calibrated_limits"] = self.limits
+            if self.use_precision: attach_active_precision(self, 'follower', self.precision_root, self.model_hash)
         except BaseException:
             self.close()
             raise
 
     def read(self):
         start = stamp()
+        if getattr(self, 'precision_mapper', None):
+            bus = self.device.bus
+            raw = bus.sync_read('Present_Position', normalize=False)
+            normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
+            self.last_raw = raw
+            return values({n: normalized[bus.motors[n].id] for n in JOINTS}), {'start': start, 'end': stamp()}
         obs = self.device.get_observation()
         end = stamp()
         return values({n: obs[n + ".pos"] for n in JOINTS}), {"start": start, "end": end}
@@ -239,3 +260,100 @@ def audit_camera_sources():
             raise RuntimeError("Local camera implementation differs from audited source: " + str(root / relative))
         records[relative] = actual
     return {"version": version, "source_hashes": records}
+
+
+class CalibrationDevice:
+    """Read-only calibration connection; torque release is the sole explicit write API."""
+    def __init__(self, role, hardware):
+        self.role = role
+        self.adapter = (Leader(None, hardware['leader_port'], hardware['leader_calibration'], False)
+                        if role == 'leader' else Follower(hardware['follower_port'], hardware['follower_id'],
+                                                         hardware.get('follower_calibration_dir') or None, False))
+        self.bus = self.adapter.device._bus if role == 'leader' else self.adapter.device.bus
+        self.exclusive = False
+    def connect(self):
+        # Direct read-only bus connect avoids Follower.connect's torque-releasing
+        # failure cleanup. Never call configure/calibrate/activate here.
+        self.bus.connect()
+        import fcntl, termios
+        fcntl.ioctl(self.bus.port_handler.ser.fileno(), termios.TIOCEXCL)
+        self.exclusive = True
+        if not self.bus.is_calibrated: raise ValueError('Calibration registers differ; no automatic rewrite or torque release')
+        device = self.adapter.device
+        path = device.calibration_path if self.role=='leader' else device.calibration_fpath
+        record = calibration_record(self.bus.calibration, path)
+        self.adapter.metadata['calibration'] = record
+        self.identity = {'role': self.role, 'port': str(Path(self.adapter.metadata['port']).resolve()),
+                         'id': self.adapter.metadata.get('id', Path(record['path']).name),
+                         'calibration_sha256': record['sha256'],
+                         'motors': {n: {'id': m.id, 'model': m.model} for n, m in self.bus.motors.items()}}
+    def motor_spec(self, joint):
+        motor = self.bus.motors[joint]
+        return {'calibration_hash': self.identity['calibration_sha256'],
+                'calibration': dataclasses.asdict(self.bus.calibration[joint]),
+                'resolution': self.bus.model_resolution_table[motor.model], 'mode': motor.norm_mode.name,
+                'apply_drive_mode': bool(self.bus.apply_drive_mode)}
+    def unchanged(self):
+        device = self.adapter.device
+        path = device.calibration_path if self.role=='leader' else device.calibration_fpath
+        return self.bus.is_calibrated and hashlib.sha256(Path(path).read_bytes()).hexdigest()==self.identity['calibration_sha256']
+    def sample(self, joint, live=False):
+        started = time.monotonic_ns()
+        raw = self.bus.read('Present_Position', joint, normalize=False)
+        raw_timestamp = time.monotonic_ns()
+        if live:
+            # One sensor packet for both displays: hand motion between two reads
+            # must not turn a valid live observation into a missing measurement.
+            native = self.bus._normalize({self.bus.motors[joint].id:raw})[self.bus.motors[joint].id]
+            native_timestamp = raw_timestamp
+        else:
+            native = self.bus.read('Present_Position', joint, normalize=True)
+            native_timestamp = time.monotonic_ns()
+        normalized_raw = self.bus._unnormalize({self.bus.motors[joint].id: native})[self.bus.motors[joint].id]
+        if abs(normalized_raw-raw)>3: raise ValueError('Raw/normalized reads moved or normalization clipped the sensor')
+        torque = self.bus.read('Torque_Enable', joint, normalize=False)
+        return {'raw': raw, 'legacy_position': native, 'torque': int(torque), 'timestamp_ns': time.monotonic_ns(),
+                'read_start_ns':started,'raw_timestamp_ns':raw_timestamp,'native_timestamp_ns':native_timestamp,
+                'clock':'host_monotonic_ns; not hardware synchronized',
+                'native_source':'normalized_same_raw_packet' if live else 'separate_normalized_read',
+                'joint': joint, 'device_identity': self.identity, 'calibration_hash': self.identity['calibration_sha256'],
+                'motor': self.motor_spec(joint)}
+    def release(self, joint): self.bus.disable_torque([joint])
+    def close(self):
+        # Preserve existing torque state on a read-only calibration disconnect.
+        if self.bus.is_connected:
+            if self.exclusive:
+                import fcntl, termios
+                try: fcntl.ioctl(self.bus.port_handler.ser.fileno(), termios.TIOCNXCL)
+                finally: self.bus.disconnect(disable_torque=False); self.exclusive=False
+            else:self.bus.disconnect(disable_torque=False)
+
+
+def attach_active_precision(adapter, role, root=None, model_hash=None):
+    from .precision import active_precision
+    profile = active_precision(role, root)
+    if profile is None: return None
+    if model_hash is None:
+        urdf = Path(__file__).resolve().parents[4] / 'assets/SO101/urdf/so101_isaaclab.urdf'
+        model_hash = hashlib.sha256(urdf.read_bytes()).hexdigest()
+    attach_precision(adapter, role, profile, model_hash)
+    return adapter.precision_mapper
+
+
+def attach_precision(adapter, role, profile, model_hash):
+    """Bind software mapping to the exact audited motor calibration, never write it."""
+    from .precision import PrecisionMapper
+    bus = adapter.device._bus if role == 'leader' else adapter.device.bus
+    record = adapter.metadata['calibration']
+    identity = {'role': role, 'port': str(Path(adapter.metadata['port']).resolve()),
+                'id': adapter.metadata.get('id', Path(record['path']).name),
+                'calibration_sha256': record['sha256'],
+                'motors': {n: {'id': m.id, 'model': m.model} for n, m in bus.motors.items()}}
+    if profile['identity'] != identity or profile['urdf_sha256'] != model_hash:
+        raise ValueError('Precision profile device/calibration/URDF identity conflict')
+    for joint,entry in profile['joints'].items():
+        spec=entry['motor'];motor=bus.motors[joint]
+        if spec['calibration']!=dataclasses.asdict(bus.calibration[joint]) or spec['resolution']!=bus.model_resolution_table[motor.model] or spec['mode']!=motor.norm_mode.name or spec['apply_drive_mode']!=bool(bus.apply_drive_mode):
+            raise ValueError('Precision profile normalization/register contract differs')
+    adapter.precision_mapper = PrecisionMapper(profile)
+    adapter.metadata['precision_mapping'] = adapter.precision_mapper.metadata()

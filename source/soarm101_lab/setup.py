@@ -33,6 +33,13 @@ setup(
     description=EXTENSION_TOML_DATA["package"]["description"],
     keywords=EXTENSION_TOML_DATA["package"]["keywords"],
     install_requires=INSTALL_REQUIRES,
+    extras_require={
+        "minivla": ["torch>=2.5,<3", "numpy>=1.26,<3", "Pillow>=10"],
+        "qwen": ["transformers==4.57.1", "peft==0.17.1", "accelerate>=1.0,<2", "bitsandbytes>=0.46,<0.49"],
+        "sim": ["mujoco>=3.2,<4"],
+        "test": ["pytest>=8"],
+    },
+    package_data={"soarm101_lab.learning.minivla": ["configs/*.json"]},
     license="Apache-2.0",
     include_package_data=True,
     python_requires=">=3.10",

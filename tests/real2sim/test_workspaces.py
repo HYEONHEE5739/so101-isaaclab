@@ -11,34 +11,25 @@ from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
 
 @pytest.fixture(scope='module')
 def published(tmp_path_factory):
-    root=tmp_path_factory.mktemp('workspace');p=profile_load(package.ROOT/'docs/real2sim/measurements.example.json')
-    def box(size,xyz):
-        t=np.eye(4);t[:3,3]=xyz
-        return {'shape':'box','dimensions_m':size,'T_workspace':t.tolist(),'render_enabled':True,
-                'provenance':{'dimensions_m':'provisional','T_workspace':'provisional'},
-                'appearance':{'color':[.3,.3,.3],'roughness':.6,'provenance':{'color':'provisional','roughness':'provisional'}}}
-    p['objects']={n:box([.024]*3,[0,0,.013]) for n in ['cube_red','cube_green','cube_blue']}
-    p['objects']['marker']=box([.15,.15,.0005],[0,0,.00025])
-    for n,x in [('cup_a',-.05),('cup_b',.05)]:
-        p['objects'][n]=box([.07,.07,.065],[x,.14,.0325]);p['objects'][n]['render_enabled']=False
-        c=box([.07,.07,.065],[x,.14,.0325]);c.update(shape='cup_proxy',wall_m=.002,approximation='Synthetic test cup')
-        c['provenance']['wall_m']='provisional'
-        p['objects'][n+'_visual']=c
-    p['table']=box([.6,.6,.04],[0,0,-.02]);p['relations']={};p['revision']={'status':'ACCEPTED'}
-    source=root/'revision_test/profile.json';source.parent.mkdir();source.write_text(json.dumps(p))
-    task=package.default_task(p);path=package.publish(source,'workspace_test',task,registry=root/'registry')
-    return root,source,task,path
+    from test_builder_workspace import make_export
+    from soarm101_lab.real2sim.workspaces.builder import import_scene
+    root = tmp_path_factory.mktemp('workspace')
+    source = make_export(root)
+    path = import_scene(source, 'workspace_test', registry=root/'registry')
+    w = package.load(path)
+    return root, path/'profile.json', w['task'], path
 
 
-def test_publish_idempotent_and_deterministic(published):
+def test_import_idempotent_and_deterministic(published):
+    from soarm101_lab.real2sim.workspaces.builder import import_scene
     root,source,task,path=published
     before=source.read_bytes()
-    assert package.publish(source,'workspace_test',task,registry=root/'registry')==path
-    second=package.publish(source,'workspace_test',task,registry=root/'other')
+    assert import_scene(root/'export','workspace_test',task=task,registry=root/'registry')==path
+    second=import_scene(root/'export','workspace_test',task=task,registry=root/'other')
     assert package.load(path)['manifest']==package.load(second)['manifest']
-    assert (path/'profile.json').read_bytes()==before==source.read_bytes()
+    assert source.read_bytes()==before
     changed=copy.deepcopy(task);changed['place']='cup_b'
-    with pytest.raises(FileExistsError):package.publish(source,'workspace_test',changed,registry=root/'registry')
+    with pytest.raises(FileExistsError):import_scene(root/'export','workspace_test',task=changed,registry=root/'registry')
 
 
 def test_missing_and_modified_asset_fail(published):
@@ -53,8 +44,9 @@ def test_missing_and_modified_asset_fail(published):
 
 def test_schema_identity_and_task_validation(published):
     root,source,task,path=published;profile=json.loads(source.read_text())
-    with pytest.raises(ValueError):package.publish(source,'../bad',task,registry=root)
-    with pytest.raises(ValueError):package.publish(source,'good',task,version=0,registry=root)
+    from soarm101_lab.real2sim.workspaces.builder import import_scene
+    with pytest.raises(ValueError):import_scene(root/'export','../bad',registry=root)
+    with pytest.raises(ValueError):import_scene(root/'export','good',version=0,registry=root)
     for patch in [{'pick':'unknown'},{'place':'unknown'},{'dynamic':['cube_red','cube_red']}]:
         bad=copy.deepcopy(task);bad.update(patch)
         with pytest.raises(ValueError):package.validate_task(bad,profile)
@@ -62,13 +54,14 @@ def test_schema_identity_and_task_validation(published):
     with pytest.raises(ValueError):package.validate_task(bad,profile)
 
 
-def test_dynamic_not_duplicated_and_target_collision_open(published):
+def test_dynamic_not_duplicated_and_target_collision_composed(published):
     _,_,task,path=published;s=Usd.Stage.Open(str(path/'scene/static.usda'))
     for name in task['dynamic']:assert not s.GetPrimAtPath('/Real2Sim/Workspace/'+name)
     cup=Usd.Stage.Open(str(path/'scene/cup_a.usda'))
     assert cup.GetDefaultPrim().HasAPI(UsdPhysics.RigidBodyAPI)
-    collisions=[p for p in cup.Traverse() if p.HasAPI(UsdPhysics.CollisionAPI)]
-    assert len(collisions)==129
+    collisions=[p for p in cup.Traverse() if p.HasAPI(UsdPhysics.CollisionAPI)
+                and p.GetAttribute('physics:collisionEnabled').Get() is not False]
+    assert len(collisions)==1  # Synthetic export has one collider; real cup topology belongs to Builder.
     assert not cup.GetPrimAtPath('/Real2Sim/CollisionTop')
 
 

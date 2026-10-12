@@ -140,7 +140,7 @@ def configure_environment(cfg, profile, usd_path, calibration=False):
             spawn=sim.UsdFileCfg(usd_path=mount_usd))
     scene.robot.init_state.pos, scene.robot.init_state.rot = pose(p["robot_base"]["T_world"])
     scene.dome_light.spawn.intensity = p["appearance"]["light_intensity"]
-    for view in ("side", "wrist"):
+    for view in p["cameras"]:
         c = p["cameras"][view]
         w, h = c["resolution"]
         k = render_k(c)
@@ -210,7 +210,7 @@ def apply_robot_appearance(stage, p):
         attr.Clear()
 
 
-def apply_profile(env, p):
+def apply_profile(env, p, workspace=None):
     """Update poses/K/appearance in a stopped calibration scene. Topology is immutable."""
     import torch
     from pxr import UsdGeom, UsdShade, Gf
@@ -221,21 +221,27 @@ def apply_profile(env, p):
     apply_robot_appearance(stage, p)
     # Check both cameras before changing any scene or robot state.
     camera_prims = {}
-    for view in ("side", "wrist"):
+    for view in p["cameras"]:
         sensor = env.scene["camera_" + view + "view"]
         if (sensor.cfg.width, sensor.cfg.height) != tuple(p["cameras"][view]["resolution"]):
             raise ValueError("Resolution changed: disconnect/reconnect scene")
         camera_prims[view] = camera_prim(stage, sensor)
-    base = "/World/envs/env_0/Real2Sim/Workspace"
+    base = '/World/envs/env_0/' + ('WorkspaceStatic/Workspace' if workspace else 'Real2Sim/Workspace')
+    objects = scene_objects(p)
+    if workspace:
+        excluded = set(workspace['task']['dynamic']) | set(workspace['task']['targets']) | set(workspace['task']['targets'].values())
+        objects = {n: obj for n, obj in objects.items() if n not in excluded}
     for path, t in [(base, p["workspace"]["T_world"])] + [
-        (base + "/" + n, o["T_workspace"]) for n, o in scene_objects(p).items()
+        (base + "/" + n, o["T_workspace"]) for n, o in objects.items()
     ]:
         prim = stage.GetPrimAtPath(path)
         if not prim:
             raise RuntimeError("Expected generated scene prim: " + path)
         UsdGeom.Xformable(prim).MakeMatrixXform().Set(Gf.Matrix4d(transform(t).T.tolist()))
-    for n, o in scene_objects(p).items():
+    for n, o in objects.items():
         shader = UsdShade.Shader(stage.GetPrimAtPath(base + "/" + n + "/Material/Shader"))
+        if not shader and workspace and workspace["manifest"].get("builder"):
+            continue  # Immutable Builder materials are composed from the exported USD.
         shader.GetInput("diffuseColor").Set(Gf.Vec3f(*o["appearance"]["color"]))
         shader.GetInput("roughness").Set(o["appearance"]["roughness"])
     light = stage.GetPrimAtPath("/World/Light")
@@ -247,8 +253,16 @@ def apply_profile(env, p):
     rp = torch.tensor([[*pos, *q]], device=env.device, dtype=torch.float32)
     robot.write_root_pose_to_sim(rp)
     robot.write_root_velocity_to_sim(torch.zeros((1, 6), device=env.device))
+    if workspace:
+        for name in [*workspace['task']['dynamic'], *workspace['task']['targets']]:
+            visual = workspace['task']['targets'].get(name, name)
+            target = transform(p['workspace']['T_world']) @ transform(p['objects'][visual]['T_workspace'])
+            pos, quat = pose(target)
+            body = env.scene[name]
+            body.write_root_pose_to_sim(torch.tensor([[*pos, *quat]], device=env.device, dtype=torch.float32))
+            body.write_root_velocity_to_sim(torch.zeros((1, 6), device=env.device))
     # Local mounting link transform persists as robot moves.
-    for view in ("side", "wrist"):
+    for view in p["cameras"]:
         sensor = env.scene["camera_" + view + "view"]
         c = p["cameras"][view]
         w, h = c["resolution"]

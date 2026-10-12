@@ -53,9 +53,11 @@ def replay_fields(data):
     count = len(data['joint_targets'])
     if len(joints) != count or not count:
         raise ValueError('Replay state/action lengths differ or are empty')
-    for name in ('side_cam', 'wrist_cam'):
+    cameras = [n for n in observations if n.endswith('_cam')]
+    if not cameras: raise ValueError('Replay requires camera observations')
+    for name in cameras:
         if name not in observations or len(observations[name]) != count:
-            raise ValueError('Replay requires synchronized Side/Wrist observations')
+            raise ValueError('Replay requires synchronized camera observations')
     if any(len(value) != count for value in objects.values()):
         raise ValueError('Replay object/action lengths differ')
     return observations, joints, objects

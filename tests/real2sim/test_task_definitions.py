@@ -15,7 +15,7 @@ def test_six_explicit_tasks_language_never_parsed(published):
     assert len(tasks) == 6
     assert {(t['pick_object_id'], t['target_object_id']) for t in tasks} == {
         (c, p) for c in ('cube_red', 'cube_blue', 'cube_green') for p in ('cup_a', 'cup_b')}
-    definition = tasks[3]; definition['language_instruction'] = 'Pick the red cube into cup A, unrelated text.'
+    definition = next(t for t in tasks if t['pick_object_id']=='cube_blue' and t['target_object_id']=='cup_b'); definition['language_instruction'] = 'Pick the red cube into cup A, unrelated text.'
     configured_w = configured(w, definition)
     assert configured_w['task']['pick'] == 'cube_blue' and configured_w['task']['place'] == 'cup_b'
     assert w['task']['pick'] == 'cube_red' and metadata(w) == metadata(configured_w)
@@ -110,7 +110,7 @@ def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatc
     w = load(published[3]); definitions = catalog(w)[:2]
     definitions[1]['language_instruction'] = 'User-edited training instruction'
     dataset = tmp_path / 'dataset'; (dataset / 'meta').mkdir(parents=True)
-    (dataset / 'meta/info.json').write_text('{"repo_id":"local/test"}')
+    (dataset / 'meta/info.json').write_text(json.dumps({'repo_id':'local/test','features':{'observation.images.side_cam':{},'observation.images.wrist_cam':{}}}))
     output = tmp_path / 'training'; checkpoint = output / 'checkpoints/last/pretrained_model'
     def fake_train(*args, **kwargs):
         assert '--policy.path=lerobot/smolvla_base' in args[0]

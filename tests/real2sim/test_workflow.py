@@ -52,8 +52,8 @@ def test_physics_roles(published):
 def test_compiled_static_collision(published):
     from pxr import Usd, UsdPhysics
     stage = Usd.Stage.Open(str(published[3] / 'scene/static.usda'))
-    assert stage.GetPrimAtPath('/Real2Sim/Workspace/table/Shape').HasAPI(UsdPhysics.CollisionAPI)
-    assert not stage.GetPrimAtPath('/Real2Sim/Workspace/marker/Shape').HasAPI(UsdPhysics.CollisionAPI)
+    assert stage.GetPrimAtPath('/Real2Sim/Workspace/table/collision_0').HasAPI(UsdPhysics.CollisionAPI)
+    assert stage.GetPrimAtPath('/Real2Sim/Workspace/marker/collision_0').GetAttribute('physics:collisionEnabled').Get() is False
     assert (published[3] / 'physics.json').is_file()
 
 
@@ -90,8 +90,11 @@ def test_operation_plan_preserves_cli_no_shell(published, tmp_path):
 
 def test_failed_run_never_registers(published, tmp_path, monkeypatch):
     r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
+    monkeypatch.setenv('PYTHONPATH', '/gui/venv/lib/python3.11/site-packages')
+    monkeypatch.setenv('PYTHONHOME', '/gui/venv')
+    environments = []
     class Process:
-        def __init__(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs): environments.append(kwargs['env'])
         def wait(self, **kwargs): return 3
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.Popen', Process)
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.run', lambda *a, **k: SimpleNamespace(stdout='test'))
@@ -99,6 +102,10 @@ def test_failed_run_never_registers(published, tmp_path, monkeypatch):
     states = list((r.root / 'runs').glob('*/state.json'))
     assert json.loads(states[0].read_text())['status'] == 'FAILED'
     assert len(r.all()) == 1
+    from soarm101_lab.real2sim.workspaces.package import ROOT
+    import os
+    assert environments[0]['PYTHONPATH'].split(os.pathsep) == [str(ROOT / 'source/soarm101_lab')]
+    assert 'PYTHONHOME' not in environments[0] and environments[0]['PYTHONNOUSERSITE'] == '1'
 
 
 def test_hub_metadata_no_live_upload(published, tmp_path):
@@ -183,7 +190,7 @@ def test_source_timing_options(published, tmp_path):
 
 
 def test_overview_framing_is_read_only(published):
-    from soarm101_lab.workflow.overview import framing
+    from soarm101_lab.workflow.presentation import framing
     workspace = load(published[3])
     original = copy.deepcopy(workspace['profile'])
     eye, quaternion = framing(workspace)
@@ -203,7 +210,7 @@ def test_readable_run_names():
     assert '_cube_blue_to_cup_b_' in run_folder_name('source', artifact, options={'tasks': [{'task_id': 'cube_blue_to_cup_b'}]})
     assert '_all_tasks_' in run_folder_name('sim_eval', artifact, options={'task_scope': 'all'})
     assert '_multi_2_tasks_' in run_folder_name('train', {'tasks': [{'task_id': 'a'}, {'task_id': 'b'}]})
-    assert '_no_task_' in run_folder_name('publish', {})
+    assert '_no_task_' in run_folder_name('hf_policy', {})
     assert '/' not in run_folder_name('source', {}, options={'tasks': [{'task_id': '../../bad/name'}]})
 
 
@@ -237,3 +244,87 @@ def test_datagen_seed_changes_layout_without_mutating_workspace(published, monke
     with pytest.raises(ValueError): datagen_seed(0, 0)
     with pytest.raises(ValueError): datagen_seed(0, -1)
     assert datagen_seed(0, 12345) == 12345
+
+
+@pytest.mark.parametrize('fail_registration', [False, True])
+def test_annotation_replaces_source_only_after_validation(published, tmp_path, monkeypatch, fail_registration):
+    import h5py
+    import shutil
+    from soarm101_lab.so101_dataset_contract import write_contract, sidecar
+    w = load(published[3]); source_path = tmp_path / 'source.hdf5'
+    with h5py.File(source_path, 'w') as f:
+        data = f.create_group('data')
+        data.attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': coordinate_contract(w)})
+        g = data.create_group('demo_0')
+        g.create_dataset('actions', data=np.zeros((2, 7)))
+        g.create_dataset('joint_targets', data=np.zeros((2, 6)))
+        g.create_dataset('obs/policy/joint_pos', data=np.zeros((2, 6)))
+    write_contract(source_path, coordinate_contract(w))
+    registry = Registry(tmp_path / 'registry')
+    source = registry.register('source', source_path)
+    assert registry.register('source', source_path)['id'] == source['id']
+    result_path = tmp_path / 'annotated.hdf5'
+    shutil.copy2(source_path, result_path)
+    write_contract(result_path, {**coordinate_contract(w), 'source_dataset': str(source_path)})
+    before = source_path.read_bytes(), sidecar(source_path).read_bytes()
+    with pytest.raises(ValueError, match='Missing Mimic annotation'):
+        registry.promote_annotation(source, result_path)
+    with h5py.File(result_path, 'a') as f:
+        f['data/demo_0'].create_dataset('obs/datagen_info/subtask_term_signals/grasp', data=[False, True])
+    if fail_registration:
+        monkeypatch.setattr(registry, 'register', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('registration failed')))
+        with pytest.raises(RuntimeError, match='registration failed'):
+            registry.promote_annotation(source, result_path)
+        assert before == (source_path.read_bytes(), sidecar(source_path).read_bytes())
+        assert result_path.exists() and registry.get(source['id'])['status'] == 'SUCCEEDED'
+        registry.verify(source)
+    else:
+        result = registry.promote_annotation(source, result_path)
+        assert result['path'] == str(source_path) and result['type'] == 'annotated'
+        assert registry.get(source['id'])['status'] == 'SUPERSEDED'
+        assert registry.get(source['id'])['superseded_by'] == result['id']
+        registry.verify(result)
+        assert not result_path.exists()
+    assert not list(tmp_path.glob('.*annotation_backup*'))
+
+
+def test_workspace_live_profile_updates_static_and_dynamic_layout(published, monkeypatch):
+    import sys
+    from unittest.mock import Mock
+    from pxr import Usd, UsdGeom, UsdLux
+    from soarm101_lab.real2sim.scene import apply_profile
+    w = load(published[3]); p = copy.deepcopy(w['profile'])
+    p['workspace']['T_world'][0][3] += .05
+    stage = Usd.Stage.CreateInMemory()
+    UsdLux.DomeLight.Define(stage, '/World/Light')
+    stage.DefinePrim('/World/envs/env_0/WorkspaceStatic').GetReferences().AddReference(str(published[3] / 'scene/static.usda'))
+    monkeypatch.setitem(sys.modules, 'isaaclab.sim', SimpleNamespace(get_current_stage=lambda: stage))
+    class Scene(dict):
+        def update(self, dt): pass
+    scene = Scene(robot=Mock())
+    for name in [*w['task']['dynamic'], *w['task']['targets']]: scene[name] = Mock()
+    for view in ('side', 'wrist'):
+        path = '/World/' + view
+        UsdGeom.Camera.Define(stage, path)
+        width, height = p['cameras'][view]['resolution']
+        scene['camera_'+view+'view'] = SimpleNamespace(
+            cfg=SimpleNamespace(width=width, height=height),
+            _view=SimpleNamespace(prim_paths=[path]), set_intrinsic_matrices=Mock())
+    env = SimpleNamespace(scene=scene, device='cpu', sim=Mock())
+    apply_profile(env, p, workspace=w)
+    workspace = UsdGeom.Xformable(stage.GetPrimAtPath('/World/envs/env_0/WorkspaceStatic/Workspace'))
+    assert np.asarray(workspace.GetLocalTransformation())[3, 0] == pytest.approx(.05)
+    for name in [*w['task']['dynamic'], *w['task']['targets']]:
+        visual = w['task']['targets'].get(name, name)
+        expected = np.asarray(p['workspace']['T_world']) @ np.asarray(p['objects'][visual]['T_workspace'])
+        actual = scene[name].write_root_pose_to_sim.call_args.args[0].numpy()[0, :3]
+        np.testing.assert_allclose(actual, expected[:3, 3], atol=1e-6)
+
+
+def test_retired_profile_publication_is_not_an_executable_stage():
+    from soarm101_lab.workflow.operations import STAGES, execute_request
+    from soarm101_lab.real2sim.workspaces import package
+    assert not {'accept', 'publish'} & set(STAGES)
+    assert not hasattr(package, 'publish')
+    with pytest.raises(ValueError, match='accept'):
+        execute_request({'stage':'accept', 'input':{}, 'options':{}, 'output':'unused'})

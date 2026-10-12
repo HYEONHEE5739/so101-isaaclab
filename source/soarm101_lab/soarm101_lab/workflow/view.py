@@ -2,16 +2,21 @@
 import codecs
 import re
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import QLabel, QSizePolicy
 
 
 class CameraView(QLabel):
-    def __init__(self, text):
+    def __init__(self, text='', minimum=(120, 90)):
         super().__init__(text)
-        self.setMinimumSize(120, 90)
+        self.setMinimumSize(*minimum)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def show_image(self, path):
+        pixmap = QPixmap(str(path))
+        if not pixmap.isNull():
+            self.setPixmap(pixmap)
 
     def paintEvent(self, event):
         pix = self.pixmap()

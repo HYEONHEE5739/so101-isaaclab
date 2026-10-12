@@ -77,7 +77,7 @@ class Presentation:
 
     def publish(self, images=None, force=False):
         now = time.monotonic()
-        if not force and now - self.last_publish < .1:
+        if not force and now - self.last_publish < 1 / 30:
             return
         self.last_publish = now
         import numpy as np
@@ -129,13 +129,12 @@ class Presentation:
                         signals['tcp_distance_mm'] = float((tcp - obj).norm().item() * 1000)
                     except (KeyError, AttributeError): pass
             self.details['task_signals'] = signals
-        self.publish({'sim_' + view: policy[view + '_cam'] for view in ('side', 'wrist')
-                      if view + '_cam' in policy}, force)
+        self.publish({'sim_' + key[:-4]: value for key,value in policy.items() if key.endswith('_cam')}, force)
 
     def start_real_cameras(self):
         from ..real2sim.cameras import CameraReader
         for view, device in self.config.get('real_cameras', {}).items():
-            if view not in ('side', 'wrist') or not device:
+            if not isinstance(view, str) or not view.isidentifier() or not device:
                 continue
             reader = None
             try:
@@ -227,3 +226,52 @@ class RecorderControls:
         if self.keyboard:
             self.keyboard.destroy()
         self.bridge.close()
+
+
+def framing(workspace):
+    import numpy as np
+    import xml.etree.ElementTree as ET
+    from scipy.spatial.transform import Rotation
+    p = workspace['profile']
+    base = np.asarray(p['robot_base']['T_world'])[:3, 3]
+    transform = np.asarray(p['workspace']['T_world'])
+    points = [base, transform[:3, 3]]
+    for name, obj in p['objects'].items():
+        if 'T_workspace' in obj and not name.startswith('background_'):
+            points.append((transform @ np.asarray(obj['T_workspace']))[:3, 3])
+    center = (np.min(points, axis=0) + np.max(points, axis=0)) / 2
+    urdf = ET.parse(workspace['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf')
+    reach = sum(np.linalg.norm(np.fromstring(o.get('xyz', '0 0 0'), sep=' '))
+                for o in urdf.findall('./joint/origin'))
+    radius = max(np.linalg.norm(np.asarray(points) - center, axis=1).max(), reach, .1)
+    center[2] = max(center[2], base[2] + reach * .3)
+    # View from the same open side as the existing camera, not behind a backdrop.
+    camera = p['cameras'].get('side') or next((c for c in p['cameras'].values() if c['parent']=='world'), next(iter(p['cameras'].values())))
+    direction = -np.asarray(camera['T_parent_camera'])[:3, 2].copy()
+    if np.linalg.norm(direction[:2]) < 1e-6:
+        direction[:2] = (1., 1.)
+    direction[2] = max(direction[2], .5)
+    direction /= np.linalg.norm(direction)
+    eye = center + direction * radius * 1.5
+    forward = (center - eye) / np.linalg.norm(center - eye)
+    right = np.cross(forward, [0., 0., 1.]); right /= np.linalg.norm(right)
+    down = np.cross(forward, right)
+    q = Rotation.from_matrix(np.column_stack([right, down, forward])).as_quat()
+    return tuple(eye), (float(q[3]), *map(float, q[:3]))
+
+
+class GenerationProgress:
+    def __init__(self, generation, target=None):
+        self.target = target
+        self.generation = generation
+        self.previous = (0, 0)
+        self.outcome = '진행 중'
+
+    def __call__(self):
+        g = self.generation
+        attempts, successes = g.num_attempts, g.num_success
+        if attempts > self.previous[0]:
+            self.outcome = '성공 (최근 완료 시도)' if successes > self.previous[1] else '실패 (최근 완료 시도)'
+        self.previous = attempts, successes
+        return dict(success_rate=successes / attempts if attempts else None, target_successes=self.target, attempts=attempts, successes=successes, failures=g.num_failures,
+                    episode_outcome=self.outcome, outcome_reason=(f'성공 데이터 {successes}/{self.target}개' if self.target is not None else 'Mimic generator 판정'))

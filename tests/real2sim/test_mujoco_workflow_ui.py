@@ -1,0 +1,213 @@
+"""Identical workflow controls, artifact routing and operations for both engines."""
+import json
+import sys
+import pytest
+
+
+@pytest.fixture
+def panel(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui, operations
+    from soarm101_lab.workflow.artifacts import Registry
+    from soarm101_lab.workflow import operations as service
+    from soarm101_lab.simulation.mjcf import load_inputs
+    from soarm101_lab.real2sim.storage import atomic
+    app = QApplication.instance() or QApplication([])
+    registry = Registry(tmp_path / 'registry')
+    monkeypatch.setattr(ui, 'Registry', lambda: registry)
+    p = ui.WorkflowPanel(lambda *args: None)
+    profile = json.loads((operations.ROOT / 'tests/real2sim/fixtures/scene_profile.json').read_text())
+    w, _, _ = load_inputs({'profile': profile}); w['root'] = tmp_path
+    identity = {'fixture_workspace': 'same_identity'}
+    for module in (ui, operations, service):
+        monkeypatch.setattr(module, 'load', lambda *args: w)
+        monkeypatch.setattr(module, 'metadata', lambda *args: identity)
+    monkeypatch.setattr(operations, 'inspect_artifact', lambda *args: {})
+    atomic(registry.root / 'artifacts/workspace.json', {
+        'id': 'workspace', 'type': 'workspace', 'path': str(tmp_path), 'workspace': identity, 'created_at': 1})
+    p.workspace.setText(str(tmp_path)); p.python.setText(sys.executable)
+    p.backend_pythons = {'isaac': sys.executable, 'mujoco': sys.executable}
+    p.refresh()
+    yield p
+    p.timer.stop(); p.close()
+
+
+def test_backend_changes_only_execution_engine(panel):
+    from soarm101_lab.workflow.operations import Operations
+    before = [panel.stage.itemText(i) for i in range(panel.stage.count())]
+    service = panel.service
+    path, port = panel.workspace.text(), panel.port.text()
+    for backend in ('mujoco', 'isaac'):
+        panel.backend.setCurrentIndex(panel.backend.findData(backend))
+        assert panel.service is service and isinstance(service, Operations)
+        assert [panel.stage.itemText(i) for i in range(panel.stage.count())] == before
+        assert panel.workspace.text() == path and panel.port.text() == port
+        assert panel.run.isEnabled(), panel.status.text()
+        assert panel.inputs.currentData() == 'workspace'
+        assert panel.stage_options()['backend'] == backend
+
+
+@pytest.mark.parametrize('stage', ['annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'])
+def test_stage_controls_do_not_change_with_backend(panel, stage):
+    panel.stage.setCurrentIndex(panel.stage.findData(stage))
+    def state():
+        return (panel.run.text(), panel.stage_summary.text(), panel.architecture.isHidden(),
+                panel.annotation_mode.isHidden(), set(panel.options.editors),
+                {k for k, v in panel.controls.items() if not v.isHidden()})
+    before = state()
+    panel.backend.setCurrentIndex(panel.backend.findData('mujoco'))
+    assert state() == before
+
+
+def test_source_completion_does_not_start_another_stage(panel, tmp_path):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.real2sim.storage import atomic
+    calls = []
+    panel.run_worker = lambda operation, done: calls.append((operation, done))
+    panel.execute()
+    source_path = tmp_path / 'source.hdf5'; source_path.touch()
+    source = {'id': 'source', 'type': 'source', 'path': str(source_path), 'created_at': 2,
+              'status': 'SUCCEEDED', 'tasks': panel.task_selector.selection()}
+    atomic(panel.registry.root / 'artifacts/source.json', source)
+    calls[0][1]({'ok': True, 'artifact': source})
+    QApplication.processEvents()
+    assert len(calls) == 1 and panel.active_stage == 'source'
+    assert not panel.busy
+
+
+def test_stage_options_survive_navigation(panel):
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+    values = json.loads(panel.options.toPlainText()); values['num_successful_demos'] = 7
+    panel.options.setPlainText(json.dumps(values))
+    panel.stage.setCurrentIndex(panel.stage.findData('source'))
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+    assert panel.stage_options()['num_successful_demos'] == 7
+
+
+def test_model_specific_options_are_isolated_and_preserved(panel):
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.options.editors['batch_size'][1].setValue(3)
+    assert 'model_config' not in panel.options.editors
+    assert 'source_groups' not in panel.options.editors
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    assert set(panel.options.editors) == {'model_config', 'source_groups', 'steps', 'output'}
+    assert not panel.minivla_head.isHidden()
+    assert 'batch_size' not in panel.stage_options()
+    opts = panel.stage_options()
+    from pathlib import Path
+    assert json.loads(Path(opts['model_config']).read_text())['head_type'] == 'flow'
+    panel.minivla_head.setCurrentIndex(panel.minivla_head.findData('deterministic'))
+    opts = panel.stage_options()
+    assert json.loads(Path(opts['model_config']).read_text())['head_type'] == 'deterministic'
+    panel.options.editors['steps'][1].setValue(12345)
+    panel.architecture.setCurrentIndex(panel.architecture.findData('smolvla'))
+    assert panel.stage_options()['batch_size'] == 3
+    assert 'model_config' not in panel.stage_options()
+    assert panel.minivla_head.isHidden()
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    assert panel.stage_options()['steps'] == 12345
+    panel.stage.setCurrentIndex(panel.stage.findData('source'))
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    assert panel.stage_options()['steps'] == 12345
+
+
+def test_minivla_custom_json_overrides_head_preset_and_drops_foreign_options(panel):
+    from soarm101_lab.learning.minivla.config import MODEL_ROOT
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    config = str(MODEL_ROOT / 'configs/qlora_deterministic.json')
+    panel.options.setPlainText(json.dumps({'model_config': config, 'batch_size': 999, 'base_model': 'unused'}))
+    opts = panel.stage_options()
+    assert opts['model_config'] == config and panel.minivla_head.isHidden()
+    assert 'batch_size' not in opts and 'base_model' not in opts
+
+
+@pytest.mark.parametrize('backend', ['isaac', 'mujoco'])
+def test_source_uses_common_execution_and_keyboard(panel, tmp_path, backend):
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from soarm101_lab.real2sim.storage import atomic
+    panel.backend.setCurrentIndex(panel.backend.findData(backend))
+    calls = []
+    panel.run_worker = lambda operation, done: calls.append((operation, done))
+    panel.execute()
+    assert panel.busy and not panel.backend.isEnabled() and not panel.navigation.isEnabled()
+    root = tmp_path / 'presentation'
+    atomic(root / 'status.json', {'state': 'RUNNING', 'frames': {}})
+    panel.service.session = root
+    panel.show(); panel.activateWindow(); panel.poll_preview()
+    panel.controls['save'].setFocus(); QApplication.processEvents()
+    QTest.keyClick(panel.controls['save'], Qt.Key.Key_Right)
+    QTest.keyClick(panel.controls['save'], Qt.Key.Key_Left)
+    QApplication.processEvents()
+    assert [json.loads(p.read_text())['command'] for p in sorted((root / 'commands').glob('*.json'))] == ['save', 'discard']
+    calls[0][1]({'ok': False, 'error': 'fixture completion'})
+    assert not panel.busy and panel.backend.isEnabled()
+
+
+@pytest.mark.parametrize('backend', ['isaac', 'mujoco'])
+@pytest.mark.parametrize('architecture', ['act', 'smolvla', 'minivla'])
+def test_lerobot_training_is_independent_of_selected_engine(panel, tmp_path, monkeypatch, backend, architecture):
+    from soarm101_lab.workflow import operations
+    from soarm101_lab.workflow.tasks import selected
+    from soarm101_lab.so101_dataset_contract import JOINT_SPACE
+    monkeypatch.setattr(operations, 'require_compatible', lambda *args: None)
+    monkeypatch.setattr(operations, 'coordinate_contract', lambda *args: {'action_space': JOINT_SPACE})
+    monkeypatch.setattr(panel.registry, 'verify', lambda *args: None)
+    w = operations.load('fixture')
+    artifact = {'id': 'dataset', 'type': 'dataset', 'path': str(tmp_path / 'lerobot'),
+        'format': {'codebase_version': 'v3.0'}, 'workspace': operations.metadata(w),
+        'tasks': [selected(w)], 'coordinates': {'action_space': JOINT_SPACE}}
+    plan = panel.service.plan('train', artifact, str(tmp_path), {
+        'backend': backend, 'architecture': architecture, 'python': panel.python.text()}, run_dir=tmp_path)
+    assert 'scripts/real2sim/workflow.py' in plan['argv']
+    request = json.loads((tmp_path / 'request.json').read_text())
+    assert request['options']['architecture'] == architecture
+    assert request['options']['workspace'] == str(w['root'])
+
+
+def test_builder_folder_import_uses_worker_python_and_persists(panel, tmp_path, monkeypatch):
+    """GUI-only Python does not need YAML, USD or simulator dependencies."""
+    import subprocess
+    from types import SimpleNamespace
+    from soarm101_lab.workflow import ui
+    export = tmp_path/'builder_export'; export.mkdir(); (export/'scene_manifest.yaml').write_text('schema: real2sim.package/1')
+    monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *a: str(export))
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kw: (calls.append(argv) or SimpleNamespace(returncode=0, stdout=panel.workspace.text()+'\n', stderr='')))
+    registrations=[];monkeypatch.setattr(panel.registry,'register',lambda *a: registrations.append(a))
+    panel.browse_workspace()
+    assert calls[0][0] == panel.python.text()
+    assert calls[0][-2:] == ['import-builder',str(export)]
+    assert registrations[0][0] == 'workspace'
+    saved=json.loads((panel.registry.root/'ui.json').read_text())
+    assert saved['workspace'] == panel.workspace.text()
+
+
+def test_one_camera_scene_configures_pipeline_and_real_sim(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from test_builder_workspace import fruit_export
+    from soarm101_lab.real2sim.workspaces.builder import import_scene
+    from soarm101_lab.real2sim.ui import Window
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    export=fruit_export.__wrapped__(tmp_path)
+    scene=import_scene(export,registry=tmp_path/'environments')
+    registry=Registry(tmp_path/'workflow');registry.register('workspace',scene)
+    monkeypatch.setattr(ui,'Registry',lambda:registry)
+    window=Window(tmp_path/'live')
+    window.workflow_panel.workspace.setText(str(scene));window.workflow_panel.refresh()
+    panel=window.workflow_panel
+    assert panel.scene_cameras==('front',)
+    assert panel.feeds['sim_front'].isHidden() is False
+    assert panel.feeds['sim_wrist'].isHidden()
+    assert panel.task_selector.selection()[0]['task_id']=='fruit_sort'
+    panel.section.setCurrentIndex(1)
+    panel.stage.setCurrentIndex(panel.stage.findData('real_eval'))
+    assert not panel.feeds['real_front'].isHidden() and panel.feeds['real_wrist'].isHidden()
+    window.sync_scene_cameras()
+    assert 'front_camera' in window.fields
+    assert 'sim_front' in window.views and window.views['sim_wrist'].parentWidget().isHidden()
+    window.close();app.processEvents()
