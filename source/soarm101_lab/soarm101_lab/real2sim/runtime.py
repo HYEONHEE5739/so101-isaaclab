@@ -11,10 +11,11 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from PIL import Image
 from scipy.spatial.transform import Rotation
-from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER
+from soarm101_lab.so101_joint_mapping import observed_positions, LEGACY_MAPPER
+from soarm101_lab.so101_robot_spec import ROBOT_URDF, joint_limits
 from .profile import load, render_k, digest, validate
 from .storage import Bus, atomic
-from .core import JOINTS, CONVENTION, stamp, to_sim, from_sim, joint_error, Stability, assess_pair, values
+from .core import JOINTS, CONVENTION, stamp, from_sim, joint_error, Stability, assess_pair, values
 from .hardware import Leader, Follower
 from .cameras import CameraReader, device_key
 from .scene import build_usd, configure_environment, apply_profile
@@ -54,7 +55,10 @@ class Runtime:
         self.error = None
         self.step = 0
         self.last_cycle = None
+        self.control_timing = {}
+        self.last_timing_log = 0.0
         self.real_history = Stability()
+        self.raw_feedback_history = []
         self.sim_history = Stability()
         self.snapshot_data = None
         self.target_limits = {}
@@ -89,6 +93,7 @@ class Runtime:
             sim_connected=self.env is not None,
             joint_error=(self.snapshot_data or {}).get("real_sim_joint_error"),
             target_limits=self.target_limits,
+            control_timing=getattr(self, "control_timing", {}),
             snapshot_dataset=self.snapshot_store.status() if getattr(self, "snapshot_store", None) else None,
             snapshot_session=self.snapshot_session,
             snapshot_results=getattr(self,"snapshot_results",[]),
@@ -121,6 +126,7 @@ class Runtime:
                 except Exception:
                     traceback.print_exc()
         self.follower = self.leader = None
+        self.target_limits = {}
         self.cameras = {}
         self.images = {}
         self.snapshot_data = None
@@ -223,7 +229,13 @@ class Runtime:
                 if active:
                     attach_precision(adapter, role, active, model_hash); found = True
             if not found: raise ValueError('Activate a validated precision profile first')
-        self.leader.activate()  # Release leader only after both calibrations match.
+        # Sensor/branch preflight is read-only. Finite out-of-model observations
+        # are accepted; invalid packets/ambiguous encoders still fail Connect.
+        for role, adapter in [('leader',self.leader),('follower',self.follower)]:
+            native, _ = adapter.read()
+            raw=getattr(adapter,'last_raw',None); specs=getattr(adapter,'motor_specs',None)
+            observed_positions(self.mapper(role),native,raw=raw if isinstance(raw,dict) else None,
+                    motor_specs=specs if isinstance(specs,dict) else None)
         self.open_cameras(cfg, p)
         self.hardware_identity = digest(
             {
@@ -243,10 +255,11 @@ class Runtime:
         self.snapshot_results = []
         self.last_snapshot = None
         self.real_history = Stability()
+        self.raw_feedback_history = []
         self.sim_history = Stability()
         self.error = None
         self.state = "CONNECTED"
-        self.message = "Connected: leader torque released; no follower goal sent. Press Start to follow leader targets."
+        self.message = "Connected for observation; no goal or torque configuration sent. Press Start to follow leader targets."
         self.last_cycle = None
 
     def open_cameras(self, cfg, p):
@@ -297,7 +310,9 @@ class Runtime:
                              task_definition=getattr(self, 'task_definition', None))
             if getattr(self, 'precision_options', {}).get('use_precision') and self.precision_options.get('identity_sim_for_validation'):
                 # Session configuration only. Do not rewrite the immutable calibrated USD.
-                ec.scene.robot.spawn.usd_path = str(Path(self.live_workspace)/'assets/SO101/usd/so101_isaaclab.usd')
+                from .workspaces.package import load as load_workspace
+                w = load_workspace(self.live_workspace)
+                ec.scene.robot.spawn.usd_path = str(w['root']/w['manifest'].get('identity_robot_asset','assets/SO101/usd/so101_isaaclab.usd'))
         else:
             ec = SO101TeleopEnvCfg()
         ec.scene.num_envs = 1
@@ -340,62 +355,92 @@ class Runtime:
         self.robot_hash = hashlib.sha256(Path(ec.scene.robot.spawn.usd_path).read_bytes()).hexdigest()
         self.profile = p
 
+    def command_target(self, leader_native):
+        """Clamp Teleop to shared model/motor bounds, then encode once for Real/Sim."""
+        path = getattr(self, 'robot_model_path', ROBOT_URDF)
+        bounds = np.array(list(joint_limits(path).values()))
+        leader = self.mapper('leader'); follower = self.mapper()
+        model_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        for mapper in (leader, follower):
+            if hasattr(mapper, 'profile') and mapper.profile['urdf_sha256'] != model_hash:
+                raise ValueError('Precision profile/model identity mismatch; reconnect for current URDF limits')
+        requested = values(observed_positions(leader, leader_native,
+            raw=getattr(self.leader,'last_raw',None) if isinstance(getattr(self.leader,'last_raw',None),dict) else None,
+            motor_specs=getattr(self.leader,'motor_specs',None) if isinstance(getattr(self.leader,'motor_specs',None),dict) else None))
+        engine = getattr(self, 'limits', None)
+        if getattr(self, 'env', None) is not None:
+            if hasattr(engine, 'detach'): engine = engine.detach().cpu().numpy()
+            if engine is None and isinstance(getattr(self.env,'limits',None),np.ndarray): engine=self.env.limits
+            if isinstance(engine,np.ndarray):
+                bounds[:,0] = np.maximum(bounds[:,0],engine[:,0])
+                bounds[:,1] = np.minimum(bounds[:,1],engine[:,1])
+        if 'gripper' not in getattr(follower,'profile',{}).get('joints',{}):
+            ends = sorted(LEGACY_MAPPER.calibrated_to_urdf(dict.fromkeys(JOINTS,v))['gripper'] for v in (0.,100.))
+            bounds[-1] = max(bounds[-1,0],ends[0]),min(bounds[-1,1],ends[1])
+        native_limits = getattr(self.follower, 'limits', None)
+        calibrated = getattr(follower, 'profile', {}).get('joints', {})
+        if isinstance(native_limits, dict):
+            for i, n in enumerate(JOINTS):
+                if n in calibrated: continue
+                mapping = LEGACY_MAPPER if calibrated else follower
+                ends = sorted(mapping.calibrated_to_urdf({**dict.fromkeys(JOINTS, 0.), n:v})[n]
+                              for v in native_limits[n])
+                bounds[i] = max(bounds[i,0],ends[0]), min(bounds[i,1],ends[1])
+        if np.any(bounds[:,0]>bounds[:,1]): raise ValueError('No common URDF/Sim/motor target range')
+        if calibrated:
+            motor_bounds = follower.command_limits(dict(zip(JOINTS, bounds.tolist())))
+            bounds = np.array([motor_bounds[n] for n in JOINTS])
+        goal = np.clip([requested[n] for n in JOINTS],bounds[:,0],bounds[:,1])
+        # Floating degree/radian round-off must not escape an exact Sim boundary.
+        for i,n in enumerate(JOINTS):
+            if n not in getattr(follower,'profile',{}).get('joints',{}):
+                margin=min(1e-9,(bounds[i,1]-bounds[i,0])/4)
+                goal[i] = np.clip(goal[i],bounds[i,0]+(margin if abs(bounds[i,0])>1e-12 else 0),
+                                 bounds[i,1]-(margin if abs(bounds[i,1])>1e-12 else 0))
+        command = values(follower.urdf_to_calibrated(dict(zip(JOINTS,goal.tolist()))))
+        limits = getattr(self.follower,'limits',None)
+        if isinstance(limits,dict) and any(command[n] < limits[n][0]-1e-6 or command[n] > limits[n][1]+1e-6 for n in JOINTS):
+            raise ValueError('Follower native goal outside calibrated motor range; no goal sent')
+        if hasattr(type(self.follower),'encode_goal'):
+            command, encoded = self.follower.encode_goal(command)
+        else: encoded=command
+        actual = values(follower.calibrated_to_urdf(encoded))
+        q = np.array([actual[n] for n in JOINTS])
+        if np.any(q<bounds[:,0]-1e-6) or np.any(q>bounds[:,1]+1e-6):
+            raise ValueError('Encoded goal outside URDF/Sim limits; no goal sent')
+        self.validate_sim_target(q)
+        self.target_limits = {n:{'requested_rad':requested[n],'applied_rad':float(q[i]),
+                                'range_rad':bounds[i].tolist()}
+                              for i,n in enumerate(JOINTS) if abs(goal[i]-requested[n])>1e-8}
+        return q, command
+
     def start(self):
-        if not self.follower:
-            raise ValueError("Connect hardware first")
+        if not self.follower: raise ValueError("Connect hardware first")
         if not self.precision_teleop_ready():
             raise ValueError('Activate validated Leader/Follower profiles for the same joints before precision Teleop; static follower comparison remains available')
-        if getattr(self,'precision_options',{}).get('use_precision'):
-            # Read-only preflight precedes even torque-enable/hold configuration.
-            leader_native,_=self.leader.read();follower_native,_=self.follower.read()
-            self.model_from_native(follower_native)
-            self.check_target(self.follower_target(leader_native))
+        leader_native,_ = self.leader.read(); follower_native,_ = self.follower.read()
+        self.observation_status(follower_native)  # Valid feedback, no in-range/start-distance requirement.
+        self.command_target(leader_native)  # Reject invalid goals before activation.
         if not self.activated:
-            self.leader.activate()
-            self.follower.activate()
-            self.activated = True
-        self.running = True
-        self.state = "RUNNING"
+            self.leader.activate(); self.follower.activate(); self.activated = True
+        self.running = True; self.state = "RUNNING"
         self.message = "Leader controls Real + Sim"
         self.last_cycle = None
 
     def stop(self):
         self.running = False
-        self.state = "STOPPED" if self.env or self.follower else "IDLE"
+        self.state = "STOPPED" if getattr(self,"env",None) or getattr(self,"follower",None) else "IDLE"
         self.message = "Stopped: no new physical targets. Follower holds last target until Disconnect."
 
-    def check_target(self, native):
-        q = np.array([self.model_from_native(native)[n] for n in JOINTS])
-        if getattr(self, 'backend', 'isaac') == 'mujoco':
-            self.env._target(q)
-        return q
-
-    def command_target(self, native):
-        """Bound a leader command before sending the same target to Real and Sim."""
-        self.target_limits = {}
-        mapped = self.model_from_native(native)  # Exact joint names and finite values are mandatory.
-        if getattr(self, 'backend', 'isaac') != 'mujoco':
-            return native
-        requested = np.array([mapped[n] for n in JOINTS])
-        lower, upper = self.env.limits.T.copy()
-        # Physical gripper commands use calibrated percent, with endpoints 0 and 100.
-        ends = sorted([DEFAULT_MAPPER.gripper_zero_offset_rad,
-                       DEFAULT_MAPPER.gripper_zero_offset_rad + 100 * DEFAULT_MAPPER.gripper_rad_per_percent])
-        mapper = self.mapper()
-        if hasattr(mapper, 'profile') and 'gripper' in mapper.profile['joints']:
-            # References determine the transform, not the command bounds.
-            # Precision inverse mapping checks URDF and calibrated motor limits.
-            ends = None
-        if ends is not None:
-            lower[-1], upper[-1] = max(lower[-1], ends[0]), min(upper[-1], ends[1])
-        # Leave only a numerical margin for radians -> degrees -> radians round-off.
-        applied = np.clip(requested, lower + 1e-9, upper - 1e-9)
-        self.env._target(applied)
-        self.target_limits = {
-            name: {'requested_rad': float(requested[i]), 'applied_rad': float(applied[i]),
-                   'range_rad': [float(lower[i]), float(upper[i])]}
-            for i, name in enumerate(JOINTS) if abs(requested[i] - applied[i]) > 1e-8}
-        return self.native_from_model(dict(zip(JOINTS, applied)))
+    def observation_status(self, native):
+        follower = getattr(self,'follower',None)
+        q = observed_positions(self.mapper(), native,
+            raw=getattr(follower,'last_raw',None) if isinstance(getattr(follower,'last_raw',None),dict) else None,
+            motor_specs=getattr(follower,'motor_specs',None) if isinstance(getattr(follower,'motor_specs',None),dict) else None)
+        bounds = joint_limits(getattr(self,'robot_model_path',ROBOT_URDF))
+        warnings = {n:{'measured_rad':q[n],'limits_rad':list(bounds[n])}
+                    for n in JOINTS if q[n]<bounds[n][0]-1e-6 or q[n]>bounds[n][1]+1e-6}
+        return q, warnings
 
     def mapper(self, role='follower'):
         from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER as current_mapper
@@ -409,44 +454,33 @@ class Runtime:
         leader=self.mapper('leader');follower=self.mapper()
         return isinstance(leader,PrecisionMapper) and isinstance(follower,PrecisionMapper) and bool(follower.profile['joints']) and set(leader.profile['joints'])==set(follower.profile['joints'])
 
-    def model_from_native(self, native):
-        return self.mapper().calibrated_to_urdf(values(native))
-
-    def observed_model_from_native(self, native):
-        mapper = self.mapper()
-        convert = getattr(mapper, 'calibrated_to_observation', mapper.calibrated_to_urdf)
-        return convert(values(native))
-
-    def native_from_model(self, q):
-        return self.mapper().urdf_to_calibrated(values(q))
-
-    def precision_feedback_valid(self, native):
-        if not getattr(self,'precision_options',{}).get('use_precision'):return True
-        try:self.model_from_native(native);return True
-        except ValueError as exc:
-            self.stop();self.snapshot_data=None
-            self.message=str(exc)+' — calibrated feedback unavailable; check joint limits/mapping, no new goals'
-            return False
-
-    def follower_target(self, leader_native):
-        if not getattr(self, 'precision_options', {}).get('use_precision'):
-            return leader_native
-        return self.native_from_model(self.mapper('leader').calibrated_to_urdf(leader_native))
-
     def tracking(self, leader, real, sent, sim=None, observation_only=False):
         if not getattr(self, 'precision_options', {}).get('use_precision'): return None
-        q = self.observed_model_from_native(real) if observation_only else self.model_from_native(real)
-        command = self.model_from_native(sent) if sent is not None else None
+        q = self.observation_status(real)[0]
+        command = self.mapper().calibrated_to_urdf(sent) if sent is not None else None
         leader_error=None
-        try:leader_common=self.mapper('leader').calibrated_to_urdf(leader)
+        try:leader_common=observed_positions(self.mapper('leader'), leader)
         except ValueError as exc:leader_common=None;leader_error=str(exc)
         return {'timestamp_ns': time.monotonic_ns(), 'leader_command_rad': leader_common,'leader_conversion_error':leader_error,
                 'follower_command_rad': command, 'follower_measured_rad': q, 'sim_measured_rad': sim,
                 'tracking_error_rad': {n:q[n]-command[n] for n in JOINTS} if command else None,
                 'scope': 'passive follower observation; no physical goals' if observation_only else 'dynamic tracking, never calibration zero compensation'}
 
+    def validate_sim_target(self, q):
+        if getattr(self, 'env', None) is None: return
+        if getattr(self, 'backend', 'isaac') == 'mujoco':
+            self.env._target(q)
+        else:
+            bounds = getattr(self,'limits',None)
+            if hasattr(bounds,'detach'): bounds = bounds.detach().cpu().numpy()
+            if isinstance(bounds,np.ndarray) and (np.any(q<bounds[:,0]-1e-6) or np.any(q>bounds[:,1]+1e-6)):
+                raise ValueError('Target outside Isaac articulation limits')
+
     def set_measured_pose(self, native):
-        q = self.check_target(native)
+        measured, warnings = self.observation_status(native)
+        q = np.array([measured[n] for n in JOINTS])
+        if warnings: raise ValueError('Measured pose outside URDF limits')
+        self.validate_sim_target(q)
         if getattr(self, 'backend', 'isaac') == 'mujoco':
             self.env.set_joint_state(q)
             return
@@ -562,15 +596,19 @@ class Runtime:
             return
         native, leader_interval = self.leader.read()
         real, real_interval = self.follower.read()
-        if not self.precision_feedback_valid(real):return
+        try: common_real, limit_warnings = self.observation_status(real)
+        except ValueError as exc:
+            self.stop(); self.message=str(exc)+" — no new goals"; self.snapshot_data = None
+            return
         sent = None
         send_interval = None
         pose_error = None
         if self.running:
             try:
-                target = self.command_target(self.follower_target(native))
+                q, target = self.command_target(native)
                 sent, send_interval = self.follower.send(target)
-                q = self.check_target(sent)
+                if not np.allclose(list(values(sent).values()),list(values(target).values()),atol=1e-10,rtol=0):
+                    raise ValueError("Follower altered requested goal")
                 if getattr(self, 'backend', 'isaac') == 'mujoco':
                     self.env.step(q)
                 else:
@@ -582,9 +620,8 @@ class Runtime:
                     self.message = 'RUNNING · Real/Sim 관절 목표 제한 · ' + details
                 else:
                     self.message = 'Leader controls Real + Sim'
-            except ValueError as exc:
-                self.stop()
-                self.message = str(exc) + " — paused; correct pose then Start"
+            except (ValueError, RuntimeError) as exc:
+                self.stop(); self.message=str(exc)+" — no new goals"
         else:
             try:
                 self.set_measured_pose(real)
@@ -595,11 +632,13 @@ class Runtime:
         self.step += 1
         sim_images, sim_interval, sim_q, sim_cameras, links, base = self.snapshot()
         real, real_interval = self.follower.read()
-        if not self.precision_feedback_valid(real):return
+        try: common_real, limit_warnings = self.observation_status(real)
+        except ValueError as exc:
+            self.stop(); self.message=str(exc)+" — no new goals"; self.snapshot_data = None
+            return
         packets = {n: c.nearest(sim_interval["end"]["monotonic_ns"]) for n, c in self.cameras.items()}
-        self.real_history.add(real_interval["end"]["monotonic_ns"], real)
+        self.record_measured(real_interval["end"]["monotonic_ns"], real)
         self.sim_history.add(sim_interval["end"]["monotonic_ns"], from_sim(sim_q))
-        common_real = self.model_from_native(real)
         error = joint_error(from_sim(common_real), sim_q)
         quality = assess_pair(
             packets,
@@ -624,8 +663,10 @@ class Runtime:
             "joint_convention": CONVENTION,
             "sim_joint_mapping": self.mapper().metadata(),
             'precision_run_configuration': copy.deepcopy(getattr(self, 'precision_options', {})),
-            'tracking': self.tracking(native, real, sent, sim_q),
-            'precision_raw_feedback': {'leader':getattr(self.leader,'last_raw',None),'follower':getattr(self.follower,'last_raw',None)},
+            'tracking': self.tracking(native, real, sent, sim_q, observation_only=sent is None),
+            'precision_observation_only':sent is None, 'joint_limit_warnings':limit_warnings,
+            'sim_pose_matches_measured':bool(pose_error is None and np.allclose(list(values(sim_q).values()),list(values(common_real).values()),atol=1e-6)),
+            'precision_raw_feedback': {'leader':getattr(self.leader,'last_raw',None),'follower':getattr(getattr(self,'follower',None),'last_raw',None)},
             "backend": getattr(self, 'backend', 'isaac'),
             "active_profile": copy.deepcopy(self.profile),
             "profile_hash": digest(self.profile),
@@ -647,7 +688,7 @@ class Runtime:
             },
             "sent_target": sent,
         }
-        self.snapshot_data['measured_samples']=[{'timestamp_ns':int(t),'native':dict(zip(JOINTS,q.tolist()))} for t,q,_ in self.real_history.history]
+        self.snapshot_data['measured_samples']=copy.deepcopy(self.raw_feedback_history)
         self.snapshot_data['real_stability']=self.real_history.assess()
         self.save_snapshot_requests()
         if time.monotonic() - self.last_preview > 0.1:
@@ -656,6 +697,13 @@ class Runtime:
                 path = self.bus.root / (n + ".pending")
                 Image.fromarray(rgb).save(path, format="JPEG", quality=85)
                 path.replace(self.bus.root / (n + ".jpg"))
+
+    def record_measured(self, timestamp, native):
+        self.real_history.add(timestamp, native)
+        raw=getattr(getattr(self,'follower',None),'last_raw',None)
+        record={'timestamp_ns':int(timestamp),'native':copy.deepcopy(native),
+                'raw':copy.deepcopy(raw) if isinstance(raw,dict) else None}
+        self.raw_feedback_history=(getattr(self,'raw_feedback_history',[])+[record])[-200:]
 
     def save_snapshot_requests(self):
         if not getattr(self, 'snapshot_requests', []) or self.pending is not None:return
@@ -696,46 +744,39 @@ class Runtime:
         """The same devices/teleop and quality history, without any engine import."""
         native,leader_interval=self.leader.read()
         sent=send_interval=None
-        if self.running and getattr(self,'precision_options',{}).get('use_precision'):
-            before,_=self.follower.read()
-            if not self.precision_feedback_valid(before):return
-        if self.running:
-            to_sim(native)  # Validate all names and finite native measurements before send.
-            try:target=self.follower_target(native)
-            except ValueError as exc:
-                self.stop();self.message=str(exc)+' — paused before any physical goal'
-            else:sent,send_interval=self.follower.send(target)
-        real,interval=self.follower.read()
-        if self.running and not self.precision_feedback_valid(real):return
-        observation_only = not self.running and sent is None
-        try:
-            q = self.observed_model_from_native(real) if observation_only else self.model_from_native(real)
+        real,interval = self.follower.read()
+        try: q, limit_warnings = self.observation_status(real)
         except ValueError as exc:
-            self.stop(); self.snapshot_data = None; self.message = str(exc)+' — capture measurement cannot be decoded'
+            self.stop(); self.message=str(exc)+" — no new goals"; self.snapshot_data = None
             return
-        joint_limits = getattr(self.mapper(), 'profile', {}).get('joints', {})
-        limit_warnings = {n: {'measured_rad':q[n], 'limits_rad':entry['limits']}
-                          for n,entry in joint_limits.items()
-                          if not entry['limits'][0]-1e-6 <= q[n] <= entry['limits'][1]+1e-6}
-        if observation_only:
-            self.message = ('Capture · 범위 밖 측정도 원본 저장 · Teleop은 범위 안에서 시작하세요: '
-                            + ', '.join(f'{n}={np.degrees(d["measured_rad"]):.2f}°' for n,d in limit_warnings.items())
+        if self.running:
+            try:
+                goal,target = self.command_target(native)
+                sent,send_interval = self.follower.send(target)
+                limited = getattr(self, 'target_limits', {})
+                self.message = ('RUNNING · 목표만 허용 경계로 제한 · ' + ', '.join(
+                    f"{n}: {np.degrees(d['requested_rad']):+.1f}° → {np.degrees(d['applied_rad']):+.1f}°"
+                    for n,d in limited.items()) if limited else 'RUNNING · Leader 추종 중')
+            except (ValueError, RuntimeError) as exc: self.stop(); self.message=str(exc)+" — no new goals"
+        observation_only = sent is None
+        if observation_only and getattr(self,'state','CONNECTED') == 'CONNECTED':
+            self.message = ('Capture · 범위 밖 측정 원본 보존; 모터 목표 전송 없음: ' + ', '.join(f'{n}={np.degrees(q[n]):.2f}°' for n in limit_warnings)
                             if limit_warnings else 'Capture · 카메라/관절 측정 중 · 로봇 목표 전송 없음')
         t=interval['end']['monotonic_ns']
-        self.real_history.add(t,real)
+        self.record_measured(t,real)
         packets={n:c.nearest(t) for n,c in self.cameras.items()}
         self.images={n:p['rgb'] for n,p in packets.items() if p is not None}
         self.snapshot_data={'joint_names':list(JOINTS),'joint_convention':CONVENTION,
             'sim_joint_mapping':self.mapper().metadata(),'physical_follower_measured_joint_state':real,
             'tracking':self.tracking(native,real,sent,observation_only=observation_only),'precision_run_configuration':copy.deepcopy(getattr(self,'precision_options',{})),
             'precision_observation_only':observation_only, 'joint_limit_warnings':limit_warnings,
-            'precision_raw_feedback':{'leader':getattr(self.leader,'last_raw',None),'follower':getattr(self.follower,'last_raw',None)},
+            'precision_raw_feedback':{'leader':getattr(self.leader,'last_raw',None),'follower':getattr(getattr(self,'follower',None),'last_raw',None)},
             'sent_target':sent,'leader_target':native,'active_profile':copy.deepcopy(self.profile),
             'profile_hash':digest(self.profile),'hardware_identity':self.hardware_identity,
             'hardware':{'leader':self.leader.metadata,'follower':self.follower.metadata},
             'real_camera_metadata':{n:c.metadata for n,c in self.cameras.items()},
             'real_stability':self.real_history.assess(),
-            'measured_samples':[{'timestamp_ns':int(stamp),'native':dict(zip(JOINTS,q.tolist()))} for stamp,q,_ in self.real_history.history],
+            'measured_samples':copy.deepcopy(self.raw_feedback_history),
             'timestamps':{'leader':leader_interval,'follower':interval,'send':send_interval,
                 'real_cameras':{n:{k:v for k,v in p.items() if k!='rgb'} for n,p in packets.items() if p is not None}}}
         self.save_snapshot_requests()
@@ -755,6 +796,7 @@ class Runtime:
             self.profile = p
             self.snapshot_data = None
             self.real_history = Stability()
+            self.raw_feedback_history = []
             return
         if not self.env:
             raise ValueError("Connect scene first")
@@ -801,6 +843,7 @@ class Runtime:
         self.profile = p
         self.snapshot_data = None
         self.real_history = Stability()
+        self.raw_feedback_history = []
         self.sim_history = Stability()
 
 
@@ -883,7 +926,15 @@ class Runtime:
                 if self.shutdown_requested:
                     break
                 try:
+                    tick_started = time.monotonic()
                     self.tick()
+                    now = time.monotonic()
+                    self.control_timing = {"follower_command": (self.follower.metadata.get("command_timing") if self.follower else None),
+                        "tick_ms": (now-tick_started)*1000,
+                        "work_ms": (now-begin)*1000, "nominal_hz": 30}
+                    if self.running and now - self.last_timing_log >= 2:
+                        self.last_timing_log = now
+                        print(f"[Real2Sim][control-timing] {self.control_timing}", flush=True)
                 except Exception as exc:
                     self.disconnect_hardware()
                     self.state = "ERROR"

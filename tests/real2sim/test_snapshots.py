@@ -346,6 +346,7 @@ def test_real_only_connect_teleop_stop_disconnect_uses_existing_devices(tmp_path
     leader=Mock();follower=Mock()
     for device in (leader,follower):device.metadata={'calibration':{'sha256':'fixture'}};device.read.return_value=(native,interval)
     follower.send.return_value=(native,interval)
+    follower.limits={n:[0,100] if n=='gripper' else [-180,180] for n in JOINTS}
     monkeypatch.setattr(runtime,'Leader',lambda *a,**kw:leader);monkeypatch.setattr(runtime,'Follower',lambda *a,**kw:follower)
     opened=[]
     class Camera:

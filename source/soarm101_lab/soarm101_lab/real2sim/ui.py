@@ -151,7 +151,8 @@ class Window(QMainWindow):
         self.log=QPlainTextEdit();self.log.setReadOnly(True);self.log.setMaximumHeight(100);layout.addWidget(self.log)
         settings_path=self.workspace/'ui_settings.json'
         if settings_path.exists():
-            for k,v in json.loads(settings_path.read_text()).items():
+            settings=json.loads(settings_path.read_text())
+            for k,v in settings.items():
                 if k in self.fields:self.fields[k].setText(v)
         from ..workflow.ui import WorkflowPanel
         self.workflow_panel=WorkflowPanel(self.work,self)
@@ -371,7 +372,7 @@ class Window(QMainWindow):
         try:
             if self.runtime_launcher.pending is not None:self.runtime_launcher.disconnect()
             elif self.runtime_enabled:
-                if self.requested_backend=='calibration':self.runtime_launcher.disconnect()
+                if self.requested_backend in ('real','calibration'):self.runtime_launcher.disconnect()
                 else:self.bus.send('stop')
         except RuntimeError:pass
         self.runtime_launcher.cancel_connect()

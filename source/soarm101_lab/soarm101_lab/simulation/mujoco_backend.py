@@ -407,34 +407,6 @@ class PolicyEnvironment:
         self.close()
 
 
-class LeaderTargets:
-    def __init__(self, env):
-        self.lower = np.maximum(env.coordinates.to_model(env.lower), env.backend.limits[:, 0])
-        self.upper = np.minimum(env.coordinates.to_model(env.upper), env.backend.limits[:, 1])
-        self.counts = np.zeros(6, dtype=int)
-        self.max_excess = np.zeros(6)
-        self.samples = 0
-
-    def apply(self, requested):
-        value = np.asarray(requested, dtype=float)
-        if value.shape != (6,) or not np.isfinite(value).all():
-            raise ValueError('Leader target must be a finite model-radian vector of shape (6,)')
-        applied = np.clip(value, self.lower, self.upper)
-        excess = np.abs(value - applied)
-        self.counts += excess > 1e-8
-        self.max_excess = np.maximum(self.max_excess, excess)
-        self.samples += 1
-        details = {name: {'requested_rad': float(value[i]), 'applied_rad': float(applied[i]),
-                         'range_rad': [float(self.lower[i]), float(self.upper[i])]}
-                   for i, name in enumerate(JOINTS) if excess[i] > 1e-8}
-        return applied, details
-
-    def metadata(self):
-        return {'policy': 'explicit clamp to URDF limits intersected with declared gripper endpoints',
-                'samples': self.samples, 'clamped_samples_by_joint': dict(zip(JOINTS, self.counts.tolist())),
-                'max_excess_rad_by_joint': dict(zip(JOINTS, self.max_excess.tolist()))}
-
-
 class MujocoSO101:
     def __init__(self, mapping_file, cameras, hz):
         import mujoco as mj

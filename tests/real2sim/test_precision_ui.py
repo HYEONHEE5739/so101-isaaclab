@@ -69,7 +69,7 @@ def test_fake_ui_joint_reference_review_save_activate_restore(tmp_path,monkeypat
         assert sample_value('urdf_angle_rad')==pytest.approx(math.radians(99))
         assert '+99.00°' in p.current_angle.text() and '+99.00°' in p.applied_angle.text()
         assert '+99.00°' in p.candidate_angle.text() and '+0.00°' in p.difference.text()
-        assert '-110.00° ~ +110.00°' in p.angle_help.text()
+        assert '-115.00° ~ +115.00°' in p.angle_help.text()
         assert not w.bus.status()['precision']['errors']
         p.send('fake_raw',raw=1500);pump(app,w,lambda:sample_value('raw')==1500)
         saved_path=p.saved_path.text();active_before=robot_state()['active_profile']
@@ -179,6 +179,7 @@ def test_live_before_after_and_unrecorded_positions_without_hardware(tmp_path, m
         robot['sample']['urdf_angle_rad']=None
         p.refresh({'robots':{'follower':robot}})
         assert '변환 불가' in p.applied_angle.text() and '(적용됨)' not in p.candidate_angle.text()
+        assert 'rebind_limits' not in p.buttons
         p.joint.setCurrentText('elbow_flex')
         assert '측정 없음' in p.current_angle.text() and '3200' not in p.raw_value.text()
         assert not p.live_reference_error.isVisible() and w.runtime_launcher.process is None

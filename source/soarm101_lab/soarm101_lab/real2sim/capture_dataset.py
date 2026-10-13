@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 from .storage import atomic, sync_directory
 from .core import JOINTS, NATIVE_UNITS, to_sim, digest
-from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER, require_capture_mapping
+from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER, require_capture_mapping, observed_positions
 
 SCHEMA = 'real2sim.snapshot/1'
 
@@ -44,16 +44,18 @@ def copy_robot(urdf, root):
     return 'robot_model/robot.urdf'
 
 
-def align_measured(samples, timestamp, max_skew_ns=100_000_000, mapper=None, observation_only=False):
+def align_measured(samples, timestamp, max_skew_ns=100_000_000, mapper=None, observation_only=False, motor_specs=None):
     """Interpolate measured arm values; gripper is held from the last sample."""
     if not samples:
         raise ValueError('Measured joint history missing')
     times = np.asarray([s['timestamp_ns'] for s in samples], dtype=np.int64)
     if np.any(np.diff(times) <= 0):
         raise ValueError('Measured timestamps must increase')
-    convert = mapper.calibrated_to_urdf if mapper else to_sim
-    if observation_only and mapper: convert = getattr(mapper, 'calibrated_to_observation', convert)
-    positions = np.asarray([[convert(s['native'])[n] for n in JOINTS] for s in samples])
+    def measured(sample):
+        if mapper:
+            return observed_positions(mapper,sample['native'],raw=sample.get('raw'),motor_specs=motor_specs)
+        return to_sim(sample['native'])
+    positions = np.asarray([[measured(s)[n] for n in JOINTS] for s in samples])
     right = int(np.searchsorted(times, timestamp))
     if right < len(times) and times[right] == timestamp:
         return positions[right].tolist()
@@ -87,13 +89,14 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     observation_only = state.get('precision_observation_only') is True
     if observation_only:
         if state.get('sent_target') is not None: raise ValueError('Passive capture must not contain a motor command')
-        convert = getattr(mapper, 'calibrated_to_observation', convert)
-    q = convert(state['physical_follower_measured_joint_state'])
+    raw=(state.get('precision_raw_feedback') or {}).get('follower')
+    motor_specs=state.get('hardware',{}).get('follower',{}).get('motor_specs')
+    q = observed_positions(mapper,state['physical_follower_measured_joint_state'],raw=raw,motor_specs=motor_specs)
     samples = copy.deepcopy(state.get('measured_samples', []))
     feedback_time = state['timestamps']['follower']['end']['monotonic_ns']
     if not samples or samples[-1]['timestamp_ns'] != feedback_time:
         raise ValueError('Latest measured feedback missing from history')
-    if not np.allclose([q[n] for n in JOINTS], align_measured(samples, feedback_time, mapper=mapper, observation_only=observation_only), atol=1e-8):
+    if not np.allclose([q[n] for n in JOINTS], align_measured(samples, feedback_time, mapper=mapper, observation_only=observation_only, motor_specs=motor_specs), atol=1e-8):
         raise ValueError('Measured feedback/history mismatch')
     if now_ns - feedback_time > 200_000_000 or feedback_time > now_ns:
         raise ValueError('Measured joint feedback is stale')
@@ -101,7 +104,7 @@ def prepare_snapshot(state, images, profile, now_ns=None):
     if not stability.get('stable'):
         raise ValueError('Robot pose is moving or feedback is warming up; hold still and retry')
     warnings = []
-    joint_limit_warnings = {n: {'measured_rad':q[n], 'limits_rad':entry['limits']}
+    joint_limit_warnings = copy.deepcopy(state.get('joint_limit_warnings', {})) or {n: {'measured_rad':q[n], 'limits_rad':entry['limits']}
                            for n,entry in getattr(mapper, 'profile', {}).get('joints', {}).items()
                            if not entry['limits'][0]-1e-6 <= q[n] <= entry['limits'][1]+1e-6}
     for n,detail in joint_limit_warnings.items():
@@ -129,19 +132,22 @@ def prepare_snapshot(state, images, profile, now_ns=None):
         observed.append({'camera': name, 'path': name + '.png', 'timestamp_ns': t,
                          'read_start_ns': start, 'sequence': packet['sequence'],
                          'resolution': list(rgb.shape[1::-1]), 'blur_variance': blur,
-                         'q_measured': align_measured(samples, t, mapper=mapper, observation_only=observation_only),
+                         'q_measured': align_measured(samples, t, mapper=mapper, observation_only=observation_only, motor_specs=motor_specs),
                          'joint_skew_ns': t - feedback_time, 'eligible': blur >= 10,
                          'timestamp_kind': 'host_read_interval_not_exposure'})
-    command = convert(state['sent_target']) if state.get('sent_target') is not None else None
+    # Read the recorded applied q of historical snapshots, without generating
+    # that retired controller's metadata in new snapshots.
+    command = (state.get('joint_control',{}).get('applied_joint_rad') or convert(state['sent_target'])) if state.get('sent_target') is not None else None
     measured = {'timestamp_ns': feedback_time, 'q_measured': [q[n] for n in JOINTS],
                 'q_native': state['physical_follower_measured_joint_state'],
                 'q_command': [command[n] for n in JOINTS] if command else None,
                 'command_timestamp_ns': state['timestamps']['send']['end']['monotonic_ns'] if command else None,
                 'captured_host_ns': now_ns,
-                'measured_samples': [{**a,'q_measured':[convert(a['native'])[n] for n in JOINTS]} for a in samples], 'timestamps': state['timestamps'], 'real_stability': stability,
+                'measured_samples': [{**a,'q_measured':align_measured([a],a['timestamp_ns'],mapper=mapper,observation_only=observation_only,motor_specs=motor_specs)} for a in samples], 'timestamps': state['timestamps'], 'real_stability': stability,
                 'precision_raw_feedback': state.get('precision_raw_feedback'), 'tracking': state.get('tracking'),
                 'precision_run_configuration': state.get('precision_run_configuration', {})}
-    measured.update(precision_observation_only=observation_only, joint_limit_warnings=joint_limit_warnings)
+    measured.update(precision_observation_only=observation_only, joint_limit_warnings=joint_limit_warnings,
+                    sim_pose_matches_measured=state.get('sim_pose_matches_measured'))
     return measured, observed, warnings
 
 

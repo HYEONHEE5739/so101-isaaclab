@@ -9,10 +9,10 @@ import hashlib
 import importlib.metadata
 import inspect
 import json
+import math
 import time
 from pathlib import Path
-import numpy as np
-from .core import JOINTS, NATIVE_UNITS, stamp, values, to_sim
+from .core import JOINTS, NATIVE_UNITS, stamp, values
 
 
 def ast_hash(path):
@@ -58,6 +58,12 @@ def calibration_record(device, path):
     return {"path": str(p.resolve()), "sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "values": data}
 
 
+def motor_specs(bus, calibration_hash):
+    return {n:{'calibration_hash':calibration_hash,'calibration':dataclasses.asdict(bus.calibration[n]),
+        'resolution':bus.model_resolution_table[bus.motors[n].model], 'mode':bus.motors[n].norm_mode.name,
+        'apply_drive_mode':bool(bus.apply_drive_mode)} for n in JOINTS}
+
+
 class Leader:
     def __init__(self, env, port, calibration_file_name, recalibrate=False, *, use_precision=True, precision_root=None, model_hash=None):
         self.use_precision = use_precision; self.precision_root = precision_root; self.model_hash = model_hash
@@ -68,12 +74,6 @@ class Leader:
                 raise RuntimeError(
                     "Leader calibration missing or requested implicitly. Select the existing calibration file; automatic calibration is disabled."
                 )
-
-            def _get_raw_data(inner):
-                # Present_Position and norm modes are verified in the repository's own implementation.
-                native = values(inner._bus.sync_read("Present_Position"))
-                inner.last_native = native
-                return native
 
         cfg = SO101LeaderCfg(port=port, calibration_file_name=calibration_file_name, recalibrate=recalibrate, use_precision=False)
         params = inspect.signature(SO101Leader.__init__).parameters
@@ -101,6 +101,8 @@ class Leader:
                 "Leader hardware calibration does not match its file; use existing leader calibration procedure"
             )
         self.metadata["calibration"] = calibration_record(self.device._bus.calibration, self.device.calibration_path)
+        self.motor_specs=motor_specs(self.device._bus,self.metadata['calibration']['sha256'])
+        self.metadata['motor_specs']=self.motor_specs
         if self.use_precision:
             try: attach_active_precision(self, 'leader', self.precision_root, self.model_hash)
             except BaseException:
@@ -113,23 +115,12 @@ class Leader:
 
     def read(self):
         start = stamp()
-        if getattr(self, 'precision_mapper', None):
-            raw = self.device._bus.sync_read('Present_Position', normalize=False)
-            bus = self.device._bus
-            normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
-            native = values({n: normalized[bus.motors[n].id] for n in JOINTS})
-            self.last_raw = raw
-            return native, {'start': start, 'end': stamp()}
-        action = self.device.advance()
-        end = stamp()
-        native = values(self.device.last_native)
-        got = action.detach().cpu().numpy()
-        expected = np.array([to_sim(native)[n] for n in JOINTS])
-        if got.shape != (6,) or not np.allclose(got, expected, atol=1e-6):
-            raise RuntimeError(
-                "Local leader.advance mapping differs from inspected repo V2. Refusing to guess signs/gripper offsets."
-            )
-        return native, {"start": start, "end": end}
+        bus = self.device._bus
+        raw = bus.sync_read('Present_Position', normalize=False)
+        normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
+        native = values({n: normalized[bus.motors[n].id] for n in JOINTS})
+        self.last_raw = raw
+        return native, {'start': start, 'end': stamp()}
 
     def close(self):
         if self.device.is_connected:
@@ -198,22 +189,21 @@ class Follower:
             hi = bus._normalize({c.id: c.range_max for c in cal.values()})
             self.limits = {n: sorted([lo[cal[n].id], hi[cal[n].id]]) for n in JOINTS}
             self.metadata["normalized_calibrated_limits"] = self.limits
+            self.motor_specs=motor_specs(bus,self.metadata['calibration']['sha256'])
+            self.metadata['motor_specs']=self.motor_specs
             if self.use_precision: attach_active_precision(self, 'follower', self.precision_root, self.model_hash)
+            self.read_motion_settings('connect')
         except BaseException:
             self.close()
             raise
 
     def read(self):
         start = stamp()
-        if getattr(self, 'precision_mapper', None):
-            bus = self.device.bus
-            raw = bus.sync_read('Present_Position', normalize=False)
-            normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
-            self.last_raw = raw
-            return values({n: normalized[bus.motors[n].id] for n in JOINTS}), {'start': start, 'end': stamp()}
-        obs = self.device.get_observation()
-        end = stamp()
-        return values({n: obs[n + ".pos"] for n in JOINTS}), {"start": start, "end": end}
+        bus = self.device.bus
+        raw = bus.sync_read('Present_Position', normalize=False)
+        normalized = bus._normalize({bus.motors[n].id: v for n, v in raw.items()})
+        self.last_raw = raw
+        return values({n: normalized[bus.motors[n].id] for n in JOINTS}), {'start':start,'end':stamp()}
 
     def activate(self):
         if not self.device.is_calibrated:
@@ -226,16 +216,72 @@ class Follower:
         if readback != present:
             raise RuntimeError("Follower hold target readback failed; torque remains disabled")
         self.device.configure()
+        self.read_motion_settings('activated')
+
+    def read_motion_settings(self, stage):
+        """Diagnostic reads only; never reset an unknown speed/phase configuration."""
+        settings = {}
+        for name in ('Operating_Mode', 'Goal_Velocity', 'Acceleration', 'Phase'):
+            try:
+                data = self.device.bus.sync_read(name, normalize=False)
+                settings[name] = {n: int(data[n]) for n in JOINTS}
+            except Exception as exc:
+                settings[name] = {'read_error': str(exc)}
+        self.metadata['motion_settings'] = {'stage': stage, 'registers': settings}
+        print('[Real2Sim][follower-motion] ' + json.dumps(self.metadata['motion_settings'], ensure_ascii=False), flush=True)
 
     def stop(self):
         # Hold at the last target; no new goal. Disconnect releases torque via audited API.
-        pass
+        self._last_goal_ns = None
+
+    def encode_goal(self, target):
+        """Read-only SDK encoding preflight, including integer truncation."""
+        from .precision import raw_from_native, native_from_raw
+        target=values(target).copy(); bus=self.device.bus
+        if any(target[n] < self.limits[n][0]-1e-6 or target[n] > self.limits[n][1]+1e-6 for n in JOINTS):
+            raise ValueError("Follower native goal outside calibrated motor range")
+        entries=getattr(getattr(self,'precision_mapper',None),'profile',{}).get('joints',{})
+        def encode(): return bus._unnormalize({bus.motors[n].id:target[n] for n in JOINTS})
+        raw=encode()
+        for name in JOINTS:
+            spec=entries[name]['motor'] if name in entries else self.motor_specs[name]
+            identifier=bus.motors[name].id
+            expected=round(raw_from_native(target[name],spec))
+            if name not in entries:
+                target[name]=native_from_raw(expected,spec);raw=encode()
+            # The strict Precision inverse has already selected this integer goal.
+            # Move only a few floating point ULPs so SDK int() encodes that goal.
+            direction=-math.inf if spec['mode']=='RANGE_0_100' and spec['apply_drive_mode'] and spec['calibration']['drive_mode'] else math.inf
+            for _ in range(16):
+                if raw[identifier]==expected: break
+                if raw[identifier]!=expected-1: raise ValueError(name+': SDK encoder disagrees with Precision inverse')
+                target[name]=math.nextafter(target[name],direction);raw=encode()
+            if raw[identifier]!=expected: raise ValueError(name+': SDK encoder cannot roundtrip calibrated goal')
+        for n in JOINTS:
+            cal=bus.calibration[n]; goal=raw[bus.motors[n].id]
+            if not cal.range_min <= goal <= cal.range_max:
+                raise ValueError(n+": SDK goal outside calibrated motor range")
+        normalized=bus._normalize(raw)
+        self.last_encoded_goal_raw=dict(raw)
+        return target,values({n:normalized[bus.motors[n].id] for n in JOINTS})
 
     def send(self, target):
         target = values(target)
+        if any(target[n] < self.limits[n][0]-1e-6 or target[n] > self.limits[n][1]+1e-6 for n in JOINTS):
+            raise ValueError('Follower native goal outside calibrated motor range')
+        if any(dataclasses.asdict(self.device.bus.calibration[n])!=self.motor_specs[n]['calibration'] for n in JOINTS):
+            raise ValueError('Follower motor calibration identity changed; no goal sent')
+        record = self.metadata['calibration']
+        if hashlib.sha256(Path(record['path']).read_bytes()).hexdigest() != record['sha256']:
+            raise ValueError('Follower calibration file identity changed; no goal sent')
         start = stamp()
         sent = self.device.send_action({n + ".pos": v for n, v in target.items()})
         end = stamp()
+        previous = getattr(self, '_last_goal_ns', None)
+        self._last_goal_ns = end['monotonic_ns']
+        self.metadata['command_timing'] = {
+            'send_ms': (end['monotonic_ns']-start['monotonic_ns'])/1e6,
+            'interval_ms': None if previous is None else (end['monotonic_ns']-previous)/1e6}
         return values({n: sent[n + ".pos"] for n in JOINTS}), {"start": start, "end": end}
 
     def close(self):
@@ -342,18 +388,24 @@ def attach_active_precision(adapter, role, root=None, model_hash=None):
 
 def attach_precision(adapter, role, profile, model_hash):
     """Bind software mapping to the exact audited motor calibration, never write it."""
-    from .precision import PrecisionMapper
+    from .precision import PrecisionMapper, profile_for_model
     bus = adapter.device._bus if role == 'leader' else adapter.device.bus
     record = adapter.metadata['calibration']
     identity = {'role': role, 'port': str(Path(adapter.metadata['port']).resolve()),
                 'id': adapter.metadata.get('id', Path(record['path']).name),
                 'calibration_sha256': record['sha256'],
                 'motors': {n: {'id': m.id, 'model': m.model} for n, m in bus.motors.items()}}
-    if profile['identity'] != identity or profile['urdf_sha256'] != model_hash:
-        raise ValueError('Precision profile device/calibration/URDF identity conflict')
+    if profile['identity'] != identity:
+        changed = sorted(k for k in set(profile['identity']) | set(identity)
+                         if profile['identity'].get(k) != identity.get(k))
+        raise ValueError(
+            f'Precision profile device/calibration identity conflict ({role}: {", ".join(changed)}). '
+            '저장 보정과 현재 장치 설정이 다릅니다. 포트·장치 ID·LeRobot 보정 파일을 확인하세요.'
+        )
+    effective = profile_for_model(profile, model_hash)
     for joint,entry in profile['joints'].items():
         spec=entry['motor'];motor=bus.motors[joint]
         if spec['calibration']!=dataclasses.asdict(bus.calibration[joint]) or spec['resolution']!=bus.model_resolution_table[motor.model] or spec['mode']!=motor.norm_mode.name or spec['apply_drive_mode']!=bool(bus.apply_drive_mode):
             raise ValueError('Precision profile normalization/register contract differs')
-    adapter.precision_mapper = PrecisionMapper(profile)
+    adapter.precision_mapper = PrecisionMapper(effective)
     adapter.metadata['precision_mapping'] = adapter.precision_mapper.metadata()

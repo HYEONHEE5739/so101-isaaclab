@@ -5,7 +5,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox,
     QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QLineEdit, QPlainTextEdit, QMessageBox, QScrollArea, QGroupBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView)
+    QHeaderView, QAbstractItemView, QFileDialog)
 from soarm101_lab.so101_joint_mapping import JOINTS, LEGACY_MAPPER
 from .precision import unwrap, joint_angle, joint_raw_coordinate
 from ..workflow.view import CameraView

@@ -1,5 +1,65 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — 2026-10-13 / Teleop 모터 범위 초과 처리
+
+사용자 요청으로 Runtime.command_target의 기존 clip에 Follower 모터 명령 가능 범위를 포함했다.
+PrecisionMapper.command_limits는 현재 URDF/Sim과 모터 범위의 정수 encoder 교집합을 계산한다.
+정상적인 목표 초과는 경계로 제한하고 계속 추종한다. 저장 profile/active/URDF는 그대로다.
+모호한 branch/비정상 값/identity/통신 오류는 계속 거절한다. Policy inverse는 strict 유지.
+이전 “motor range 부족이면 Teleop 전체 거절” 설명은 현재 정책이 아니다.
+실제 로봇 자동 테스트 없음. TELEOP_LATENCY_DIAGNOSIS.md의 후속 결과 참조.
+
+
+## 후속 확인 — 2026-10-13 / Teleop 지연 및 Start 오류
+
+사용자 재현 로그에서 목표 전송 간격은 약33ms, send0.10–0.15ms였다.
+모든 모터 Goal_Velocity338–347이 Connect/Start 전후 유지되었고 사용자의 모터 전원
+재시작 후0으로 초기화됐다. 이전 속도 제한 잔류가 지연의 유력 원인이다.
+이후 shoulder_lift가 기존 모터 보정 범위를 넘는 목표를 받아 Start에서 거절됐다.
+위 Teleop 목표 clip 수정 후 사용자가 정상 동작한다고 확인했다. 외부 센서로
+지연/정확도를 실측한 결과는 아니다. 재보정/보정 파일 변경은 하지 않았다.
+진단은 기존 runtime 로그/status에 남기며 모터 속도/Phase를 임의로 쓰지 않는다.
+관련 최종 검사171 PASS,1 SKIP(Blender 선택 검사); 실제 Profile 1001개 목표 offline 변환 통과.
+상세 로컬 기록: `outputs/workflow_validation/unified_joint_control/TELEOP_LATENCY_DIAGNOSIS.md`.
+outputs는 Git 제외이므로 코드 사용 계약은 `docs/real2sim/JOINT_CONTROL.md`를 참조한다.
+
+## 최신 — 2026-10-12 / Limit-only Profile 자동 호환
+
+`outputs/workflow_validation/joint_limit_extension/COMPATIBILITY_REPORT.md`와
+`docs/real2sim/PRECISION_CALIBRATION.md`를 우선 읽는다. 이번 사용자 지시로 이전 승인형
+Limit Migration UI/worker/ProfileStore.rebind_limits를 제거했다. 기존 active Profile을 재저장하거나
+재승인하지 않는다. `precision.profile_for_model`은 exact hash에 맞는 Git/보존 URDF를 읽어
+lower/upper 외 모델 전체가 동일함을 확인하고 실행 복사본에만 선택 URDF의 제한을 적용한다.
+원본 Profile/active/Sign/Scale/Zero/References를 변경하지 않는다. model evidence 부재,
+Axis/Origin/geometry/topology 변경 및 모터 identity 변경은 계속 거절한다. 장치 제어는 기존
+SDK/Precision strict inverse를 사용한다. 새 컨트롤러/Guard/Migration 설정은 만들지 않는다.
+Calibration의 실제 보정 Save/사용자 승인 Activate/Restore는 그대로다.
+
+Pan/Lift/Elbow/Flex ±5°는 이미 적용되어 추가 확장하지 않았다. Roll/Gripper도 그대로다.
+원본 USD/Workspace는 보존. 실행 USD는 `assets/SO101/usd/so101_joint_limits.usda`, 새 Workspace는
+`scene1_builder/v10`. Real-only 기본은 root URDF, Workspace는 자신의 URDF/USD로 재현한다.
+이전 검증 보고서의 Migration 지침은 현재 정책이 아니다. 사용자가 기존 worker를 종료하고
+UI 재시작 → Connect하면 된다. 자동 장치 구동/설정 설치/사용자 데이터 수정은 하지 않는다.
+
+
+## 최신 — 2026-10-12 / 관절 제어 단순화 (현재 정책)
+
+사용자 요청으로 별도 Controller/MotionGuard/자동 복귀 및 전용 UI/IPC를 제거했다.
+`docs/real2sim/JOINT_CONTROL.md`와
+`outputs/workflow_validation/unified_joint_control/SIMPLIFICATION_REPORT.md`를 우선 읽는다.
+기존 Runtime.command_target이 Leader observed_positions → URDF/선택 엔진 clip → Follower
+Precision inverse → 실제 SDK 정수 변환 → 같은 q를 Real/Sim에 전달한다. Motor range 부족은
+명령 전 거절한다. Start 5°/30°/s/10° Guard나 RETURNING_TO_LIMIT 경로가 없다.
+Connect는 읽기 전용이며 유효한 범위 밖 Follower 피드백도 허용한다. Start는 명시 사용자 요청이다.
+Precision/보정 승인·복구/모터 identity·유효성/통신/heartbeat/stall/Sim limit 검사 유지.
+새 Controller/launcher/config를 만들지 않았다. 관측 계산은 기존 so101_joint_mapping에 통합했다.
+새 Snapshot에서 controller metadata를 생성하지 않으며 역사적 applied q reader만 유지한다.
+SDK 정수 conversion은 strict inverse의 1-count 부동소수점 문제와 Real/Sim target 동일성을
+위해 Hardware에 한 개 유지한다. 이전 guard 설정을 다시 복원하지 않는다.
+URDF는 이미 ±5° 확장되어 추가 수정하지 않았다. v10 및 기존 사용자 Profile/Workspace/Snapshot/
+HDF5/checkpoint를 보존한다. 실제 보정 변경의 activation만 사용자 승인이다. Builder/GLB 변경 없음.
+
+
 ## 현재 기능 — 2026-10-12 / Joint Precision Calibration
 
 상세 계약/사용법은 `docs/real2sim/PRECISION_CALIBRATION.md`, 검사/변경 이력은

@@ -266,3 +266,25 @@ def test_usd_simulation_zero_frames_and_original_model_preserved(tmp_path):
     new={j.get('name'):j for j in ET.parse(root/'assets/SO101/urdf/so101_sim.urdf').getroot().findall('joint')}
     assert old['elbow_flex'].find('limit').attrib==new['elbow_flex'].find('limit').attrib
     assert old['elbow_flex'].find('origin').attrib!=new['elbow_flex'].find('origin').attrib
+
+
+def test_new_execution_usd_limits_and_unchanged_wrist_and_default_prim(tmp_path):
+    pytest.importorskip('pxr')
+    from pxr import Usd,UsdPhysics
+    from soarm101_lab.so101_robot_spec import limit_usd,ROBOT_URDF,joint_limits
+    source=package.ROOT/'assets/SO101/usd/so101_isaaclab.usd'
+    original_hash=package.sha(source)
+    result=limit_usd(source,ROBOT_URDF,tmp_path/'limits.usda')
+    stage=Usd.Stage.Open(str(result));original=Usd.Stage.Open(str(source))
+    assert stage.GetDefaultPrim() and stage.GetDefaultPrim().GetPath()==original.GetDefaultPrim().GetPath()
+    for prim in stage.Traverse():
+        n=prim.GetName()
+        if n not in joint_limits() or not prim.IsA(UsdPhysics.RevoluteJoint):continue
+        joint=UsdPhysics.RevoluteJoint(prim)
+        values=[joint.GetLowerLimitAttr().Get(),joint.GetUpperLimitAttr().Get()]
+        np.testing.assert_allclose(np.radians(values),joint_limits()[n],atol=1e-5,rtol=0)
+        if n in ('wrist_roll','gripper'):
+            old=UsdPhysics.RevoluteJoint(original.GetPrimAtPath(prim.GetPath()))
+            assert values==[old.GetLowerLimitAttr().Get(),old.GetUpperLimitAttr().Get()]
+    assert package.sha(source)==original_hash
+    with pytest.raises(ValueError,match='new file'):limit_usd(source,ROBOT_URDF,result)

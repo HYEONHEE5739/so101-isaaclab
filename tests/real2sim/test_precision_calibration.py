@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ def entry(role='follower', joint='shoulder_pan'):
 
 def profile(role='follower', joints=None):
     return dict(schema='so101.precision-calibration/1', id='test',role=role,
-                identity=FakeCalibrationDevice(role).identity,urdf_sha256='urdf',joints=joints or {'shoulder_pan':entry(role)})
+                identity=FakeCalibrationDevice(role).identity,urdf_sha256=hashlib.sha256(URDF.read_bytes()).hexdigest(),joints=joints or {'shoulder_pan':entry(role)})
 
 
 def test_raw_mapping_uses_range_mid_not_homing_twice():
@@ -63,8 +64,21 @@ def test_hardware_adapter_binds_active_mapping_without_motor_writes(tmp_path,rol
     assert mapper._forward(2500,'shoulder_pan')==pytest.approx(math.pi/2)
     assert adapter.metadata['precision_mapping']['profile']['role']==role
     bus.write.assert_not_called()
+    # Unknown model evidence must still be refused without touching the pointer.
+    metadata_before=copy.deepcopy(adapter.metadata)
+    with pytest.raises(ValueError,match='URDF identity conflict') as model_error:
+        attach_active_precision(adapter,role,store.root,'new_urdf')
+    assert 'evidence unavailable' in str(model_error.value)
+    assert adapter.precision_mapper is mapper
+    assert adapter.metadata==metadata_before
+    assert store.active(role)['urdf_sha256']=='urdf'
+    bus.write.assert_not_called()
     adapter.metadata['id']='wrong_robot'
-    with pytest.raises(ValueError,match='identity conflict'):attach_active_precision(adapter,role,store.root,'urdf')
+    with pytest.raises(ValueError,match='device/calibration identity conflict') as device_error:
+        attach_active_precision(adapter,role,store.root,'new_urdf')
+    assert f'{role}: id' in str(device_error.value)
+    assert 'Limit 변경' not in str(device_error.value)
+    bus.write.assert_not_called()
 
 
 def test_hardware_policy_uses_precision_once_and_preserves_source_contract(tmp_path):
@@ -163,6 +177,33 @@ def test_display_range_does_not_expand_calibrated_motor_command_limits():
     with pytest.raises(ValueError,match='calibrated motor range'):m.urdf_to_calibrated(q)
 
 
+@pytest.mark.parametrize('direction',[1,-1])
+def test_teleop_command_limits_integer_endpoints_and_profile_preserved(direction):
+    spec=FakeCalibrationDevice('follower').motor_spec('shoulder_pan')
+    refs=[reference('shoulder_pan',1000,-45*direction),reference('shoulder_pan',2000,45*direction),
+          reference('shoulder_pan',1500,0,'validation')]
+    e=validate_joint(fit_joint(refs,spec,'shoulder_pan',joint_specs(URDF)['shoulder_pan']['limits']))
+    e['motor']['calibration'].update(range_min=1100,range_max=1950)
+    m=PrecisionMapper(profile(joints={'shoulder_pan':e}));before=copy.deepcopy(m.profile)
+    bounds={n:joint_specs(URDF)[n]['limits'] for n in JOINTS}
+    available=m.command_limits(bounds)
+    for q_pan in np.linspace(*available['shoulder_pan'],101):
+        native=m.urdf_to_calibrated({**dict.fromkeys(JOINTS,0.),'shoulder_pan':q_pan})
+        assert 1100-1e-7 <= raw_from_native(native['shoulder_pan'],e['motor']) <= 1950+1e-7
+    assert m.profile==before
+
+
+def test_teleop_command_limits_reject_disconnected_encoder_domain():
+    spec=FakeCalibrationDevice('follower').motor_spec('shoulder_pan')
+    refs=[reference('shoulder_pan',0,0),reference('shoulder_pan',1024,90),
+          reference('shoulder_pan',512,45,'validation')]
+    e=validate_joint(fit_joint(refs,spec,'shoulder_pan',joint_specs(URDF)['shoulder_pan']['limits']))
+    e['motor']['calibration'].update(range_min=100,range_max=3996)
+    m=PrecisionMapper(profile(joints={'shoulder_pan':e}))
+    with pytest.raises(ValueError,match='single unambiguous'):
+        m.command_limits({n:joint_specs(URDF)[n]['limits'] for n in JOINTS})
+
+
 def test_manual_live_active_mapping_displays_beyond_ninety_without_writes(tmp_path):
     c=Calibration(tmp_path,URDF);c.connect({'role':'follower','fake':True})
     c.command('release',{'supported_and_approved':True});d=c.devices['follower']
@@ -193,9 +234,12 @@ def test_mujoco_precision_gripper_command_not_clamped_to_taught_points():
     r.follower=SimpleNamespace(precision_mapper=m)
     r.env=SimpleNamespace(limits=np.array([joint_specs(URDF)[n]['limits'] for n in JOINTS]),_target=Mock())
     native={n:0. for n in JOINTS};native['gripper']=native_from_raw(3100,spec)
-    result=r.command_target(native)
+    r.leader=SimpleNamespace(precision_mapper=m)
+    r.follower.limits={n:[-180,180] for n in JOINTS};r.follower.limits['gripper']=[0,100]
+    applied,result=r.command_target(native)
     assert m.calibrated_to_urdf(result)['gripper']==pytest.approx(math.radians(94.68))
-    assert r.env._target.call_args.args[0][-1]==pytest.approx(math.radians(94.68))
+    r.env._target(applied)
+    assert applied[-1]==pytest.approx(math.radians(94.68))
     assert not r.target_limits
 
 
@@ -428,7 +472,9 @@ def test_leader_follower_bidirectional_common_coordinates():
     leader=PrecisionMapper(profile('leader',{'shoulder_pan':validate_joint(fit_joint(refs,spec,'shoulder_pan',[-2,2]))}))
     r=Runtime.__new__(Runtime);r.precision_options={'use_precision':True};r.leader=SimpleNamespace(precision_mapper=leader);r.follower=SimpleNamespace(precision_mapper=follower)
     native={n:0. for n in JOINTS};native['shoulder_pan']=native_from_raw(1600,spec)
-    target=r.follower_target(native);common=r.model_from_native(target)
+    r.follower.limits={n:[-180,180] for n in JOINTS};r.follower.limits['gripper']=[0,100]
+    actual,target=r.command_target(native)
+    common=dict(zip(JOINTS,actual))
     assert common['shoulder_pan']==pytest.approx(leader.calibrated_to_urdf(native)['shoulder_pan'],abs=.002)
     assert r.tracking(native,target,target)['tracking_error_rad']['shoulder_pan']==0
     assert r.precision_teleop_ready()
@@ -444,17 +490,19 @@ def test_precision_start_with_one_robot_unvalidated_never_activates_torque():
     r.follower.activate.assert_not_called()
 
 
-def test_precision_start_outside_urdf_domain_never_enables_torque():
+def test_precision_start_large_valid_pose_difference_has_no_new_guard():
     from soarm101_lab.real2sim.runtime import Runtime
     from unittest.mock import Mock
     mapper=PrecisionMapper(profile());spec=FakeCalibrationDevice('follower').motor_spec('shoulder_pan')
     native={n:0. for n in JOINTS};native['shoulder_pan']=native_from_raw(3500,spec)
     held={**native,'shoulder_pan':native_from_raw(1500,spec)}
     r=Runtime.__new__(Runtime);r.precision_options={'use_precision':True};r.activated=False
-    r.leader=SimpleNamespace(precision_mapper=mapper,read=lambda:(native,{}))
-    r.follower=SimpleNamespace(precision_mapper=mapper,read=lambda:(held,{}),activate=Mock())
-    with pytest.raises(ValueError,match='URDF'):r.start()
-    r.follower.activate.assert_not_called()
+    r.leader=SimpleNamespace(precision_mapper=mapper,read=lambda:(native,{}),activate=Mock())
+    r.follower=SimpleNamespace(precision_mapper=mapper,limits={n:[0,100] if n=='gripper' else [-180,180] for n in JOINTS},read=lambda:(held,{}),activate=Mock())
+    r.env=None
+    r.start()
+    assert r.running
+    r.follower.activate.assert_called_once()
 
 
 @pytest.mark.parametrize('real_only',[True,False])
@@ -462,7 +510,7 @@ def test_unknown_precision_feedback_pauses_without_goal_or_disconnect(real_only)
     from soarm101_lab.real2sim.runtime import Runtime
     from unittest.mock import Mock
     mapper=PrecisionMapper(profile());spec=FakeCalibrationDevice('follower').motor_spec('shoulder_pan')
-    native={n:0. for n in JOINTS};native['shoulder_pan']=native_from_raw(3500,spec)
+    native={n:0. for n in JOINTS};native['shoulder_pan']=native_from_raw(3048,spec)
     r=Runtime.__new__(Runtime);r.precision_options={'use_precision':True};r.running=True;r.snapshot_data={'old':1}
     r.leader=SimpleNamespace(read=lambda:(native,{}),precision_mapper=mapper)
     r.follower=SimpleNamespace(read=lambda:(native,{}),precision_mapper=mapper,send=Mock(),close=Mock())
@@ -607,3 +655,68 @@ c.close()
     env={**os.environ,'PYTHONPATH':str(ROOT/'source/soarm101_lab')};env.pop('MUJOCO_GL',None)
     result=subprocess.run([sys.executable,'-B','-c',code,str(tmp_path),str(URDF)],env=env,capture_output=True,text=True,timeout=45)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+@pytest.mark.parametrize('role', ['leader', 'follower'])
+def test_limit_only_connect_reuses_original_profile_without_saving(tmp_path, monkeypatch, role):
+    import json
+    from dataclasses import make_dataclass
+    from unittest.mock import Mock
+    from soarm101_lab.real2sim.hardware import attach_active_precision
+    from soarm101_lab.real2sim.precision import profile_for_model
+    from soarm101_lab import so101_robot_spec as spec_module
+    import xml.etree.ElementTree as ET
+    current=URDF.read_bytes(); tree=ET.fromstring(current)
+    for j in tree.findall('joint'):
+        if j.get('name') in JOINTS[:4]:
+            limit=j.find('limit')
+            limit.set('lower',str(float(limit.get('lower'))+math.radians(5)))
+            limit.set('upper',str(float(limit.get('upper'))-math.radians(5)))
+    old=ET.tostring(tree); old_hash=hashlib.sha256(old).hexdigest(); new_hash=hashlib.sha256(current).hexdigest()
+    evidence={old_hash:old,new_hash:current}
+    original_reader=spec_module.urdf_bytes
+    monkeypatch.setattr(spec_module,'urdf_bytes',lambda h:evidence[h] if h in evidence else original_reader(h))
+    device=FakeCalibrationDevice(role); p=profile(role); p['urdf_sha256']=old_hash
+    p['joints']['shoulder_pan']['limits']=[float(tree.find("joint[@name='shoulder_pan']/limit").get(k)) for k in ('lower','upper')]
+    store=ProfileStore(tmp_path); path=store.save(role,device.identity,old_hash,p['joints'])
+    store.activate(role,path,device.identity,old_hash,True)
+    before={str(x):x.read_bytes() for x in tmp_path.rglob('*.json')}
+    spec=p['joints']['shoulder_pan']['motor']; caltype=make_dataclass('MotorCalibration',[(k,int) for k in spec['calibration']])
+    cal=caltype(**spec['calibration'])
+    bus=SimpleNamespace(motors={'shoulder_pan':SimpleNamespace(id=cal.id,model='sts3215',norm_mode=SimpleNamespace(name=spec['mode']))},
+        calibration={'shoulder_pan':cal}, model_resolution_table={'sts3215':spec['resolution']},apply_drive_mode=spec['apply_drive_mode'],write=Mock())
+    # Exact hardware identity, with fake buses. No goal/torque API is exercised.
+    saved=store.active(role); saved['identity']={'role':role,'port':str(tmp_path/'port'),'id':'test',
+        'calibration_sha256':'fake','motors':{'shoulder_pan':{'id':cal.id,'model':'sts3215'}}}
+    adapter=SimpleNamespace(device=SimpleNamespace(**{'_bus' if role=='leader' else 'bus':bus}),
+        metadata={'port':str(tmp_path/'port'),'id':'test','calibration':{'sha256':'fake','path':'fake'}})
+    from soarm101_lab.real2sim.hardware import attach_precision
+    attach_precision(adapter,role,saved,new_hash)
+    bound=adapter.precision_mapper
+    assert bound.profile['id']==saved['id']
+    assert bound.profile['joints']['shoulder_pan']['limits']==joint_specs(URDF)['shoulder_pan']['limits']
+    for key in ('anchor_raw','reference_angle_rad','rad_per_count','raw_domain','references','motor'):
+        assert bound.profile['joints']['shoulder_pan'][key]==saved['joints']['shoulder_pan'][key]
+    q=dict.fromkeys(JOINTS,0.);q['shoulder_pan']=math.radians(112)
+    native=bound.urdf_to_calibrated(q)
+    assert bound.calibrated_to_urdf(native)['shoulder_pan']==pytest.approx(q['shoulder_pan'],abs=.002)
+    with pytest.raises(ValueError,match='command outside URDF'):PrecisionMapper(saved).urdf_to_calibrated(q)
+    assert bus.write.call_count==0
+    calibration=Calibration(tmp_path,URDF,factory=lambda r,h:device)
+    try:
+        calibration.command('connect',{'role':role,'hardware':{}});calibration.tick()
+        assert role not in calibration.errors
+        assert calibration.loaded_profiles[role]==store.active(role)['id']
+        assert [{k:v for k,v in ref.items() if k!='reference_id'} for ref in calibration.references[role]['shoulder_pan']]==p['joints']['shoulder_pan']['references']
+        assert calibration.status()['robots'][role]['active_profile']['joints']['shoulder_pan']['limits']==joint_specs(URDF)['shoulder_pan']['limits']
+        assert device.writes==[]
+        with pytest.raises(ValueError,match='Unsupported'):calibration.command('rebind_limits',{})
+    finally:calibration.close()
+    assert before=={str(x):x.read_bytes() for x in tmp_path.rglob('*.json')}
+    for needle,replacement in [(b'axis xyz="0 0 1"',b'axis xyz="0 1 0"'),(b'xyz="0.0207909',b'xyz="0.0307909')]:
+        changed=current.replace(needle,replacement,1);assert changed!=current
+        changed_hash=hashlib.sha256(changed).hexdigest();evidence[changed_hash]=changed
+        with pytest.raises(ValueError,match='geometry/origin/axis'):profile_for_model(saved,changed_hash)
+    bus.calibration['shoulder_pan'].homing_offset+=1
+    with pytest.raises(ValueError,match='normalization/register'):attach_precision(adapter,role,saved,new_hash)
+    assert before=={str(x):x.read_bytes() for x in tmp_path.rglob('*.json')}

@@ -1,6 +1,7 @@
 """Workspace policy evaluation. Real motion is opt-in and never used by tests."""
 import json
 import time
+import numpy as np
 from pathlib import Path
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import load, metadata
@@ -73,11 +74,10 @@ def evaluate(request):
             from isaaclab.envs import ManagerBasedEnv
             from ..real2sim.workspaces.environment import make_config, task_success_details
             used_seed = evaluation_seed(opts)
-            cfg = make_config(w['root'], device, task_definition=definitions[0])
             from ..so101_dataset_contract import read_contract
             from ..real2sim.precision import uses_urdf_frame
-            if uses_urdf_frame(read_contract(path)):
-                cfg.scene.robot.spawn.usd_path = str(w['root']/'assets/SO101/usd/so101_isaaclab.usd')
+            cfg = make_config(w['root'], device, task_definition=definitions[0],
+                              identity_sim=uses_urdf_frame(read_contract(path)))
             cfg.seed = used_seed
             cfg.events.reset_episode.params['randomization_seed'] = used_seed
             print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
@@ -118,7 +118,10 @@ def evaluate(request):
         else:
             from ..real2sim.hardware import Follower
             from ..real2sim.cameras import CameraReader
-            from ..representation import real_observation, real_action
+            from ..representation import real_observation
+            from ..so101_joint_mapping import DEFAULT_MAPPER, JOINTS
+            from ..so101_robot_spec import joint_limits
+            from ..real2sim.core import values
             import hashlib
             model_hash = hashlib.sha256((w['root']/'assets/SO101/urdf/so101_isaaclab.urdf').read_bytes()).hexdigest()
             follower = Follower(opts['port'], opts['follower_id'], opts.get('calibration_dir'), model_hash=model_hash)
@@ -141,7 +144,9 @@ def evaluate(request):
                 from ..so101_dataset_contract import read_contract
                 require_hardware_policy_frame(read_contract(path), w['profile'], mapper)
                 held, _ = follower.read()
-                real_action(real_observation({n+'.pos':v for n,v in held.items()}, mapper), mapper)
+                held_q = real_observation({n+'.pos':v for n,v in held.items()},mapper)
+                (mapper or DEFAULT_MAPPER).urdf_to_calibrated(dict(zip(JOINTS,held_q.tolist())))
+                bounds = np.array(list(joint_limits(w['root']/'assets/SO101/urdf/so101_isaaclab.urdf').values()))
                 follower.activate(); policy.reset()
                 for definition, ep in [(d, e) for d in definitions for e in range(int(opts.get('episodes', 1)))]:
                     task = definition['language_instruction']; policy.reset()
@@ -162,9 +167,18 @@ def evaluate(request):
                         batch = observation(q, None, None, task, device, images={n:f['rgb'] for n,f in frames.items()})
                         with torch.inference_mode():
                             action = post(policy.select_action(pre(batch))).reshape(6).detach().cpu().numpy()
-                        command = real_action(action, mapper)
-                        follower.send({n[:-4]: v for n, v in command.items()})
-                        rows.append({'task_id': definition['task_id'], 'language_instruction': task, 'episode': ep, 'step': step, 'model_observation': q.tolist(), 'model_action': action.tolist()})
+                        if action.shape != (6,) or not np.isfinite(action).all():
+                            raise ValueError('Non-finite or invalid policy goal')
+                        bounded = np.clip(action,bounds[:,0],bounds[:,1])
+                        command = (mapper or DEFAULT_MAPPER).urdf_to_calibrated(dict(zip(JOINTS,bounded.tolist())))
+                        command, encoded = follower.encode_goal(command)
+                        applied = np.array(list((mapper or DEFAULT_MAPPER).calibrated_to_urdf(encoded).values()))
+                        if np.any(applied<bounds[:,0]-1e-6) or np.any(applied>bounds[:,1]+1e-6):
+                            raise ValueError('Encoded policy goal outside URDF limits')
+                        sent, _ = follower.send(command)
+                        if not np.allclose(list(values(sent).values()),list(values(command).values()),atol=1e-10,rtol=0):
+                            raise ValueError('Follower altered policy goal')
+                        rows.append({'task_id': definition['task_id'], 'language_instruction': task, 'episode': ep, 'step': step, 'model_observation': q.tolist(), 'model_action': applied.tolist(), 'requested_model_action': action.tolist()})
                         time.sleep(max(0, 1 / int(opts.get('fps', 30)) - (time.monotonic() - begin)))
             finally:
                 try:

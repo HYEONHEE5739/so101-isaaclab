@@ -1,4 +1,82 @@
+## 2026-10-13 — Teleop 목표 포화 처리
+
+- URDF/Sim과 Follower 정수 encoder 명령 범위 교집합으로 기존 Teleop clip 확장.
+- 정상 범위 초과 시 Start/추종 거절 대신 경계 목표 유지, 범위 재진입 시 계속 추종.
+- Real/Sim 동일 encoded q, 실제 관측/보정/Profile/모터 설정/Workspace 보존.
+- 범위 없음/encoder ambiguity/identity/통신 검사는 유지. Policy strict inverse 변경 없음.
+- 관련171 PASS,1 SKIP. 실제 로봇 미구동. 상세: outputs/workflow_validation/unified_joint_control/TELEOP_LATENCY_DIAGNOSIS.md.
+
+## 2026-10-12 — URDF Limit-only 자동 호환 / Migration 제거
+
+- 이전 승인형 limit migration 경로를 제거하고 정확한 Git/보존 모델 근거로 lower/upper 외
+  동일성을 검사한다. 기존 Profile 계수/파일/active를 유지하며 실행 제한만 선택 URDF에서 읽는다.
+- hardware binding, Calibration 표시/부분 보정 저장/복구, MuJoCo Source 모델 선택을 연결했다.
+- 새 controller/guard/config/보정 버전을 자동 생성하지 않는다. motor identity/range/encoder 검사 유지.
+- 결과: `outputs/workflow_validation/joint_limit_extension/COMPATIBILITY_REPORT.md`.
+- 아래 승인형 Limit 재사용 항목은 당시 이력이며 현재 사용법이 아니다.
+
+## 2026-10-12 — Unified Controller 제거 / 기존 URDF 관절 경로 복원
+
+사용자 요청으로 전용 Controller/MotionGuard/자동 복귀와 UI 5°/30°/s/10° 및 IPC 설정을 제거했다.
+관측은 기존 mapping, 목표 제한은 기존 Runtime/Source, strict inverse/SDK 변환은 기존 Hardware로
+정리했다. 삭제 기능의 테스트는 제거하고 필요한 encoder/관측 검사는 기존 mapping tests에 통합.
+Precision/Reference/active/사용자 데이터/Builder 보존. URDF ±5°는 이미 적용되어 재확장하지 않았다.
+Sim Eval의 옛 USD 선택을 기존 identity_sim Workspace 경로에 연결했고 Fake real policy loop를 검사했다.
+독립 process 회귀 332 PASS / 1 SKIP, MuJoCo 200 step+두 render, Isaac20step+두camera를 확인했다.
+초기 combined suite의 engine/renderer 충돌과 sandbox GPU 실패를 숨기지 않고 기록했다.
+현재 정책: JOINT_CONTROL.md. 최신 증거: outputs/workflow_validation/unified_joint_control/SIMPLIFICATION_REPORT.md.
+아래 Unified 구현 항목은 당시 이력이며 현재 실행 경로가 아니다.
+
+## 2026-10-12 — 새 URDF와 이전 활성 보정의 충돌 진단
+
+사용자 Capture 오류에서 Leader/Follower active는 이전 URDF hash이고 새 Limit용 후보는
+현재 hash임을 읽기 전용으로 확인했다. 양쪽 6관절의 계수/reference/motor identity는 보존되어 있다.
+hardware.attach_precision은 장치/LeRobot 충돌의 다른 필드와 URDF 버전 충돌을 구분하여 안내한다.
+Calibration UI는 보정 소실이나 재측정으로 오해하지 않도록 기존 재사용/승인 버튼을 안내한다.
+관련 Fake·Qt·worker·control·launcher 회귀 119 PASS. 추가 migration worker 검사도 PASS:
+재기록 없이 재사용, 승인 전 active 보존, 승인 후 모델 오류 해소, activation motor write 없음.
+실제 장치 연결/구동이나 사용자 active 변경은 수행하지 않았다.
+
+## 2026-10-12 — URDF 네 Joint Limit ±5° / 승인형 Profile 재사용
+
+- 네 lower/upper만 수정; Roll/Gripper/origin/axis/inertia/effort/velocity 및 원본 USD 보존.
+- limit-only 모델 동일성 및 기존 계수/reference/encoder/motor 범위 검증 후 새 immutable Profile 저장.
+  활성화는 기존 승인 경로 유지. 기존 active/LeRobot/사용자 데이터 변경 없음.
+- 별도 USD Limit layer와 새 Workspace scene1_builder/v10. Source/Policy/두 엔진 경로의 모델 범위 일관성.
+- 실제 MuJoCo/Isaac smoke 및 관련 회귀 결과/초기 실패/defaultPrim 수정/실물 미검증은
+  `outputs/workflow_validation/joint_limit_extension/REPORT.md`에 기록.
+
 # AI Change Log
+
+## 2026-10-12 — Capture 재시작 시 이전 worker 재사용 수정
+
+사용자 재시도에서 19:10에 실행된 UI가 수정 전 18:53에 시작한 real worker를 재사용하여
+StrictLeader abstract 오류를 반복한 것을 PID/시작 시각/로그로 확인했다.
+Capture UI 종료는 기존 disconnect를 보내 worker를 정상 종료한다. 명시 Start 시 real ERROR
+worker가 있으면 disconnect/종료 확인 뒤 새 worker를 실행한다. UI 시작 자체는 연결하지 않는다.
+재시도 순서와 Qt 종료 회귀를 추가했다. 실제 사용자 프로세스 종료/장치 연결은 수행하지 않았다.
+
+## 2026-10-12 — Capture의 StrictLeader abstract class 연결 오류 수정
+
+관절 제어 정리에서 필수 `_get_raw_data()` 구현을 제거하여 실제 SO101Leader/StrictLeader를
+생성할 수 없던 회귀를 수정했다. 이 메서드는 normalize=False encoder read를 제공하고
+advance가 재사용한다. 읽기 실패/누락을 0 또는 빈 결과로 대체하는 옛 fallback은 복원하지 않았다.
+실제 클래스와 StrictLeader를 사용하고 serial bus만 Fake로 교체한 생성/읽기 전용 연결,
+advance, 통신 오류/누락, 암묵 calibration 차단 검사를 추가했다.
+Control/Precision/Desktop/Launcher/Liveness 회귀 114 passed (18.02s).
+실제 장치 연결·구동, 사용자 보정/데이터 변경, dependency 변경은 없다.
+기존 worker의 클래스는 메모리에 남으므로 사용자가 UI/worker를 종료하고 다시 실행한다.
+
+## 2026-10-12 — Unified Joint Control / 중복 live target 경로 정리
+
+`so101_joint_control`을 Runtime의 Real-only/Isaac/MuJoCo, Source/독립 Teleop, real_eval에 연결했다.
+관측/요청/명령 분리, inverse 전 clip, SDK 정수 encoding preflight, 시작/속도/추종 guard,
+read-only Connect, 범위 밖 passive Snapshot 보존과 공통 오른쪽 진단 표시를 구현했다.
+기존 target wrappers/LeaderTargets/missing-zero fallback/미사용 device USD limits property를 삭제했다.
+기존 사용자 데이터/보정/Workspace/Builder/dependency는 변경하지 않았다.
+상세 파일·호환성·한계: `JOINT_CONTROL.md`; 최종 실행 검사는
+`outputs/workflow_validation/unified_joint_control/REPORT.md`를 따른다.
+
 
 ## 2026-10-12 — Real-only Capture의 수동 관측과 구동 한계 분리
 

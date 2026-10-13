@@ -55,7 +55,9 @@ Demo → replay → annotation → datagen → conversion → train/eval artifac
 옛 paired/continuous capture와 Reference/API-agent/fitting 전용 테스트는 제거했다.
 MuJoCo는 import 후 GL 모드를 바꿀 수 없으므로 Builder rendering 검사와
 `test_mujoco_backend.py`/`test_minivla_integration.py`의 physics-only 검사는 별도
-프로세스에서 실행한다. Renderer guard를 테스트 때문에 우회하지 않는다.
+프로세스에서 실행한다. USD를 import하는 tests도 MuJoCo backend와 같은 process에 넣지 않는다.
+Renderer/engine guard를 테스트 때문에 우회하지 않는다. 최신 분리 suite 결과 및 실행 목록은
+`outputs/workflow_validation/unified_joint_control/SIMPLIFICATION_REPORT.md`를 따른다.
 
 ## 3. Joint 변경 시 최소 검증
 
@@ -133,3 +135,12 @@ record
 - 실제 hardware/Isaac validation이 필요한 남은 부분
 
 고위험 변경(joint mapping, transform, dataset schema, physics state write)은 사람이 관련 구현과 테스트를 직접 확인한다.
+
+## 공통 Joint Control 검사 (2026-10-12)
+
+`test_joint_control.py` + 기존 precision/calibration/UI/snapshots/launcher 검사를 실행한다.
+MuJoCo/Source/Replay 검사와 USD/Workspace 검사는 별도 프로세스에서 실행한다.
+설치된 LeRobot SDK의 normalize/integer encoding을 포트 없는 객체로 검사하므로 모터 이동이 아니다.
+정확한 명령/최종 결과/Isaac 렌더 범위/실패 이력은
+`outputs/workflow_validation/unified_joint_control/REPORT.md`를 따른다.
+공통 계약과 구동 heuristic의 한계는 [JOINT_CONTROL.md](JOINT_CONTROL.md)를 따른다.

@@ -103,7 +103,10 @@ class RuntimeLauncher:
             # an unavailable OSMesa choice even after Stop changes ERROR to IDLE.
             restart_mujoco = backend == 'mujoco' and (status.get('state') == 'ERROR' or
                 status.get('renderer') != renderer)
-            if status.get('backend', 'isaac') != backend or status.get('state') == 'BUILDING_ENVIRONMENT' or restart_isaac or restart_mujoco:
+            # A failed Capture worker may retain stale imported device classes even
+            # after the UI is reopened. Retry only after its normal disconnect exits.
+            restart_real = backend == 'real' and status.get('state') == 'ERROR'
+            if status.get('backend', 'isaac') != backend or status.get('state') == 'BUILDING_ENVIRONMENT' or restart_isaac or restart_mujoco or restart_real:
                 self.disconnect()
                 self.replacement = dict(payload=payload, python=python, headless=headless,
                                         backend=backend, renderer=renderer)

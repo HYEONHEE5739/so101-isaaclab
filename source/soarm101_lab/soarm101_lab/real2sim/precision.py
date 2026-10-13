@@ -195,6 +195,31 @@ def review_joint(entry, tolerance_deg=.5):
                           independent_validation=False)}
 
 
+def profile_for_model(profile, model_hash):
+    """Bind an in-memory copy to compatible model limits; never save or activate."""
+    if profile['urdf_sha256'] == model_hash: return copy.deepcopy(profile)
+    from ..so101_robot_spec import urdf_bytes, model_without_limits
+    old = urdf_bytes(profile['urdf_sha256']); new = urdf_bytes(model_hash)
+    if model_without_limits(old) != model_without_limits(new):
+        raise ValueError('Precision profile URDF identity conflict: geometry/origin/axis/topology changed')
+    before = {j.get('name'): j.find('limit') for j in ET.fromstring(old).findall('joint')}
+    after = {j.get('name'): j.find('limit') for j in ET.fromstring(new).findall('joint')}
+    for name in JOINTS:
+        bounds = [float(after[name].get(k)) for k in ('lower','upper')]
+        if not np.isfinite(bounds).all() or bounds[0] >= bounds[1]:
+            raise ValueError(name + ': invalid current URDF limits')
+    result = copy.deepcopy(profile)
+    for name, entry in result['joints'].items():
+        if entry['limits'] != [float(before[name].get(k)) for k in ('lower','upper')]:
+            raise ValueError(name + ': saved profile/model limits disagree')
+        entry['limits'] = [float(after[name].get(k)) for k in ('lower','upper')]
+    result['urdf_sha256'] = model_hash
+    result['runtime_model_binding'] = {
+        'saved_profile_sha256': fingerprint(profile), 'saved_urdf_sha256': profile['urdf_sha256'],
+        'change': 'lower_upper_limits_only', 'persisted': False}
+    return result
+
+
 class PrecisionMapper:
     """Partial profiles retain legacy mapping on untouched joints, explicitly labelled."""
     def __init__(self, profile):
@@ -227,19 +252,54 @@ class PrecisionMapper:
         for joint, entry in self.profile['joints'].items(): q[joint] = self._forward(raw_from_native(native[joint], entry['motor']), joint)
         return q
 
-    def calibrated_to_observation(self, native):
-        """Passive capture only: preserve finite measured angles beyond model limits."""
+    def calibrated_to_observation(self, native, raw=None):
+        """Decode observations/leader requests beyond model limits; never authorize a goal."""
         q = LEGACY_MAPPER.calibrated_to_urdf(native)
+        if raw is not None and (set(raw)!=set(JOINTS) or not np.isfinite(list(raw.values())).all()):
+            raise ValueError('Invalid raw feedback packet')
         for joint, entry in self.profile['joints'].items():
-            raw = raw_from_native(native[joint], entry['motor'])
-            try: q[joint] = self._forward(raw, joint)
+            position = raw_from_native(native[joint], entry['motor']) if raw is None else float(raw[joint])
+            if raw is not None:
+                spec=entry['motor']; cal=spec['calibration']
+                normalized = native_from_raw(np.clip(position,cal['range_min'],cal['range_max'])
+                    if spec['mode']=='RANGE_0_100' else position, spec)
+                if abs(normalized-native[joint])>1e-6: raise ValueError(joint+': raw/native packet mismatch')
+            try: q[joint] = self._forward(position, joint)
             except ValueError as exc:
                 if 'Position outside URDF limits' not in str(exc): raise
                 # Out-of-model measurements on the reference encoder branch are
                 # evidence, not permission to send an out-of-limit motor goal.
-                x = unwrap(raw, entry['anchor_raw'], entry['motor']['resolution'])
+                x = unwrap(position, entry['anchor_raw'], entry['motor']['resolution'])
                 q[joint] = entry['rad_per_count']*(x-entry['anchor_raw']) + entry['reference_angle_rad']
         return q
+
+    def command_limits(self, bounds):
+        """Representable integer goals for Teleop; never change measured angles.
+
+        Keep the inverse strict for policy/replay. Reject disconnected or ambiguous
+        encoder intervals rather than treating a gap as a commandable range.
+        """
+        result = dict(bounds)
+        for joint, entry in self.profile['joints'].items():
+            low, high = max(bounds[joint][0], entry['limits'][0]), min(bounds[joint][1], entry['limits'][1])
+            if low > high: raise ValueError(joint + ': no common model/motor command range')
+            slope = entry['rad_per_count']; anchor = entry['anchor_raw']; zero = entry['reference_angle_rad']
+            lo, hi = sorted(anchor + (q-zero)/slope for q in (low, high))
+            cal = entry['motor']['calibration']; period = entry['motor']['resolution']
+            if cal['range_max']-cal['range_min'] >= period:
+                raise ValueError(joint + ': ambiguous command encoder branch')
+            intervals = []
+            for branch in range(math.ceil((cal['range_min']-hi)/period), math.floor((cal['range_max']-lo)/period)+1):
+                first = math.ceil(max(cal['range_min'], lo+branch*period))
+                last = math.floor(min(cal['range_max'], hi+branch*period))
+                if first > last: continue
+                # Reuse the same branch checks as forward/inverse, including wraps.
+                angles = sorted(joint_angle(entry, raw) for raw in (first, last))
+                intervals.append(angles)
+            if len(intervals) != 1:
+                raise ValueError(joint + ': no single unambiguous model/motor command range')
+            result[joint] = intervals[0]
+        return result
 
     def urdf_to_calibrated(self, q):
         native = LEGACY_MAPPER.urdf_to_calibrated(q)
@@ -247,9 +307,17 @@ class PrecisionMapper:
             if not entry['limits'][0] <= q[joint] <= entry['limits'][1]: raise ValueError(joint + ': command outside URDF limits')
             x = entry['anchor_raw'] + (q[joint] - entry['reference_angle_rad']) / entry['rad_per_count']
             cal = entry['motor']['calibration']; period = entry['motor']['resolution']
-            first = math.ceil((cal['range_min']-x)/period)
-            last = math.floor((cal['range_max']-x)/period)
-            if first > last: raise ValueError(joint + ': command outside calibrated motor range')
+            # Float round-trip at an integer boundary is not a different branch.
+            first = math.ceil((cal['range_min']-x-1e-7)/period)
+            last = math.floor((cal['range_max']-x+1e-7)/period)
+            if first > last:
+                raise ValueError(
+                    f'{joint}: command outside calibrated motor range; '
+                    f'requested={math.degrees(q[joint]):+.2f} deg, '
+                    f'reference-branch raw={x:.2f}, '
+                    f'calibrated raw=[{cal["range_min"]}, {cal["range_max"]}]; '
+                    'no goal sent. Move Leader toward its calibrated neutral pose before Start.'
+                )
             if first != last: raise ValueError(joint + ': ambiguous command encoder branch')
             # Quantize at the URDF boundary without rounding a valid goal beyond it.
             lo, hi = joint_raw_limits(entry)
@@ -317,16 +385,17 @@ class ProfileStore:
         if path.parent != (self.root / role / 'profiles').resolve(): raise ValueError('Select a saved candidate of this robot')
         profile = json.loads(path.read_text()); PrecisionMapper(profile)
         if profile['id']!=path.stem:raise ValueError('Profile ID/file name mismatch')
-        if profile['role'] != role or profile['identity'] != identity or profile['urdf_sha256'] != urdf_hash:
+        if profile['role'] != role or profile['identity'] != identity:
             raise ValueError('Device/calibration/model identity differs; reconnect and record references')
+        effective = profile_for_model(profile, urdf_hash)
         active = self.active(role)
         if active:
-            if active['identity']!=identity or active['urdf_sha256']!=urdf_hash:
-                raise ValueError('Active profile belongs to a different device/model')
+            if active['identity'] != identity: raise ValueError('Active profile belongs to a different device')
+            active = profile_for_model(active, urdf_hash)
             if active['id']==profile['id']: return active
-            joints = {**active['joints'], **profile['joints']}
+            joints = {**active['joints'], **effective['joints']}
             if joints==active['joints']: return active
-            if joints != profile['joints']:
+            if joints != effective['joints']:
                 path = Path(self.save(role,identity,urdf_hash,joints,
                     provenance={'merged_active_profile':active['id'],'requested_profile':profile['id']}))
                 profile = json.loads(path.read_text()); PrecisionMapper(profile)
@@ -374,7 +443,8 @@ class Calibration:
         self.loaded_profiles[role] = None
         try:active = self.store.active(role)
         except (ValueError,OSError,KeyError):active = None  # Invalid pointers remain available for explicit restore.
-        if active and active['identity']==device.identity and active['urdf_sha256']==self.urdf_hash:
+        if active and active['identity']==device.identity:
+            profile_for_model(active, self.urdf_hash)
             self.loaded_profiles[role] = active['id']
             for joint,entry in active['joints'].items():
                 self.references[role][joint] = copy.deepcopy(entry['references'])
@@ -398,6 +468,9 @@ class Calibration:
             profile_error=None
             try:active = self.store.active(self.role)
             except ValueError as exc:active=None;profile_error=str(exc)
+            if active:
+                try: active = profile_for_model(active, self.urdf_hash)
+                except ValueError as exc: active=None;profile_error=str(exc)
             entry = active['joints'].get(self.joint) if active else None
             legacy = LEGACY_MAPPER.calibrated_to_urdf({n: sample['legacy_position'] if n == self.joint else 0. for n in JOINTS})[self.joint]
             conversion_error = profile_error
@@ -415,7 +488,9 @@ class Calibration:
     def status(self):
         robots={}
         for role in ('follower','leader'):
-            try:active=self.store.active(role)
+            try:
+                active=self.store.active(role)
+                if active: active=profile_for_model(active,self.urdf_hash)
             except (ValueError,OSError,KeyError) as exc:active=None;self.errors[role]=str(exc)
             robots[role]=dict(connected=role in self.devices,identity=self.devices[role].identity if role in self.devices else None,
                 active_profile=active,active_pointer_exists=(self.store.root/role/'active.json').exists(),
@@ -477,7 +552,9 @@ class Calibration:
             entry = self.candidates[role][joint]; result = review_joint(entry, payload.get('tolerance_deg', .5))
             self.candidates[role][joint] = result; return result
         if name == 'save':
-            active = self.store.active(role); entries = copy.deepcopy(active['joints']) if active else {}
+            active = self.store.active(role)
+            if active: active = profile_for_model(active, self.urdf_hash)
+            entries = copy.deepcopy(active['joints']) if active else {}
             for name,entry in self.candidates[role].items():
                 if entry['status'] in ('REVIEWED_MANUAL','VALIDATED_MANUAL'): entries[name] = copy.deepcopy(entry)
             entries[joint] = self.candidates[role][joint]
@@ -493,7 +570,7 @@ class Calibration:
             q = joint_angle(candidate, current['raw'])
             active=self.store.active(role)
             legacy=LEGACY_MAPPER.calibrated_to_urdf({n:current['legacy_position'] if n==joint else 0. for n in JOINTS})[joint]
-            try:old=PrecisionMapper(active)._forward(current['raw'],joint) if active and joint in active['joints'] else legacy
+            try:old=PrecisionMapper(profile_for_model(active, self.urdf_hash))._forward(current['raw'],joint) if active and joint in active['joints'] else legacy
             except ValueError:old=None
             return {'current_raw': current['raw'], 'candidate_rad': q,'current_urdf_rad':old,
                     'difference_rad':q-old if old is not None else None,'legacy_urdf_rad':legacy,
@@ -504,7 +581,7 @@ class Calibration:
             for r in ('leader', 'follower'):
                 d = self.devices[r]; sample = d.sample(joint); active = self.store.active(r)
                 if not active or joint not in active['joints']: raise ValueError('Activate validated profile for both selected joints')
-                pair[r] = {**sample, 'urdf_angle_rad': PrecisionMapper(active)._forward(sample['raw'], joint)}
+                pair[r] = {**sample, 'urdf_angle_rad': PrecisionMapper(profile_for_model(active, self.urdf_hash))._forward(sample['raw'], joint)}
             return {**pair, 'difference_rad': pair['leader']['urdf_angle_rad'] - pair['follower']['urdf_angle_rad'], 'scope': 'user-confirmed static pose; not tracking error'}
         if name == 'preview': return self.preview(role, joint, float(payload['angle_rad']), payload.get('renderer', 'egl'))
         raise ValueError('Unsupported calibration command')
@@ -523,7 +600,7 @@ class Calibration:
         native = {}; raw = {}
         for n in JOINTS:
             sample = device.sample(n); native[n] = sample['legacy_position']; raw[n] = sample['raw']
-        active = self.store.active(role); mapper = PrecisionMapper(active) if active else LEGACY_MAPPER
+        active = self.store.active(role); mapper = PrecisionMapper(profile_for_model(active, self.urdf_hash)) if active else LEGACY_MAPPER
         common = mapper.raw_to_urdf(raw, native) if active else mapper.calibrated_to_urdf(native)
         camera = mujoco.MjvCamera(); mujoco.mjv_defaultFreeCamera(model, camera); camera.distance = .65; camera.azimuth = 135; camera.elevation = -25
         from PIL import Image

@@ -88,6 +88,29 @@ def urdf_to_calibrated(values):
     return DEFAULT_MAPPER.urdf_to_calibrated(values)
 
 
+def observed_positions(mapper, native, raw=None, motor_specs=None):
+    """Decode real feedback without clipping; preserve raw SDK saturation evidence."""
+    convert = getattr(mapper, 'calibrated_to_observation', mapper.calibrated_to_urdf)
+    q = convert(native, raw=raw) if raw is not None and hasattr(mapper,'calibrated_to_observation') else convert(native)
+    if raw is not None and motor_specs is not None:
+        from .real2sim.precision import native_from_raw
+        if set(raw) != set(JOINTS) or not np.isfinite(list(raw.values())).all():
+            raise ValueError("Invalid raw feedback packet")
+        entries=getattr(mapper,'profile',{}).get('joints',{})
+        legacy=DEFAULT_MAPPER if entries else mapper
+        for n in JOINTS:
+            if n in entries: continue
+            spec=motor_specs[n];cal=spec['calibration']
+            expected=native_from_raw(np.clip(raw[n],cal['range_min'],cal['range_max'])
+                if spec['mode']=='RANGE_0_100' else raw[n],spec)
+            if abs(expected-native[n])>1e-6: raise ValueError(n+': raw/native packet mismatch')
+            unbounded=dict(native);unbounded[n]=native_from_raw(raw[n],spec)
+            q[n]=legacy.calibrated_to_urdf(unbounded)[n]
+    if set(q) != set(JOINTS) or not np.isfinite(list(q.values())).all():
+        raise ValueError('Non-finite or invalid observed joint coordinates')
+    return {n:float(q[n]) for n in JOINTS}
+
+
 def require_capture_mapping(state):
     recorded = state.get('sim_joint_mapping')
     if recorded and recorded.get('schema') == 'so101.precision-joint-mapping/1':

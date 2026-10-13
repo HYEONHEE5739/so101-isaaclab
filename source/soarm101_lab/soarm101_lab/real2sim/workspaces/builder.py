@@ -81,7 +81,7 @@ def inspect_export(source):
     def joint_contract(path):
         result = {}
         for j in ET.parse(path).getroot().findall('joint'):
-            result[j.get('name')] = (j.get('type'), {c.tag: dict(c.attrib) for c in j})
+            result[j.get('name')] = (j.get('type'), {c.tag: {k:v for k,v in c.attrib.items() if not (c.tag=='limit' and k in ('lower','upper'))} for c in j})
         return result
     if robot.get('format') != 'urdf' or joint_contract(_file(root, robot['path'])) != joint_contract(package.ROOT / ROBOT_ASSET['urdf']):
         raise ValueError('Builder kinematics differ from the SO-101 controlled robot')
@@ -371,6 +371,14 @@ def import_scene(source, workspace_id=None, version=1, task=None, registry=packa
         shutil.copy2(root/'scene_manifest.yaml', staging/'builder/scene_manifest.yaml')
         shutil.copytree(package.ROOT/'assets/SO101', staging/'assets/SO101')
         robot_asset = calibrate_simulation_usd(staging, profile.get('simulation_joint_offsets_rad'))
+        identity_asset = 'assets/SO101/usd/so101_joint_limits.usda'
+        if profile.get('simulation_joint_offsets_rad') is not None:
+            from ...so101_robot_spec import limit_usd
+            execution_asset = 'assets/SO101/usd/so101_execution_limits.usda'
+            limit_usd(staging/robot_asset, staging/'assets/SO101/urdf/so101_isaaclab.urdf', staging/execution_asset)
+            robot_asset = execution_asset
+        else:
+            robot_asset = identity_asset
         package.dump(staging/'profile.json', profile); package.dump(staging/'task.json', task)
         from .physics import compile_physics
         package.dump(staging/'physics.json', compile_physics(profile, task))
@@ -383,7 +391,7 @@ def import_scene(source, workspace_id=None, version=1, task=None, registry=packa
         robots = {k:v for k,v in files.items() if k.startswith('assets/SO101/')}
         data = {'schema': package.SCHEMA, 'status': 'READY', 'workspace_id': workspace_id, 'version': version,
                 'source_revision': 'builder:'+digest, 'source_profile_sha256': files['profile.json'],
-                'robot_asset': robot_asset, 'robot_asset_sha256': hashlib.sha256(package.canonical(robots)).hexdigest(),
+                'robot_asset': robot_asset, 'identity_robot_asset': identity_asset, 'robot_asset_sha256': hashlib.sha256(package.canonical(robots)).hexdigest(),
                 'mapper': DEFAULT_MAPPER.metadata(), 'task_sha256': files['task.json'], 'files': files,
                 'content_sha256': hashlib.sha256(package.canonical(files)).hexdigest(),
                 'builder': {'manifest_sha256': digest, 'status': manifest['status'], 'validation_scope': manifest.get('validation_scope'),

@@ -1,5 +1,16 @@
 # SO-101 Real2Sim Data Flow
 
+## 현재 실시간 관절 경로 (2026-10-12)
+
+Leader raw/SDK native → Precision/legacy mapping → requested URDF q
+→ 기존 Runtime의 URDF/Sim 목표 제한 → strict Follower inverse → SDK integer conversion
+→ 같은 encoded q를 Follower와 Isaac/MuJoCo에 전달.
+모터 범위에서 표현할 수 없으면 명령 전에 거절한다. 별도 Controller/시작 자세/속도/추종
+Guard/자동 복귀가 없다. Follower raw/native → 잘리지 않은 measured q → Snapshot.
+설명·제거 범위·허용/거절 정책은 [JOINT_CONTROL.md](JOINT_CONTROL.md)를 따른다.
+과거 Dataset 좌표계와 Snapshot reader는 보존한다.
+
+
 이 문서는 값이 **어디서 와서, 어떤 단위/좌표계로 바뀌고, 어디에 저장되는지**를 추적하기 위한 문서다.
 
 ## 1. Joint representation

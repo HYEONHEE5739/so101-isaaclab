@@ -19,6 +19,9 @@ def test_mujoco_bounds_both_commands_without_stopping_and_rejects_nonfinite(tmp_
     r.follower.read.return_value = measured, interval
     r.follower.send.side_effect = lambda target: (dict(target), interval)
     r.leader.metadata = r.follower.metadata = {}
+    r.follower.limits={n:[0,100] if n=='gripper' else [-180,180] for n in JOINTS}
+    r.leader.read.return_value = measured.copy(), interval
+    r.limits=backend.limits
     r.profile = {'workspace': {'T_world': np.eye(4).tolist()}, 'objects': {}}
     r.hardware_identity = 'fixture'
     rgb = np.zeros((8, 8, 3), np.uint8)
@@ -50,7 +53,7 @@ def test_mujoco_bounds_both_commands_without_stopping_and_rejects_nonfinite(tmp_
         calls = r.follower.send.call_count
         r.tick()
         assert not r.running and r.state == 'STOPPED'
-        assert r.follower.send.call_count == calls and 'Non-finite' in r.message
+        assert r.follower.send.call_count == calls and 'finite' in r.message
     finally:
         r.writer.shutdown(); r.bus.close()
 
@@ -81,6 +84,7 @@ def test_outside_measured_pose_keeps_preview_and_reports_invalid_sim_pose(tmp_pa
     r.profile = {'workspace': {'T_world': []}, 'objects': {}}
     r.hardware_identity = 'test'
     r.leader.metadata = r.follower.metadata = {}
+    r.follower.limits={n:[0,100] if n=='gripper' else [-180,180] for n in JOINTS}
     r.pending = None
     r.bus = Mock()
     r.bus.root = tmp_path

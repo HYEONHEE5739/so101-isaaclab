@@ -5,18 +5,10 @@ from isaaclab.assets.articulation import ArticulationCfg
 from soarm101_lab.utils.constant import ASSETS_ROOT
 from soarm101_lab.so101_robot_spec import SO101_POSITION_GAINS, SO101_POSITION_FORCE_LIMIT
 
-SO101_FOLLOWER_ASSET_PATH = Path(ASSETS_ROOT) / "SO101" / "usd" / "so101_isaaclab.usd"
+SO101_FOLLOWER_ASSET_PATH = Path(ASSETS_ROOT) / "SO101" / "usd" / "so101_joint_limits.usda"
 SO101_WORLD_POS = (0.0, 0.0, 0.6) 
 
-# joint limit written in USD (degree)
-SO101_FOLLOWER_USD_JOINT_LIMLITS = {
-    "shoulder_pan": (-110.0, 110.0),
-    "shoulder_lift": (-100.0, 100.0),
-    "elbow_flex": (-100.0, 90.0),
-    "wrist_flex": (-95.0, 95.0),
-    "wrist_roll": (-160.0, 160.0),
-    "gripper": (-10, 100.0),
-}
+from soarm101_lab.so101_robot_spec import SO101_FOLLOWER_USD_JOINT_LIMLITS
 
 SO101_FOLLOWER_INITIAL_JOINT_POS = {
     "shoulder_pan": 0.0,        # 0 degree

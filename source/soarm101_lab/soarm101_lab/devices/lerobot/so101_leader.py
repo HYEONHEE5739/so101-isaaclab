@@ -11,12 +11,12 @@ import logging
 
 from dataclasses import dataclass
 from pathlib import Path
-import numpy as np
 import torch
 
-#from soarm101_lab.assets import SO101_FOLLOWER_MOTOR_LIMITS
-
-from soarm101_lab.so101_joint_mapping import calibrated_to_urdf
+from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER
+from soarm101_lab.so101_joint_mapping import observed_positions
+from soarm101_lab.so101_robot_spec import joint_limits
+import numpy as np
 
 from ..device_base import DeviceBase
 from soarm101_lab.devices.lerobot.utils import check_if_not_connected, check_if_already_connected
@@ -26,7 +26,6 @@ from soarm101_lab.devices.lerobot.motors import (
     MotorNormMode,
 )
 from .motors.feetech import FeetechMotorsBus, OperatingMode
-from soarm101_lab.so101_robot_spec import SO101_FOLLOWER_USD_JOINT_LIMLITS
 
 @dataclass
 class SO101LeaderCfg:
@@ -109,7 +108,6 @@ class SO101Leader(DeviceBase):
             motors=SO101_MOTORS,
             calibration=calibration,
         )
-        self._motor_limits = SO101_FOLLOWER_USD_JOINT_LIMLITS
 
 
     def reset(self):
@@ -118,42 +116,29 @@ class SO101Leader(DeviceBase):
             self.configure()
 
 
+    @check_if_not_connected
     def _get_raw_data(self) -> dict:
-        """Read calibrated control coordinates from the physical robot.
-
-        Returns:
-            Raw result from the motor bus `sync_read("Present_Position")`.
-        """
-        try:
-            # normalize=True: arm DEGREES, gripper RANGE_0_100
-            raw_data = self._bus.sync_read("Present_Position")
-            return raw_data
-        except Exception as e:
-            logger.error(f"Error reading from motor bus: {e}")
-            return {}
-
+        """Read encoder feedback; propagate failures without synthetic defaults."""
+        return self._bus.sync_read('Present_Position', normalize=False)
 
     @check_if_not_connected
     def advance(self) -> torch.Tensor:
         """Read joint positions and return as torch.Tensor."""
-        # Bus already returns calibrated degrees / gripper percent, not raw encoders.
-        if getattr(self, 'precision_mapper', None):
-            raw = self._bus.sync_read('Present_Position', normalize=False)
-            normalized = self._bus._normalize({self._bus.motors[n].id:v for n,v in raw.items()})
-            native = {n:normalized[self._bus.motors[n].id] for n in SO101_MOTOR_NAMES}
-            target = self.precision_mapper.raw_to_urdf(raw, native)
-        else:
-            calibrated = self._get_raw_data()
-            # Preserve historical fallback only when no approved precision mapping is in use.
-            calibrated = {n: calibrated.get(n, 0.0) for n in SO101_MOTOR_NAMES}
-            target = calibrated_to_urdf(calibrated)
-        return torch.tensor([target[n] for n in SO101_MOTOR_NAMES], dtype=torch.float32)
+        raw = self._get_raw_data()
+        normalized = self._bus._normalize({self._bus.motors[n].id:v for n,v in raw.items()})
+        native = {n:normalized[self._bus.motors[n].id] for n in SO101_MOTOR_NAMES}
+        self.last_raw=raw; self.last_native=native
+        target = observed_positions(getattr(self,'precision_mapper',None) or DEFAULT_MAPPER, native, raw=raw, motor_specs=getattr(self,'motor_specs',None))
+        self.last_requested_target=target.copy()
+        path = getattr(getattr(self,'cfg',None),'urdf_path',None)
+        bounds = joint_limits(path) if path else joint_limits()
+        requested = np.array([target[n] for n in SO101_MOTOR_NAMES])
+        lower,upper = np.array([bounds[n] for n in SO101_MOTOR_NAMES]).T
+        applied = np.clip(requested,lower,upper)
+        self.last_target_limits = {n:{'requested_rad':float(requested[i]),'applied_rad':float(applied[i])}
+                                  for i,n in enumerate(SO101_MOTOR_NAMES) if abs(requested[i]-applied[i])>1e-8}
+        return torch.tensor(applied, dtype=torch.float32)
 
-    @property
-    def motor_limits(self) -> dict[str, tuple[float, float]]:
-        """Get motor limits (USD joint limits)."""
-        return self._motor_limits
-    
     @property
     def is_connected(self) -> bool:
         """Check if motor bus is connected."""
@@ -187,6 +172,9 @@ class SO101Leader(DeviceBase):
                                                                hashlib.sha256(urdf.read_bytes()).hexdigest())
             except BaseException:
                 self._bus.disconnect(); raise
+        from soarm101_lab.real2sim.hardware import motor_specs
+        import hashlib
+        self.motor_specs=motor_specs(self._bus,hashlib.sha256(Path(self.calibration_path).read_bytes()).hexdigest())
         self.configure()
         logger.info("SO101-Leader connected.")
 

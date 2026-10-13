@@ -98,7 +98,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     scene.robot=SO101_FOLLOWER_CFG.copy();scene.robot.prim_path='{ENV_REGEX_NS}/Robot'
     scene.robot.spawn.usd_path=str(root/w['manifest']['robot_asset'])
     if identity_sim:
-        scene.robot.spawn.usd_path=str(root/'assets/SO101/usd/so101_isaaclab.usd')
+        scene.robot.spawn.usd_path=str(root/w['manifest'].get('identity_robot_asset','assets/SO101/usd/so101_isaaclab.usd'))
     scene.robot.spawn.func=spawn_workspace_robot
     if w['manifest'].get('builder'):
         from functools import partial

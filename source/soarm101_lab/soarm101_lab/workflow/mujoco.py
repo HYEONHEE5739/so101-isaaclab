@@ -103,15 +103,14 @@ def source(request, output, publish, bridge):
     from ..real2sim.hardware import Leader
     from ..so101_joint_mapping import DEFAULT_MAPPER
     from .episodes import EpisodeWriter
-    from ..simulation.mujoco_backend import LeaderTargets
+    from ..so101_joint_mapping import observed_positions
     options = request['options']
-    from ..real2sim.precision import active_precision, collection_coordinates
+    from ..real2sim.precision import active_precision, collection_coordinates, profile_for_model
     selected_precision = active_precision('leader') if request.get('workspace') else None
     if selected_precision:
         import hashlib
         robot = load(request['workspace'])['root']/'assets/SO101/urdf/so101_isaaclab.urdf'
-        if selected_precision['urdf_sha256'] != hashlib.sha256(robot.read_bytes()).hexdigest():
-            raise ValueError('Source precision profile and workspace URDF differ')
+        selected_precision = profile_for_model(selected_precision, hashlib.sha256(robot.read_bytes()).hexdigest())
     options['_identity_sim'] = selected_precision is not None
     from ..real2sim.workspaces.reset import source_seed
     options['seed'] = source_seed(options.get('seed'))
@@ -122,7 +121,8 @@ def source(request, output, publish, bridge):
         raise ValueError('Positive episode count/duration required')
     with _environment(request, output) as env:
         publish = _preview(env, request, publish)
-        leader = Leader(None, options['port'], options.get('calibration_file_name', 'so101_leader.json'))
+        leader = Leader(None, options['port'], options.get('calibration_file_name', 'so101_leader.json'),
+                        model_hash=selected_precision['urdf_sha256'] if selected_precision else None)
         try:
             # Fail rendering preflight before opening the physical leader bus.
             env.observe()
@@ -139,7 +139,9 @@ def source(request, output, publish, bridge):
             writer.provenance['leader'] = leader.metadata if hasattr(leader, 'metadata') else {'fixture': True}
             if options.get('resume_data'): writer.resume(options['resume_data'])
             if len(writer.manifest['episodes']) >= count: raise ValueError('Episode target must exceed existing count')
-            limiter = LeaderTargets(env)
+            lower = np.maximum(env.coordinates.to_model(env.lower),env.backend.limits[:,0])
+            upper = np.minimum(env.coordinates.to_model(env.upper),env.backend.limits[:,1])
+            limit_counts = np.zeros(6,dtype=int)
             last_limit_log = -float('inf')
             episode = len(writer.manifest['episodes'])
             while len(writer.manifest['episodes']) < count:
@@ -163,10 +165,15 @@ def source(request, output, publish, bridge):
                             bridge.pending.remove('save')
                             break
                     native, _ = leader.read()
-                    target = mapper.calibrated_to_urdf(native)
+                    target = observed_positions(mapper, native, raw=getattr(leader,'last_raw',None), motor_specs=getattr(leader,'motor_specs',None))
                     target = np.array([target[n] for n in env.backend.metadata['joint_order']])
                     requested = target.copy()
-                    target, limited = limiter.apply(requested)
+                    if requested.shape != (6,) or not np.isfinite(requested).all():
+                        raise ValueError('Non-finite or invalid Leader target')
+                    target = np.clip(requested,lower,upper)
+                    limited = {n:{'requested_rad':float(requested[i]),'applied_rad':float(target[i])}
+                               for i,n in enumerate(env.backend.metadata['joint_order']) if abs(requested[i]-target[i])>1e-8}
+                    limit_counts += np.abs(requested-target)>1e-8
                     if limited and time.monotonic() - last_limit_log >= 1:
                         print('[WORKFLOW] Leader target limited: ' + json.dumps(limited), flush=True)
                         last_limit_log = time.monotonic()
@@ -182,7 +189,7 @@ def source(request, output, publish, bridge):
                             'remaining_s': max(0., end - time.monotonic())})
                     time.sleep(max(0., 1 / env.hz - (time.monotonic() - start)))
                 if not discard and not quit_recording and writer.rows:
-                    writer.provenance['leader_target_limits'] = limiter.metadata()
+                    writer.provenance['leader_target_limits'] = {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))}
                     name = writer.save(env.backend.is_success())
                     print('Saved ' + name, flush=True)
                 if quit_recording:
@@ -199,7 +206,7 @@ def source(request, output, publish, bridge):
                 if quit_recording: break
             return {'passed': bool(writer.manifest['episodes']), 'dataset': str(writer.root),
                     'episode_count': len(writer.manifest['episodes']),
-                    'leader_target_limits': limiter.metadata(),
+                    'leader_target_limits': {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))},
                     'coordinates': env.coordinates.metadata(), 'hardware': 'leader input only; no follower commands'}
         except KeyboardInterrupt:
             if 'writer' not in locals(): raise

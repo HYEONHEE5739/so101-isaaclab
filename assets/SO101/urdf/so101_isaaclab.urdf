@@ -374,7 +374,7 @@
     <parent link="lower_arm"/>
     <child link="wrist"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806"/>
+    <limit effort="10" velocity="10" lower="-1.7453264625997165" upper="1.7453264625997165"/>
   </joint>
 
   <transmission name="4_trans">
@@ -394,7 +394,7 @@
     <parent link="upper_arm"/>
     <child link="lower_arm"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" velocity="10" lower="-1.74533" upper="1.5708"/>
+    <limit effort="10" velocity="10" lower="-1.8325964625997164" upper="1.6580664625997164"/>
   </joint>
 
   <transmission name="3_trans">
@@ -414,7 +414,7 @@
     <parent link="shoulder"/>
     <child link="upper_arm"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533"/>
+    <limit effort="10" velocity="10" lower="-1.8325964625997164" upper="1.8325964625997164"/>
   </joint>
 
   <transmission name="2_trans">
@@ -434,7 +434,7 @@
     <parent link="base"/>
     <child link="shoulder"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986"/>
+    <limit effort="10" velocity="10" lower="-2.0071264625997163" upper="2.0071264625997163"/>
   </joint>
 
   <transmission name="1_trans">

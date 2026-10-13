@@ -14,6 +14,15 @@
 - follower hardware 명령 경로와 sim measured-pose render 경로를 혼동하지 않는다.
 - joint order/name mapping은 암묵적 list 위치가 아니라 명시적인 contract를 유지한다.
 
+- live Leader 요청은 기존 Runtime/Source 경로에서 URDF/선택 Sim 목표 범위로 제한한다.
+- Follower inverse와 모터 native/raw 범위 검사는 그대로다. 범위 부족/모호한 encoder branch는
+  명령 전에 거절하며 모터 calibration/register를 확대하거나 새로운 controller로 교차 제한하지 않는다.
+- SDK integer 변환을 반영한 q를 Real/Sim에 함께 전달한다. 측정 q와 command q는 별개다.
+- Connect는 목표/torque configuration을 보내지 않는다. 명시 Start만 기존 activation을 수행한다.
+- 신규 시작 자세 5°/속도 30°/s/추종 10° Guard 및 자동 복귀를 제거했다.
+- 범위 밖 측정값은 원본 그대로 관측/저장한다. Sim으로 표현하지 못하면 마지막 유효 Sim 자세와
+  mismatch 이유를 표시한다. passive Snapshot은 구동 승인이 아니다.
+
 ## 2. Real2Sim
 
 - GPT/LLM이 이미지에서 camera pose, object pose, robot base transform, 물리 파라미터를 숫자로 임의 추측하지 않는다.

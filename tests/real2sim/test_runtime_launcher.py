@@ -73,6 +73,26 @@ def test_mujoco_reconnect_still_reuses_existing_worker(tmp_path, monkeypatch):
     assert bus.sent == [('connect', {})] and not calls
 
 
+def test_failed_capture_retry_waits_for_old_worker_exit(tmp_path, monkeypatch):
+    service, bus, _, calls, python = setup(tmp_path, monkeypatch)
+    bus.alive = True
+    bus.data = {'session': 'old', 'state': 'ERROR', 'backend': 'real'}
+    payload = {'profile': 'fixture'}
+    assert service.connect(payload, python, backend='real') is None
+    assert bus.sent == [('disconnect', None)] and not calls
+    service.poll()
+    assert not calls
+    bus.alive = False
+    service.poll()
+    assert len(calls) == 1 and service.backend == 'real'
+    assert service.pending == payload
+    assert bus.sent == [('disconnect', None)]
+    bus.alive = True
+    bus.data = {'session': 'new', 'state': 'IDLE', 'backend': 'real'}
+    service.poll()
+    assert bus.sent == [('disconnect', None), ('connect', payload)]
+
+
 def test_isaac_worker_does_not_forward_mujoco_renderer(tmp_path, monkeypatch):
     import runpy
     import sys

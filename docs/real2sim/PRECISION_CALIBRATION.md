@@ -1,5 +1,36 @@
 # Joint Precision Calibration
 
+## URDF Limit 변경 시 기존 보정 자동 호환 (2026-10-12)
+
+현재 모델과 저장 보정의 모델이 lower/upper만 다르면 기존 활성 Profile을 그대로 쓴다.
+재기록·재저장·재활성화·torque release가 필요 없다. UI/worker 재시작 후 기존 설정으로 Connect한다.
+`precision.profile_for_model`은 정확한 이전 URDF hash를 Git 이력 또는 보존된 Workspace/캡처
+URDF에서 찾고, lower/upper를 제외한 모델 전체를 비교한다. Axis/Origin/Joint Name/Link/geometry/
+effort/velocity 변경이나 원본 모델 근거 부재는 거절한다. 모터 identity 검사는 별도로 유지한다.
+
+실행 중 복사본에만 현재 선택 URDF 제한을 적용한다. 원본 Profile·References·active pointer는
+쓰지 않으며, 실행 metadata의 `runtime_model_binding`에 저장 모델 hash/원본 Profile hash를 남긴다.
+Profile 안의 과거 제한은 현재 명령 제한을 덮어쓰지 않는다. 실제 보정값을 수정할 때의 기존
+Save/승인 Activate/Restore는 유지하며 Limit-only Migration 버튼·worker·별도 저장 API는 제거했다.
+
+Real-only 기본은 repository URDF, Workspace 실행은 해당 불변 Workspace의 URDF를 사용한다.
+새 ±5° 실행 Workspace는 `scene1_builder/v10`; 옛 Workspace/데이터는 당시 모델을 유지한다.
+모터가 표현할 수 없는 목표/모호한 encoder는 계속 거절하며 모터 range/register를 늘리지 않는다.
+새 범위의 실물 정확도·접촉은 HARDWARE_NOT_TESTED다. 이번 검사 결과:
+`outputs/workflow_validation/joint_limit_extension/COMPATIBILITY_REPORT.md`.
+
+
+## 최신 공통 제어 정책 (2026-10-12)
+
+Real-only / Isaac / MuJoCo는 [JOINT_CONTROL.md](JOINT_CONTROL.md)의 단순한 목표 경로를
+사용한다. Leader 요청을 URDF/선택 엔진 목표 범위로 제한한 뒤 Precision inverse를 적용한다.
+모터 range가 부족하거나 encoder branch가 모호하면 명령을 거절한다. 범위 교차 controller,
+신규 시작 자세/속도/추종 Guard와 자동 복귀는 제거했다. Follower의 범위 밖 측정은 원본대로
+표시/저장하며 Connect 자체를 막지 않는다. Connect는 목표/torque configuration을 보내지
+않는다. Start는 기존 activation 후 추종한다. 사용자 Profile/Reference/LeRobot JSON은 보존한다.
+Limit만 바뀌면 기존 활성 보정이 자동 호환된다. 기존 worker는 사용자가 종료/재실행해야 한다.
+
+
 2026-10-12. **HARDWARE_NOT_TESTED**. 기존 PyQt Real/Sim UI에 관절별 Calibration 탭을 추가했다.
 자동 joint 이동, LeRobot Calibration 파일 덮어쓰기, Homing/Range/Drive register 변경은 구현하지 않는다.
 Scene/Builder/Workspace/v5–v8/사용자 Snapshot·사진·HDF5·checkpoint는 변경하지 않았다.
@@ -99,7 +130,7 @@ Calibration Connect가 기존 Teleop worker를 자동 중지하거나 장치를 
 Candidate의 기록 구간 밖은 **기록 범위 밖·보정식으로 계산**이라고 표시하지만 각도를 숨기지 않는다.
 한 점만 기록했을 때도 영점 보정은 전체 URDF 범위에 사용하되 비율은 기존 변환을 유지한다.
 이는 범위 전체의 실물 정확도를 검증했다는 뜻이 아니다. 실제 follower goal은 기존 모터 calibration
-범위도 확인하므로 그 범위가 URDF보다 좁으면 명령을 거절한다. 모터 range/register를 자동 변경하지 않는다.
+범위도 확인한다. 공통 목표 처리기가 좁은 motor 범위로 먼저 제한하고, strict inverse 자체는 범위 밖 입력을 여전히 거절한다. 모터 range/register를 자동 변경하지 않는다.
 저장 보정은 재기록·재저장 없이 사용한다. 기존 worker에는 이전 코드가 남으므로 **보정 작업 종료 →
 UI 재시작 → 연결·위치만 읽기**로 새 코드를 적용한다. 자동 연결/이동은 없다.
 
@@ -183,7 +214,7 @@ fit의 reference branch는 기존 half-turn 미만 조건을 유지한다. 실�
 `raw_domain`은 실제 기록한 증거 범위이며 사용 제한이 아니다. 원본 Profile/Reference를 덮어쓰지 않는다.
 goal은 URDF limits와 기존 calibrated motor range를 검사하고 유일한 branch의 정수 raw로 변환한다.
 limit의 소수 raw를 반올림할 때 limit 밖으로 나가지 않는 정수값을 사용한다(최대 한 count 차이).
-잘못된 goal을 범위 안으로 implicit clipping하지 않는다.
+Precision inverse 자체는 잘못된 goal을 implicit clipping하지 않는다. live Leader 요청은 공통 limiter가 먼저 명시적으로 제한한다.
 Profile의 fallback joints는 legacy라고 명시한다. VALIDATED_MANUAL은 physical_verified가 아니다.
 
 ## 저장·복구 계약
@@ -240,7 +271,7 @@ Scene base/camera/geometry의 추정 오차까지 해결하는 기능이 아니�
 
 ### 전체 실행 경로의 공통 보정
 
-Real2Sim Capture의 Real-only/STOPPED 상태는 모터 구동과 분리한다. URDF 범위 밖의 유한한
+Real2Sim Capture 및 두 엔진의 STOPPED 관측은 모터 구동과 분리한다. URDF 범위 밖의 유한한
 측정각도 reference encoder branch가 구별되면 그대로 화면 갱신/스냅샷 저장에 사용한다.
 `precision_observation_only`, `joint_limit_warnings`에 범위 초과를 기록하며 raw/native/q를 자르지 않는다.
 현재 구현에서 ±half-turn branch가 모호하면 여전히 캡처를 거절한다. 원본을 임의로 0°로 바꾸지 않는다.

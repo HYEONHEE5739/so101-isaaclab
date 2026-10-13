@@ -43,7 +43,8 @@ def test_source_uses_saved_precision_and_records_model_frame(tmp_path,env,monkey
     class Leader:
         precision_mapper=mapper
         metadata={'fixture':True,'precision_mapping':mapper.metadata()}
-        def __init__(self,*args):pass
+        def __init__(self,*args,model_hash=None):
+            assert model_hash == profile["urdf_sha256"]
         def connect(self):pass
         def activate(self):pass
         def close(self):pass
@@ -133,7 +134,7 @@ def test_source_discard_save_quit_with_fake_leader(tmp_path, env, monkeypatch):
     requested[2] = env.backend.limits[2, 1] + .015
     requested[5] = -.02
     class Leader:
-        def __init__(self, *args): pass
+        def __init__(self, *args, model_hash=None): assert model_hash is None
         def connect(self): pass
         def activate(self): pass
         def close(self): closed.append(True)
@@ -160,17 +161,10 @@ def test_source_discard_save_quit_with_fake_leader(tmp_path, env, monkeypatch):
     assert report['leader_target_limits']['clamped_samples_by_joint']['elbow_flex'] > 0
 
 
-def test_leader_limits_preserve_valid_targets_and_reject_nonfinite(env):
-    from soarm101_lab.simulation.mujoco_backend import LeaderTargets
-    limiter = LeaderTargets(env)
-    applied, details = limiter.apply(env.backend.home)
-    np.testing.assert_array_equal(applied, env.backend.home)
-    assert not details
-    for q in (limiter.lower, limiter.upper):
-        applied, _ = limiter.apply(q)
-        env.backend._target(applied)
-        assert 0 <= env.coordinates.to_policy(applied)[5] <= 1
-    with pytest.raises(ValueError): limiter.apply([float('nan')]*6)
+def test_backend_preserves_valid_targets_and_rejects_nonfinite(env):
+    applied=env.backend._target(env.backend.home)
+    np.testing.assert_array_equal(applied,env.backend.home)
+    with pytest.raises(ValueError): env.backend._target([float('nan')]*6)
 
 
 def test_capture_alignment_prepare_group_split_and_smoke_rejection(tmp_path, env):
