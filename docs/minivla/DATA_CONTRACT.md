@@ -1,8 +1,35 @@
 # 데이터 규격
 
-기존 데이터의 축 순서와 단위를 자동 추측하지 않는다. 실제 데모 파일이 제공되지 않았으므로
-본 형식으로 변환하거나 명시적 HDF5 recipe를 사용해야 한다. LeRobot parquet/video를 직접
-읽는 loader는 현재 포함하지 않는다. decoded RGB/상태/명령을 이 형식으로 내보내면 된다.
+기존 데이터의 축 순서와 단위를 자동 추측하지 않는다. 기존 `Episodes`가 Canonical NPY와
+LeRobot Parquet/MP4를 모두 읽는다. 새 LeRobot 학습은 작은 manifest/statistics만 생성하며
+`canonical_source`나 전체 RGB NPY 복사본을 만들지 않는다. Canonical 입력도 계속 지원한다.
+
+## LeRobot Direct (2026-10-15)
+
+기존 Workflow에서 Convert한 LeRobot artifact를 MiniVLA Train에 선택한다. `train_from_lerobot`
+→ 기존 `train` → `Episodes` 순서로 실행된다. MP4/Parquet는 원본 경로에서 읽으며 새로운
+`dataset/manifest.json`의 `storage`가 원본 경로·전체 SHA256·좌표 계약·gripper endpoints·camera key를
+참조한다. 각 episode는 원본 episode/frame 구간, Source Group, Instruction, Task/Scene/Review를 가진다.
+축 순서/6차원/model-radian 계약과 명시적인 `joint_targets` Action 출처를 검사한다.
+
+숫자 Parquet만 episode별로 읽어 기존 RobotCoordinates로 5rad+gripper fraction을 구성한다.
+통계는 train split만 사용하고 RGB를 디코딩하지 않는다. 명시적인 Source Group이 없거나
+UNKNOWN 계보이면 split 전에 거절한다. 변형 episode를 별도 독립 group으로 만들지 않는다.
+MP4는 CPU torchcodec exact seek, FFmpeg thread 1, decoder 최대 2개, RGB 최대 8frame/16MiB
+LRU다. 기본 학습 프로세스에 DataLoader worker를 추가하지 않는다. 모델을 띄우기 전에
+camera 존재/숫자 shape·단위·시각을 확인하고, decode 실패·누락·PTS 불일치는 episode/frame과 함께
+오류로 표시한다. decoder tensor는 RGB uint8 NCHW, sample은 RGB uint8 HWC다.
+640×480 원본은 유지하고 기존 Backbone에서만 256×256 Letterbox로 변환한다.
+
+Batch 형식과 H40 padding/mask는 아래와 동일하다. chunk는 episode를 넘지 않는다.
+새 checkpoint는 전체 dataset byte identity와 manifest identity를 저장한다. Resume는 동일한
+데이터·통계·config·주파수와 optimizer를 요구한다. 기존 Canonical 학습은 같은 저장 포맷으로
+재개하며 Direct로 자동 전환하지 않는다. 구형 Canonical checkpoint의 byte identity는 원래 Workflow의
+`project_provenance.json.dataset_sha256`로 증명해야 한다. 근거가 없으면 Resume를 거절하되
+추론 로딩은 유지한다. 기존 파일은 재저장하지 않는다.
+
+검증 결과: [VALIDATION.md](VALIDATION.md), 상세 근거:
+`outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`.
 
 ## Scene 구성 metadata
 
@@ -10,8 +37,16 @@ Workspace 물체 수는 RGB/state/action tensor 모양을 바꾸지 않는다. �
 Task는 canonical manifest의 각 episode에 `scene_configuration`, `task_definition`으로 보존한다.
 HDF5/LeRobot와 checkpoint provenance의 저장 위치·legacy 복원·혼합 데이터 계약은
 [DATA_FLOW.md](../real2sim/DATA_FLOW.md#실행별-scene-구성-2026-10-15)를 참조한다.
-혼합 조합의 학습에서도 source group 단위 split을 유지한다. 현재 Workflow의 LeRobot→canonical
-adapter는 기존 decoder를 통해 RGB/state/action을 이 규격으로 내보낸다.
+혼합 조합의 학습에서도 source group 단위 split을 유지한다. Direct manifest도 같은 episode
+metadata를 보존하며 학습 tensor 차원은 바꾸지 않는다.
+
+Curation용 object telemetry는 선택적 review 정보다. Target 기존 matrix와 active distractor의
+float32 xyz+wxyz를 관측 시각/좌표계와 함께 보존하며 모델의 state/action 차원을 늘리지 않는다.
+형식과 frame 변환은 [DATA_FLOW.md](../real2sim/DATA_FLOW.md#curation-object-telemetry-2026-10-15)를 따른다.
+Converter의 episode별 `episode_review`는 annotation/성공 근거/pose reference를 보존하고,
+MiniVLA manifest와 checkpoint provenance에도 전달한다. 이 정보는 학습 입력 tensor가 아니다.
+원본 group 계보가 불명확한 생성 자료는 공통 UNKNOWN group으로 묶는다. 독립 source가 부족하면
+validation split을 만들 수 없으며, frame/생성 episode 단위로 독립성을 꾸며내지 않는다.
 
 ## 하나의 sample
 

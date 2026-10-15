@@ -25,13 +25,123 @@ def active_precision(role, root=None):
     return ProfileStore(root or PROFILE_ROOT).active(role)
 
 
-def collection_coordinates(contract, mapper):
+def collection_coordinates(contract, mapper, simulation=None):
     """Keep model radians separate from the hardware transform used to collect them."""
-    if mapper is None: return copy.deepcopy(contract)
-    return {**copy.deepcopy(contract), 'hardware_mapping': mapper.metadata(), 'simulation_joint_frame': 'urdf'}
+    result=copy.deepcopy(contract)
+    if mapper is not None:result.update(hardware_mapping=mapper.metadata(),simulation_joint_frame='urdf')
+    if simulation is not None:result['simulation_model']=copy.deepcopy(simulation)
+    return result
+
+
+def approved_mappings(workspace,root=None):
+    """Read approved roles against the selected model; no ports, activation or file writes."""
+    from .workspaces.package import load
+    w=workspace if isinstance(workspace,dict) else load(workspace)
+    model_hash=hashlib.sha256((w['root']/'assets/SO101/urdf/so101_isaaclab.urdf').read_bytes()).hexdigest()
+    return {role:PrecisionMapper(profile_for_model(profile,model_hash)).metadata()
+            for role in ('leader','follower') if (profile:=(active_precision(role,root) if root is not None else active_precision(role))) is not None}
+
+
+def simulation_configuration(workspace,*,coordinates=None,mappings=None,identity=False,backend='isaac',scene_configuration=None,hardware_role=None):
+    """Resolve model geometry independently of the numeric joint frame.
+
+    coordinates inherits a recorded model (including historical identity behavior).
+    mappings supplies new hardware collection roles. None means simulation only.
+    """
+    from .workspaces.package import load,metadata
+    from ..so101_robot_spec import simulation_joint_offsets,require_precision_simulation_binding
+    w=workspace if isinstance(workspace,dict) else load(workspace)
+    if coordinates is not None:identity=False # Recorded stages inherit the model, not today's UI override.
+    p=w['profile'];root=Path(w['root']);node=p.get('simulation_joint_offsets_rad')
+    offsets=simulation_joint_offsets(node,JOINTS);has_offsets=bool(np.any(abs(offsets)>1e-12))
+    urdf='assets/SO101/urdf/so101_isaaclab.urdf';urdf_sha=hashlib.sha256((root/urdf).read_bytes()).hexdigest()
+    residual_sha=fingerprint(node) if node else None
+    recorded=(coordinates or {}).get('simulation_model');historical=coordinates is not None and recorded is None
+    if recorded:
+        if fingerprint({k:v for k,v in recorded.items() if k!='sha256'})!=recorded.get('sha256'):
+            raise ValueError('Recorded simulation model contract hash mismatch')
+        if (recorded.get('workspace')!=metadata(w) or recorded.get('robot_urdf_sha256')!=urdf_sha
+                or recorded.get('simulation_residual',{}).get('sha256')!=residual_sha):
+            raise ValueError('Recorded simulation model differs from selected immutable Workspace/URDF/residual')
+        mode=recorded['model_mode']
+        if mode not in ('urdf_identity','precision_bound_residual','legacy_scene_offsets'):raise ValueError('Unknown recorded simulation model mode')
+        identities=copy.deepcopy(recorded.get('precision_mappings',{}))
+    else:
+        identities={}
+        if historical and (coordinates or {}).get('hardware_mapping',{}).get('schema')==MAPPING:
+            previous=coordinates['hardware_mapping'];mapper_from_metadata(previous);profile=previous['profile'];role=profile.get('role')
+            if role in ('leader','follower'):
+                identities[role]={'sha256':previous['sha256'],'profile_id':profile['id'],'role':role,'urdf_sha256':profile['urdf_sha256']}
+        for role,mapping in (mappings or {}).items():
+            mapper_from_metadata(mapping)
+            profile=mapping.get('profile',{})
+            if mapping.get('schema')!=MAPPING or profile.get('role')!=role or profile.get('urdf_sha256')!=urdf_sha:
+                raise ValueError('Hardware Precision role/model identity conflict: '+role)
+            identities[role]={'sha256':mapping['sha256'],'profile_id':profile['id'],'role':role,'urdf_sha256':urdf_sha}
+        if identity or (historical and uses_urdf_frame(coordinates)) or not has_offsets:mode='urdf_identity'
+        elif historical:mode='legacy_scene_offsets'
+        elif node.get('precision_mapping_sha256'):mode='precision_bound_residual'
+        elif identities:raise ValueError('Unbound Scene residual cannot be combined with Precision; select explicit URDF identity validation')
+        else:mode='legacy_scene_offsets'
+    binding=copy.deepcopy((recorded or {}).get('simulation_residual',{}).get('binding'))
+    if mode=='precision_bound_residual':
+        if mappings is not None and hardware_role and hardware_role not in mappings:
+            raise ValueError('Bound residual collection requires an approved '+hardware_role+' URDF Precision mapping')
+        reference=None;role=node.get('precision_mapping_role')
+        builder=w['manifest'].get('builder')
+        if builder:
+            import yaml
+            scene=yaml.safe_load((root/builder['scene']).read_text())
+            reference=scene['robot_model'].get('mapping')
+            if reference and reference.get('schema')==MAPPING:
+                mapper_from_metadata(reference);role=reference['profile']['role']
+                require_precision_simulation_binding(node,reference)
+        if role not in ('leader','follower'):
+            raise ValueError('Scene residual binding role UNKNOWN; Builder mapping evidence or an explicit recorded role is required')
+        if reference and reference['profile'].get('urdf_sha256')!=urdf_sha:
+            raise ValueError('Scene residual evidence uses another robot model')
+        if recorded:
+            if not binding or binding.get('role')!=role or binding.get('mapping_sha256')!=node['precision_mapping_sha256']:
+                raise ValueError('Recorded Scene residual role/mapping binding differs from Builder evidence')
+            if mappings is not None:
+                if role not in mappings:raise ValueError('Scene residual requires the approved '+role+' Precision mapping used for its fit')
+                require_precision_simulation_binding(node,mappings[role])
+        elif mappings is not None:
+            if role not in mappings:raise ValueError('Scene residual requires the approved '+role+' Precision mapping used for its fit')
+            require_precision_simulation_binding(node,mappings[role])
+        elif reference is None:
+            raise ValueError('Simulation residual has no verifiable mapping evidence')
+        binding={'role':role,'mapping_sha256':node['precision_mapping_sha256']}
+    applied=has_offsets and mode!='urdf_identity'
+    model_urdf='assets/SO101/urdf/so101_sim.urdf' if applied and (root/'assets/SO101/urdf/so101_sim.urdf').is_file() else urdf
+    model_usd=w['manifest']['robot_asset'] if applied else w['manifest'].get('identity_robot_asset','assets/SO101/usd/so101_isaaclab.usd')
+    if mode=='precision_bound_residual' and (model_urdf==urdf or not (root/model_usd).is_file()):
+        raise ValueError('Bound residual requires the exported calibrated URDF and USD; immutable Workspace is incomplete')
+    result={'schema':'so101.simulation-model/1','workspace':metadata(w),'robot_urdf_sha256':urdf_sha,
+        'precision_mappings':identities,'simulation_residual':{'sha256':residual_sha,'binding':binding,'applied':applied},
+        'model_mode':mode,'identity_sim':mode=='urdf_identity','robot_model':{'urdf':model_urdf,'urdf_sha256':hashlib.sha256((root/model_urdf).read_bytes()).hexdigest(),'usd':model_usd},
+        'hardware_joint_frame':'urdf' if identities or (coordinates or {}).get('hardware_mapping') else 'legacy_native_to_model',
+        'action_observation_joint_frame':'urdf_joint_rad','backend':backend,'collection_role':hardware_role or (recorded or {}).get('collection_role'),
+        'scene_configuration':copy.deepcopy(scene_configuration or w.get('scene_configuration')),
+        'compatibility':('unknown' if coordinates.get('provenance_status')=='legacy_unknown' else 'legacy_recorded') if historical else 'valid', 'hardware_validation':'HARDWARE_NOT_TESTED'}
+    if recorded:
+        if recorded['robot_model']!=result['robot_model']:raise ValueError('Recorded robot model asset differs from resolved model')
+        if recorded['backend']==backend and recorded.get('scene_configuration')==result['scene_configuration']:
+            return copy.deepcopy(recorded)
+        result['inherited_from']=recorded.get('inherited_from',recorded['sha256'])
+    return {**result,'sha256':fingerprint(result)}
+
+
+def calibration_status(configuration):
+    """One worker/UI log representation of the actual resolved model."""
+    c=configuration
+    return ('Hardware Precision: '+('Applied' if c['precision_mappings'] else 'Legacy/Not Used')+
+        ' · Simulation Residual: '+c['model_mode']+' · Robot: '+c['robot_model']['urdf_sha256'][:12]+
+        ' · Calibration Compatibility: '+c['compatibility'])
 
 
 def uses_urdf_frame(contract):
+    """Numeric hardware coordinate evidence; this does not select simulation geometry."""
     frame = (contract or {}).get('simulation_joint_frame')
     if frame is None: return False  # Historical data keep their historical scene.
     if frame != 'urdf': raise ValueError('Unknown recorded simulation joint frame')
@@ -42,6 +152,24 @@ def uses_urdf_frame(contract):
 
 
 def require_hardware_policy_frame(contract, profile, mapper):
+    if contract.get('simulation_model'):
+        model=contract['simulation_model']
+        if fingerprint({k:v for k,v in model.items() if k!='sha256'})!=model.get('sha256'):
+            raise ValueError('Policy simulation/coordinate contract hash mismatch; no motion started')
+        precise=contract.get('hardware_mapping') or model.get('precision_mappings') or model.get('model_mode')=='precision_bound_residual'
+        if not precise and mapper is not None and model.get('model_mode')=='legacy_scene_offsets':
+            raise ValueError('Policy uses legacy Scene joint offsets; Follower URDF Precision compatibility is unknown; no motion started')
+        if precise:
+            if mapper is None or mapper.profile.get('role')!='follower' or set(mapper.profile['joints'])!=set(JOINTS):
+                raise ValueError('Policy requires a complete approved Follower URDF Precision mapping before activation')
+            from ..so101_robot_spec import urdf_bytes,model_without_limits
+            old=model['robot_urdf_sha256'];current=mapper.profile['urdf_sha256']
+            if old!=current and model_without_limits(urdf_bytes(old))!=model_without_limits(urdf_bytes(current)):
+                raise ValueError('Follower/Policy robot kinematics differ; no motion started')
+            if any(e.get('status') not in ('REVIEWED_MANUAL','VALIDATED_MANUAL') for e in mapper.profile['joints'].values()):
+                raise ValueError('Follower joint calibration evidence is incomplete; no motion started')
+        # Model residual is geometry only. Never add it to a hardware target.
+        return
     if mapper is None or uses_urdf_frame(contract): return
     from ..so101_robot_spec import simulation_joint_offsets
     if np.any(abs(simulation_joint_offsets(profile.get('simulation_joint_offsets_rad'), JOINTS)) > 1e-12):

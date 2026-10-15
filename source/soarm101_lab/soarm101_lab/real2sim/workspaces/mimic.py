@@ -11,9 +11,7 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, 
     from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
     from ...workflow.tasks import configured
     w = configured(workspace if isinstance(workspace,dict) else load(workspace))
-    from ..precision import uses_urdf_frame
-    identity_sim = uses_urdf_frame(coordinates)
-    base = make_config(w, device, num_envs, identity_sim=identity_sim)
+    base = make_config(w, device, num_envs, coordinates=coordinates)
     from isaaclab.sensors import ContactSensorCfg
     # One sensor per rigid body: Isaac filtered contacts are one-to-many.
     for sensor, link in [('grasp_fixed_contact', 'gripper'), ('grasp_moving_contact', 'jaw')]:
@@ -22,7 +20,7 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, 
             filter_prim_paths_expr=['{ENV_REGEX_NS}/' + w['task']['pick']]))
     cfg = SO101PickPlaceMimicEnvCfg()
     # Replace the complete scene/reset; never translate legacy world positions.
-    for name in ('scene', 'events', 'sim', 'decimation', 'workspace_metadata', 'workspace_package', 'workflow_workspace'):
+    for name in ('scene', 'events', 'sim', 'decimation', 'workspace_metadata', 'workspace_package', 'workflow_workspace','simulation_configuration'):
         setattr(cfg, name, copy.deepcopy(getattr(base, name)))
     if randomization_seed is not None:
         cfg.events.reset_episode.params['randomization_seed'] = randomization_seed
@@ -38,9 +36,7 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, 
                 self._joint_position_targets[:] = target
                 self._asset.set_joint_position_target(target, joint_ids=self._joint_ids)
         cfg.actions.arm.class_type = RecordedJointAction
-    urdf = w['root'] / 'assets/SO101/urdf/so101_sim.urdf'
-    if identity_sim or not urdf.exists():
-        urdf = w['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf'
+    urdf = w['root'] / base.simulation_configuration['robot_model']['urdf']
     cfg.actions.arm.urdf_path = str(urdf)
     cfg.observations.policy = copy.deepcopy(base.observations.policy)
     from .grasp import object_stably_grasped
@@ -79,7 +75,7 @@ def validate_input(path, workspace, annotated=False):
     return w, args
 
 
-def preserve_metadata(source, output, workspace):
+def preserve_metadata(source, output, workspace, generated=False):
     """After the writer closes, retain original provenance and record the new stage."""
     import h5py
     w, args = verify_dataset(source, workspace)
@@ -88,10 +84,28 @@ def preserve_metadata(source, output, workspace):
         updated = json.loads(group.attrs.get('env_args', '{}'))
         from ...representation import describe
         coordinates = args.get('so101_coordinates', coordinate_contract(w))
+        from ..precision import simulation_configuration
+        updated['simulation_configuration']=simulation_configuration(w,coordinates=coordinates,backend='isaac')
         updated.update(representation=describe(coordinates), workspace=metadata(w), workspace_path=str(w['root']),
                        so101_coordinates=coordinates, scene_configuration=w['scene_configuration'],
                        grasp_object=w['task']['pick'], place_bin=w['task']['place'],
                        source_dataset=str(source), source_env_args=args)
+        from ...tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import telemetry_metadata
+        telemetry=telemetry_metadata(w['task']['dynamic'])
+        episodes=[g for n,g in group.items() if n.startswith('demo_')]
+        telemetry['object_telemetry']={n:spec for n,spec in telemetry['object_telemetry'].items() if episodes and all(spec['path'] in g for g in episodes)}
+        if not episodes or not all('obs/timestamp' in g for g in episodes):
+            telemetry.pop('observation_timestamp_path')
+            updated.pop('observation_timestamp_path',None)
+        updated.update(telemetry)
+        updated['success_source']='simulation_success_term' if generated else args.get('success_source','unknown')
+        from ...workflow.curation import _group_id
+        with h5py.File(source,'r') as original:
+            for name,episode in group.items():
+                if not name.startswith('demo_') or 'source_group' in episode.attrs:continue
+                if not generated and name in original['data']:
+                    episode.attrs['source_group']=_group_id(source,name,original['data'][name].attrs,args)
+                else:episode.attrs['source_group']='UNKNOWN:'+str(source)
         try:
             from isaaclab.utils.datasets.hdf5_dataset_file_handler import DATASET_FORMAT_VERSION
         except ImportError:

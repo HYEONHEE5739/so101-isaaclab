@@ -267,7 +267,7 @@ def main():
     env.close()  # close/flush recorder before opening the completed dataset
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace)
+        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace, generated=True)
         import h5py
         import json
         with h5py.File(args_cli.output_file, 'a') as dataset:

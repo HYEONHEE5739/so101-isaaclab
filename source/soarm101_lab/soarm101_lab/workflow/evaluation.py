@@ -76,9 +76,8 @@ def evaluate(request):
             from ..real2sim.workspaces.environment import make_config, task_success_details
             used_seed = evaluation_seed(opts)
             from ..so101_dataset_contract import read_contract
-            from ..real2sim.precision import uses_urdf_frame
             cfg = make_config(w['root'], device, task_definition=definitions[0],
-                              identity_sim=uses_urdf_frame(read_contract(path)), active_object_ids=active)
+                              coordinates=read_contract(path), active_object_ids=active)
             cfg.seed = used_seed
             cfg.events.reset_episode.params['randomization_seed'] = used_seed
             print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
@@ -219,6 +218,7 @@ def evaluate(request):
                 print(f"[WORKFLOW] 평가 완료 · {definition['task_id']} · 성공 {wins}/{len(subset)} · 성공률 {100*wins/len(subset):.1f}%", flush=True)
         atomic(request['output'], {'status': 'SUCCEEDED', 'mode': stage, 'workspace': metadata(w),
                'scene_configuration':configured(w,definitions[0],active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'],
+               'simulation_configuration':cfg.simulation_configuration if stage=='sim_eval' else read_contract(path).get('simulation_model'),
                'scene_configurations':[configured(w,d,active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'] for d in definitions],
                **evaluation_distribution(artifact,w,active), 'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
                'hardware_mapping': follower.metadata.get('precision_mapping') if stage == 'real_eval' else None,

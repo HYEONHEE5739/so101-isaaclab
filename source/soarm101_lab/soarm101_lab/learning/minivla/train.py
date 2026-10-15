@@ -10,7 +10,7 @@ import time
 import numpy as np
 import torch
 from .config import MiniVLAConfig, ARCHITECTURE_SCHEMA
-from .data import Episodes, collate
+from .data import Episodes, collate, dataset_identity
 from .head import ActionHead
 
 def seed_all(seed):
@@ -39,9 +39,11 @@ def require_architecture(checkpoint):
         raise ValueError('Legacy/incompatible MiniVLA checkpoint: expected '+ARCHITECTURE_SCHEMA+'; retraining is required')
 
 
-def validate_resume(checkpoint, cfg, stats, control_hz):
+def validate_resume(checkpoint, cfg, stats, control_hz, identity=None):
     """Allow extending total steps while retaining model, dataset and optimizer contracts."""
     require_architecture(checkpoint)
+    if identity is not None and checkpoint.get('dataset_identity') is not None and checkpoint['dataset_identity']!=identity:
+        raise ValueError('Resume dataset byte identity mismatch')
     saved = dict(checkpoint['config']); current = asdict(cfg)
     saved.pop('steps'); current.pop('steps')
     if saved != current or checkpoint['statistics'] != stats:
@@ -51,11 +53,11 @@ def validate_resume(checkpoint, cfg, stats, control_hz):
     if cfg.steps <= checkpoint['step']:
         raise ValueError('Total steps must exceed the saved training step')
 
-def save_checkpoint(path, cfg, head, backbone, stats, optimizer, step, best, stale, hz):
+def save_checkpoint(path, cfg, head, backbone, stats, optimizer, step, best, stale, hz, identity=None):
     path=Path(path); tmp=path.with_suffix('.tmp')
     torch.save({'architecture_schema':ARCHITECTURE_SCHEMA,'config':asdict(cfg),'head':head.state_dict(),'adapter':adapter_state(backbone),
                 'statistics':stats,'optimizer':optimizer.state_dict(),'step':step,'best':best,'stale':stale,
-                'control_hz':hz},tmp)
+                'control_hz':hz,'dataset_identity':identity},tmp)
     tmp.replace(path)
 
 def validate(backbone, head, dataset, device):
@@ -81,10 +83,20 @@ def main():
     args=p.parse_args(); cfg=MiniVLAConfig.load(args.config)
     stats=json.loads(Path(args.stats).read_text())
     train=Episodes(args.manifest,stats,cfg,'train'); val=Episodes(args.manifest,stats,cfg,'val')
+    identity=dataset_identity(train.manifest)
     out=Path(args.out); out.mkdir(parents=True,exist_ok=True)
     if (out/'last.pt').exists() and not args.resume: raise FileExistsError('Run exists: use --resume or a fresh --out')
     if args.resume:
-        require_architecture(torch.load(args.resume,map_location='cpu',weights_only=True))
+        previous=torch.load(args.resume,map_location='cpu',weights_only=True);require_architecture(previous)
+        if cfg.revision=='main':cfg.revision=previous['config']['revision']
+        if previous.get('dataset_identity') is None and not train.manifest.get('storage'):
+            # Historical canonical checkpoints need their original full Workflow artifact hash.
+            provenance=Path(args.resume).parent/'project_provenance.json'
+            from ...workflow.artifacts import fingerprint
+            proof=json.loads(provenance.read_text()) if provenance.is_file() else {}
+            if not proof.get('dataset_sha256') or fingerprint(Path(args.manifest).parent)!=proof['dataset_sha256']:
+                raise ValueError('Legacy Resume dataset bytes cannot be verified; inference remains supported, do not switch loaders')
+        validate_resume(previous,cfg,stats,train.manifest['control_hz'],identity)
     seed_all(cfg.seed)
     from .backbone import QwenBackbone
     backbone=QwenBackbone(cfg)
@@ -99,13 +111,13 @@ def main():
     start=0; best=float('inf'); stale=0
     if args.resume:
         ck=torch.load(args.resume,map_location='cpu',weights_only=True)
-        validate_resume(ck, cfg, stats, train.manifest['control_hz'])
+        validate_resume(ck, cfg, stats, train.manifest['control_hz'],identity)
         head.load_state_dict(ck['head']); restore_adapter(backbone,ck['adapter']); opt.load_state_dict(ck['optimizer'])
         start=ck['step']; best=ck['best']; stale=ck['stale']
         previous_best=Path(args.resume).parent/'best.pt'
         if not previous_best.is_file(): raise ValueError('Resume requires the saved best.pt alongside last.pt')
         if previous_best.resolve()!=(out/'best.pt').resolve(): shutil.copy2(previous_best,out/'best.pt')
-        save_checkpoint(out/'last.pt',cfg,head,backbone,stats,opt,start,best,stale,train.manifest['control_hz'])
+        save_checkpoint(out/'last.pt',cfg,head,backbone,stats,opt,start,best,stale,train.manifest['control_hz'],identity)
     cfg.save(out/'config.json')
     Path(out/'statistics.json').write_text(json.dumps(stats,indent=2))
     Path(out/'manifest.json').write_text(Path(args.manifest).read_text())
@@ -139,7 +151,7 @@ def main():
             if improved: best=score; stale=0
             else: stale+=1
             for name in (['best.pt','last.pt'] if improved else ['last.pt']):
-                save_checkpoint(out/name,cfg,head,backbone,stats,opt,step+1,best,stale,train.manifest['control_hz'])
+                save_checkpoint(out/name,cfg,head,backbone,stats,opt,step+1,best,stale,train.manifest['control_hz'],identity)
         with (out/'metrics.jsonl').open('a') as f: f.write(json.dumps(log)+'\n')
         print(json.dumps(log),flush=True)
         if stale>=cfg.patience: break

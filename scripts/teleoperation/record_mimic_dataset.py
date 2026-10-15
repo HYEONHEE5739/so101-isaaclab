@@ -26,6 +26,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import argparse
+import json
 import time
 
 from isaaclab.app import AppLauncher
@@ -35,6 +36,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", help="Published workspace ID or package path (opt-in)")
     parser.add_argument("--source_seed", type=int, help="Explicit reproducible seed; default is random per run")
+    parser.add_argument('--identity_sim_for_validation',action='store_true',help='Explicitly exclude Scene model residual; Precision mapping is unchanged')
+    parser.add_argument('--resume_data',help='Read-only original Source contract for a new continuation segment')
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--recalibrate", action="store_true")
     parser.add_argument("--calibration_file_name", default="so101_leader.json")
@@ -167,7 +170,7 @@ def add_initial_state(episode, env):
                 to_cpu(velocity),
             )
 
-def add_observation(episode, obs):
+def add_observation(episode, obs, env=None):
     import torch
 
     episode.add(
@@ -199,6 +202,12 @@ def add_observation(episode, obs):
             f"obs/policy/{camera_name}",
             image.detach().cpu(),
         )
+    if env is not None:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import observation_telemetry
+        telemetry=observation_telemetry(env)
+        episode.add('obs/timestamp',telemetry['timestamp'][0])
+        for name,value in telemetry['object_poses'].items():episode.add('obs/object_poses/'+name,value[0])
+        for name,value in telemetry.get('events',{}).items():episode.add('obs/events/'+name,value[0])
 
 
 def add_post_state(episode, env):
@@ -222,6 +231,9 @@ def save_episode(writer, episode, episode_id):
         from soarm101_lab.workflow.tasks import stamp_group
         stamp_group(writer._hdf5_data_group[f'demo_{episode_id}'], writer.workflow_task_definition,
                     json.loads(writer._hdf5_data_group.attrs['env_args']).get('scene_configuration'))
+    writer._hdf5_data_group[f'demo_{episode_id}'].attrs['success_source']='operator_saved_unverified'
+    group=writer._hdf5_data_group[f'demo_{episode_id}']
+    group.attrs['source_group']=str(Path(group.file.filename).resolve())+f'/demo_{episode_id}'
     writer.flush()
 
     print(
@@ -256,8 +268,30 @@ def main():
         urdf_path=str(Path(args_cli.workspace)/'assets/SO101/urdf/so101_isaaclab.urdf') if args_cli.workspace else None,
     )
 
+    simulation=None
+    if args_cli.workspace:
+        from soarm101_lab.real2sim.workspaces.package import load as load_workspace
+        from soarm101_lab.workflow.tasks import configured
+        from soarm101_lab.real2sim.precision import approved_mappings,simulation_configuration
+        workspace=configured(load_workspace(args_cli.workspace))
+        mappings=approved_mappings(workspace)
+        resume_coordinates=None
+        if args_cli.resume_data:
+            from soarm101_lab.so101_dataset_contract import read_contract,MIMIC_SPACE
+            from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
+            from soarm101_lab.representation import require_compatible
+            resume_coordinates=read_contract(args_cli.resume_data)
+            require_compatible(resume_coordinates,coordinate_contract(workspace),MIMIC_SPACE)
+            if resume_coordinates.get('hardware_mapping')!=mappings.get('leader'):
+                raise ValueError('Source resume hardware calibration differs; use the original mapping or a new dataset')
+        simulation=simulation_configuration(workspace,mappings=mappings,hardware_role='leader',coordinates=resume_coordinates,
+            identity=args_cli.identity_sim_for_validation,backend='isaac',scene_configuration=workspace['scene_configuration'])
     controller = SO101Leader(controller_cfg)
     controller.connect()
+    if args_cli.workspace:
+        actual=getattr(controller,'precision_mapper',None)
+        if (actual.metadata()['sha256'] if actual else None)!=mappings.get('leader',{}).get('sha256'):
+            raise ValueError('Leader mapping changed during Source preparation')
 
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.environment import make_config
@@ -265,7 +299,7 @@ def main():
         from soarm101_lab.workflow.tasks import configured
         workspace = configured(load_workspace(args_cli.workspace))
         env_cfg = make_config(workspace, args_cli.device, args_cli.num_envs,
-                              identity_sim=bool(getattr(controller, 'precision_mapper', None)))
+                              simulation=simulation)
         workspace = env_cfg.workflow_workspace
         from soarm101_lab.real2sim.workspaces.reset import source_seed
         env_cfg.events.reset_episode.params['randomization_seed'] = source_seed(args_cli.source_seed)
@@ -305,7 +339,9 @@ def main():
         from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
         coordinates = coordinate_contract(workspace)
     from soarm101_lab.real2sim.precision import collection_coordinates
-    coordinates = collection_coordinates(coordinates, getattr(controller, 'precision_mapper', None))
+    coordinates = collection_coordinates(coordinates, getattr(controller, 'precision_mapper', None),
+        getattr(env_cfg,'simulation_configuration',None))
+    if args_cli.workspace and args_cli.resume_data:coordinates=resume_coordinates
     # Persist before recording, including interrupted runs. Never mix mapping revisions.
     write_contract(args_cli.dataset_file, coordinates)
     writer = HDF5DatasetFileHandler()
@@ -330,9 +366,12 @@ def main():
             DATASET_FORMAT_VERSION = 0
         from soarm101_lab.representation import describe
         writer.add_env_args({'representation': describe(coordinates), 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
+                             'simulation_configuration':env_cfg.simulation_configuration,
                              'root_quaternion_order': 'xyzw' if DATASET_FORMAT_VERSION >= 1 else 'wxyz',
                              'task_definitions': [workspace['task_definition']], 'scene_configuration':workspace['scene_configuration']})
         writer.workflow_task_definition = workspace['task_definition']
+    from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import telemetry_metadata
+    writer.add_env_args(telemetry_metadata(workspace['task']['dynamic'] if args_cli.workspace else list(env.scene.rigid_objects)))
 
     episode_count = 0
     step_count = 0
@@ -391,6 +430,7 @@ def main():
                 add_observation(
                     episode,
                     obs,
+                    env,
                 )
 
                 # Joint-space teleop input.

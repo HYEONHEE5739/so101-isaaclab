@@ -387,7 +387,22 @@ with h5py.File(input_file, "r") as source_h5:
 with h5py.File(input_file,"r") as source_h5:
     episode_scenes = {str(i):json.loads(source_h5['data'][name].attrs.get('scene_configuration','null')) or source_args.get('scene_configuration')
         for i,name in enumerate(demo_names)}
+    from soarm101_lab.workflow.curation import _group_id
+    source_groups={str(i):_group_id(input_file,name,source_h5['data'][name].attrs,source_args) for i,name in enumerate(demo_names)}
+    episode_review={str(i):{'recorded_success':bool(source_h5['data'][name].attrs['success']) if 'success' in source_h5['data'][name].attrs else None,
+        'success_source':source_h5['data'][name].attrs.get('success_source',source_args.get('success_source','unknown')),
+        'annotation':json.loads(source_h5['data'][name].attrs.get('annotation','null')),
+        'annotation_paths':[k for k in ('obs/datagen_info/subtask_term_signals/grasp','obs/events/grasp','obs/events/place') if k in source_h5['data'][name]],
+        'pose_reference':json.loads(source_h5['data'][name].attrs.get('pose_reference','null')),
+        'object_telemetry':json.loads(source_h5['data'][name].attrs.get('object_telemetry','null')) or source_args.get('object_telemetry')} for i,name in enumerate(demo_names)}
+    for i,name in enumerate(demo_names):
+        review=episode_review[str(i)]
+        if review['pose_reference'] is None and review['object_telemetry']:
+            review['pose_reference']={'source_dataset':str(input_file),'episode':name,'object_telemetry':review['object_telemetry']}
+from soarm101_lab.so101_joint_mapping import RobotCoordinates
 provenance = {"scene_configuration":source_args.get('scene_configuration'),
+              "canonical_coordinates":source_args.get('canonical_coordinates') or RobotCoordinates().metadata(),
+              "source_groups":source_groups,"episode_review":episode_review,
               "scene_configurations":list({s['sha256']:s for s in episode_scenes.values() if s}.values()),
               "episode_scene_configurations":episode_scenes,
               "workspace": source_args.get("workspace"), "source_dataset": str(input_file),

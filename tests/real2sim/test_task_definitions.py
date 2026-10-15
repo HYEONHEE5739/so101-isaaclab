@@ -121,10 +121,11 @@ def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatc
         (checkpoint / 'model.safetensors').write_bytes(b'test-only')
     monkeypatch.setattr('subprocess.run', fake_train)
     artifact = {'path': str(dataset), 'coordinates': {**coordinate_contract(w), 'action_space': JOINT_SPACE},
-                'workspace': metadata(w), 'tasks': definitions}
+                'workspace': metadata(w), 'tasks': definitions,'provenance':{'episode_review':{'0':{'annotation':{'grasp':1,'place':3},'recorded_success':True}}}}
     train(artifact, {'architecture': 'smolvla', 'steps': 1}, output)
     provenance = json.loads((checkpoint / 'workflow_provenance.json').read_text())
     assert provenance['task_definitions'] == definitions
+    assert provenance['episode_review']==artifact['provenance']['episode_review']
     assert provenance['training']['policy']['type'] == 'smolvla'
     assert provenance['training']['policy']['pretrained_path'] == 'lerobot/smolvla_base'
     assert provenance['training']['save_checkpoint'] is True

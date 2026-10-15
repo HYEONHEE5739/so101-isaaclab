@@ -58,9 +58,15 @@ Isaac Source/독립 Teleop은 기존 SO101Leader.advance에서 Precision 관측 
 Policy ActionGuard와 RobotCoordinates는 기존 별도 표현/rollout 계약으로 유지한다.
 
 과거 dataset/Workspace/Scene offsets를 수정하거나 현재 보정으로 재해석하지 않는다.
-Sim Eval은 dataset의 URDF frame 여부에 따라 기존 make_config(identity_sim=...)로 실행 USD를
-선택한다. 새 Workspace의 identity_robot_asset을 사용하고 옛 Workspace의 fallback은 보존한다.
-Precision + 예전 Scene Sim zero offset 중복은 기존 session 옵션/conflict 검사로 방지한다.
+2026-10-15부터 `precision.simulation_configuration`이 새 Source/Runtime/파생 단계/Sim Eval의
+모델을 결정한다. numeric URDF rad와 identity geometry를 구분한다. 검증된 role mapping에
+연결된 Scene 잔차는 Sim URDF/USD geometry에 한 번 적용하며 command 값은 바꾸지 않는다.
+Leader 수집 mapping과 Follower fitting binding은 서로 다른 hash를 가질 수 있다.
+Replay/Annotation/DataGen/Sim Eval은 원본 계약을 상속하고 Isaac IK/Physics는 대응 모델을 쓴다.
+명시 URDF 원형 검사는 유지하며, 과거 URDF-frame/legacy 데이터는 당시 identity/Scene 동작을 유지한다.
+Real Eval은 Follower 호환성을 activate 전에 확인하고 Sim 잔차를 hardware inverse에 섞지 않는다.
+의사결정표/로그/저장 위치는 [PRECISION_CALIBRATION.md](PRECISION_CALIBRATION.md#workflow-공통-모델-결정-2026-10-15)
+및 [DATA_FLOW.md](DATA_FLOW.md)를 따른다. 기존 encoder/통신/range 검사는 그대로다.
 
 ## Model / 보정 보존
 

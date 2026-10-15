@@ -1,5 +1,79 @@
 # SO-101 Real2Sim Data Flow
 
+## Direct 학습과 Calibration 계약 (2026-10-15)
+
+Isaac은 HDF5 Source→Annotation→DataGen→Curation→기존 LeRobot Convert를 유지한다.
+MiniVLA는 Convert의 MP4/Parquet를 `Episodes`에서 직접 읽는다. 학습 준비는 작은 index manifest와
+train-only statistics뿐이며 전체 RGB NPY를 생성하지 않는다. MuJoCo Canonical 학습도 유지한다.
+기존 ACT/SmolVLA LeRobot 경로는 바꾸지 않는다. 로더/Resume 세부 계약은
+[DATA_CONTRACT.md](../minivla/DATA_CONTRACT.md#lerobot-direct-2026-10-15)를 따른다.
+
+새 Source의 coordinate contract에는 `simulation_model`이 들어간다. 공통 resolver
+`precision.simulation_configuration`은 numeric URDF joint frame과 geometry residual을 분리한다.
+승인된 role mapping과 Builder의 residual binding 근거로 모델을 결정한다. Scene2 v8은 Follower
+binding이며 Source Leader mapping과 hash가 다를 수 있다. 명시 identity 검사는 기존 옵션을 쓴다.
+
+```text
+Leader raw → Leader Precision → numeric URDF state/target
+                          └ Source contract: role mappings + bound Sim model
+Source → Replay/Annotation → DataGen → Curation → Convert → Train/checkpoint
+        기록 계약 상속          같은 IK/Physics 모델                  └ Sim Eval: 같은 모델
+                                                               └ Real Eval: Follower inverse
+```
+
+`simulation_model`은 Workspace/content·URDF·Precision role/hash·residual/hash·mode/applied·실행
+URDF/USD·backend·Scene 구성 및 self hash를 가진다. HDF5는 `so101_coordinates`/env_args,
+Canonical은 project_provenance/coordinate sidecar, LeRobot은 sidecar/workflow_provenance,
+checkpoint는 기존 project_provenance/coordinate sidecar로 전달한다. 학습 manifest의 storage는
+원본 LeRobot 전체 byte hash도 보존한다. 새 checkpoint의 dataset_identity는 Resume의 입력 byte를 검사한다.
+
+파생 단계는 현재 UI 체크박스나 활성 Profile로 원본 모델을 바꾸지 않는다. 다른 active object 구성의
+Sim Eval도 robot model을 유지한다. Real Eval은 승인 Follower의 URDF 변환을 먼저 확인하며 Sim 잔차를
+하드웨어 target에 추가하지 않는다. 과거 identity/legacy 동작은 원래 계약으로 복원하고 증거 없는 값은
+UNKNOWN으로 남긴다. 자세한 정책은 [PRECISION_CALIBRATION.md](PRECISION_CALIBRATION.md#workflow-공통-모델-결정-2026-10-15).
+
+## Curation Object Telemetry (2026-10-15)
+
+`obs[t]`의 관절 상태·EE·RGB·물체 pose를 같은 **명령 적용 전** 시점에 기록한다.
+기존 action/tensor/좌표 계약을 바꾸지 않고 다음 선택적 telemetry를 추가한다.
+
+| 입력 | 저장 및 해석 |
+|---|---|
+| MuJoCo canonical | 기존 Target `object_pose.npy` [T,4,4] 재사용. 나머지 active만 `object_poses.npy` float32 [T,N,7], xyz+wxyz, workspace 좌표 |
+| Canonical manifest episode | `object_telemetry`: ID→file/index/pose_format/frame/timestamp_file. `timestamp.npy`를 공유하고 RGB/action을 복제하지 않음 |
+| Isaac Source / Mimic DataGen | `obs/object_poses/<id>` float32 [T,7], xyz+wxyz, world 좌표. `obs/timestamp` float64 [T,1] simulation time |
+| Isaac env_args | `object_telemetry`: ID→path/pose_format/frame/timestamp_path, `observation_timestamp_path`, `ee_frame=robot_base` |
+| 이벤트 / outcome | 실제 존재하는 grasp/place signal 및 annotation만 표시. `success_source`로 operator 저장과 simulation 판정 근거 구별 |
+
+기록 Workspace path/identity/checksum으로 당시 Profile을 읽고, canonical EE/objects는
+`inv(T_world_base) @ T_world_workspace`, Isaac world objects는 `inv(T_world_base)`로 변환한다.
+Isaac EE는 기존 robot-base 좌표를 유지한다. 로봇은 기록 좌표 계약의 원형/Scene 보정 URDF를 쓴다.
+근거가 없는 world/base 등록은 추측하지 않고 해당 overlay를 비활성화한다.
+객체 geometry/color는 Profile에서 읽는다. box는 실제 치수, 외부 mesh/cup 등은 치수 기반 preview proxy다.
+
+구형 canonical의 target-only 기록은 target 경로만 사용한다. 과거 HDF5의 초기 pose만으로
+동작을 추정하지 않는다(`Trajectory unavailable`). 실제 post-step 시계열과 initial state가 모두
+있으면 frame t를 `initial[0] + post_state[:-1]`로 복원한다. 이 경우 timestamp는 기록 control_dt의
+시간격자다. 명시된 quaternion 순서와 기록 robot root가 있으면 두 root가 공유하는 기록 좌표계에서
+직접 base로 변환한다. Isaac의 environment-relative state를 world pose로 잘못 해석하지 않는다.
+하드웨어 노출시각을 실측한 것으로 표시하지 않는다. 명시된 timestamp 불일치,
+관측보다 미래인 RGB, 2주기 이상 오래된 RGB는 거절한다.
+과거 `obs/camera/<view>` RGB도 lazy frame으로 읽는다. Workspace가 유실된 파일은 기록된
+target만 검토하고 Active Set이나 현재 URDF를 임의로 대입하지 않는다. 모델/등록 근거가 없는
+overlay와 객체 동작은 unavailable이며, RGB·EE·관절 목표 그래프 검토는 계속 가능하다.
+
+분석은 telemetry를 2048-frame chunk로 읽으며 RGB 전체를 읽지 않는다. 선택 episode plot은
+최대1500 sample, frame 재생은 원본 정확한 index를 사용한다. RGB는 background lazy read와
+최대8frame/16MiB LRU다. 초기 summary 분석은 전체 frame 수에 비례하며 UI worker에서 실행한다.
+
+Curation Export는 기존 subset 복사/Registry를 사용한다. Task/Scene/Source Group/annotation/
+성공 라벨은 보존한다. Converter의 `episode_review`는 성공 근거·annotation 경로와 원본 pose
+reference를 유지하며 학습 tensor에 추가하지 않는다. HDF5 pose telemetry는 원본 HDF5에 남고
+LeRobot로 중복 복사하지 않는다. canonical prepared subset은 기존 포맷 그대로 pose 파일도 보존한다.
+Annotation은 Source Group을 유지한다. 원본 데모 계보를 특정할 수 없는 Isaac 생성 결과는
+공통 `UNKNOWN:<source file>` 그룹이며 서로 독립인 train/validation 자료로 나누지 않는다.
+기존 source-group split 검사 및 MiniVLA H40/6D 입력은 그대로다.
+
 ## 실행별 Scene 구성 (2026-10-15)
 
 Published Workspace identity와 실행별 Scene 구성을 구분한다. `workflow.tasks.configured()`는
@@ -178,7 +252,7 @@ Real2Sim 보정 때문에 Mimic/datagen/policy의 의미를 바꾸지 않는다.
 
 UI → Operations → backend worker → Registry 순서는 공통이다. MuJoCo는 canonical 폴더에 관측 직전 state/RGB와 적용 target을 기록한다. `raw_state/raw_action`은 6개 모두 model rad이고 MiniVLA `state/action`은 arm 5 rad + gripper fraction이다. requested target과 URDF limit 적용 후 target은 별도로 보존한다. Replay에는 같은 model hash의 integration state를 사용한다.
 
-Annotation은 ordered grasp/place + 물리적 placement를 검사한다. Datagen은 새로운 physics rollout과 RGB를 기록하고 원 source group을 유지한다. Convert는 기존 HDF5→LeRobot converter에 run-local adapter를 제공한다. ACT/SmolVLA는 LeRobot의 model-radian action을, MiniVLA는 canonical split/statistics를 사용한다. MiniVLA를 기존 Isaac 평가에 연결할 때 model-radian facade가 단위를 변환한다.
+Annotation은 ordered grasp/place + 물리적 placement를 검사한다. Datagen은 새로운 physics rollout과 RGB를 기록하고 원 source group을 유지한다. Convert는 기존 HDF5→LeRobot converter에 run-local adapter를 제공한다. ACT/SmolVLA는 LeRobot의 model-radian action을, MiniVLA는 LeRobot Direct 또는 기존 Canonical 입력의 group split/train-only statistics를 사용한다. MiniVLA를 기존 Isaac 평가에 연결할 때 model-radian facade가 단위를 변환한다.
 
 공통 Hub dataset upload는 MuJoCo의 `lerobot/` 내용을 repository 루트에 게시한다. 자세한 실행 흐름과 한계는 [MINIVLA_INTEGRATION.md](MINIVLA_INTEGRATION.md)를 참조한다.
 

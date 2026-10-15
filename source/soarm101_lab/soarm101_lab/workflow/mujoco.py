@@ -17,7 +17,7 @@ from ..simulation.mjcf import RGB_WIDTH, RGB_HEIGHT
 
 def _environment(request, output, coordinates=None, hz=None):
     options = request['options']
-    from ..real2sim.precision import uses_urdf_frame
+    from ..real2sim.precision import simulation_configuration,calibration_status
     recorded_contract = None
     source = options.get('resume_data') or request.get('input') or request.get('checkpoint')
     if isinstance(source, (str, Path)):
@@ -27,6 +27,13 @@ def _environment(request, output, coordinates=None, hz=None):
         elif (path/'so101_coordinates.json').is_file():
             from ..so101_dataset_contract import read_contract
             recorded_contract = read_contract(path)
+    w=load(request['workspace'])
+    from .tasks import configured
+    w=configured(w,options.get('task_definition'),options.get('active_object_ids'),backend='mujoco')
+    simulation=simulation_configuration(w,coordinates=recorded_contract,
+        mappings=options.get('_collection_mappings'),identity=options.get('identity_sim_for_validation',False),
+        backend='mujoco',scene_configuration=w['scene_configuration'],hardware_role='leader' if '_collection_mappings' in options else None)
+    print('[WORKFLOW] '+calibration_status(simulation),flush=True)
     coords = coordinates or {}
     physics_profile = options.get('physics_profile', 'isaac_matched')
     if options.get('resume_data'):
@@ -40,7 +47,7 @@ def _environment(request, output, coordinates=None, hz=None):
                               task_definition=options.get('task_definition'),
                               full_workspace=options.get('full_workspace', True),
                               viewer=options.get('mode') == 'developer', physics_profile=physics_profile,
-                              identity_sim=options.get('_identity_sim', False) or uses_urdf_frame(recorded_contract),
+                              simulation_configuration=simulation,
                               active_object_ids=options.get('active_object_ids'))
 
 
@@ -106,13 +113,9 @@ def source(request, output, publish, bridge):
     from .episodes import EpisodeWriter
     from ..so101_joint_mapping import observed_positions
     options = request['options']
-    from ..real2sim.precision import active_precision, collection_coordinates, profile_for_model
-    selected_precision = active_precision('leader') if request.get('workspace') else None
-    if selected_precision:
-        import hashlib
-        robot = load(request['workspace'])['root']/'assets/SO101/urdf/so101_isaaclab.urdf'
-        selected_precision = profile_for_model(selected_precision, hashlib.sha256(robot.read_bytes()).hexdigest())
-    options['_identity_sim'] = selected_precision is not None
+    from ..real2sim.precision import approved_mappings, collection_coordinates
+    options['_collection_mappings']=approved_mappings(request['workspace']) if request.get('workspace') else {}
+    selected_precision=options['_collection_mappings'].get('leader',{}).get('profile')
     from ..real2sim.workspaces.reset import source_seed
     options['seed'] = source_seed(options.get('seed'))
     print('SOURCE_RANDOMIZATION_SEED', options['seed'], flush=True)
@@ -131,12 +134,19 @@ def source(request, output, publish, bridge):
             mapper = getattr(leader, 'precision_mapper', None) or DEFAULT_MAPPER
             if selected_precision and getattr(mapper, 'profile', {}).get('id') != selected_precision['id']:
                 raise ValueError('Active calibration changed while preparing Source; start a new run')
+            if selected_precision and mapper.metadata()['sha256']!=options['_collection_mappings']['leader']['sha256']:
+                raise ValueError('Leader mapping changed before Source activation')
             leader.activate()
             writer = EpisodeWriter(output / 'dataset', env, options['instruction'])
             from ..real2sim.workspaces.demo import coordinate_contract
             from ..so101_dataset_contract import current_contract, MIMIC_SPACE
             contract = coordinate_contract(request['workspace']) if request.get('workspace') else current_contract(MIMIC_SPACE)
-            writer.provenance['coordinate_contract'] = collection_coordinates(contract, mapper if selected_precision else None)
+            writer.provenance['coordinate_contract'] = collection_coordinates(contract, mapper if selected_precision else None,env.backend.metadata.get('simulation_configuration'))
+            if options.get('resume_data'):
+                previous=_provenance(options['resume_data']).get('coordinate_contract',{})
+                if previous and 'simulation_model' not in previous:
+                    # Keep a verified historical identity/legacy-mode contract unchanged.
+                    writer.provenance['coordinate_contract'].pop('simulation_model',None)
             writer.provenance['leader'] = leader.metadata if hasattr(leader, 'metadata') else {'fixture': True}
             if options.get('resume_data'): writer.resume(options['resume_data'])
             if len(writer.manifest['episodes']) >= count: raise ValueError('Episode target must exceed existing count')
@@ -191,7 +201,7 @@ def source(request, output, publish, bridge):
                     time.sleep(max(0., 1 / env.hz - (time.monotonic() - start)))
                 if not discard and not quit_recording and writer.rows:
                     writer.provenance['leader_target_limits'] = {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))}
-                    name = writer.save(env.backend.is_success())
+                    name = writer.save(env.backend.is_success(),success_source='simulation_place_condition')
                     print('Saved ' + name, flush=True)
                 if quit_recording:
                     break
@@ -277,10 +287,11 @@ def train(request, output):
     stats_path = dataset / 'statistics.json'
     stats = json.loads(stats_path.read_text())
     manifest = json.loads((dataset / 'manifest.json').read_text())
-    for entry in manifest['episodes']:
-        outcome = json.loads((dataset / entry['path'] / 'outcome.json').read_text())
-        if outcome.get('validation_only'):
-            raise ValueError('Synthetic smoke data cannot be trained')
+    if not manifest.get('storage'):
+        for entry in manifest['episodes']:
+            outcome = json.loads((dataset / entry['path'] / 'outcome.json').read_text())
+            if outcome.get('validation_only'):
+                raise ValueError('Synthetic smoke data cannot be trained')
     Episodes(dataset / 'manifest.json', stats, cfg, 'train')
     Episodes(dataset / 'manifest.json', stats, cfg, 'val')
     identity = fingerprint(dataset)
@@ -297,6 +308,8 @@ def train(request, output):
     subprocess.run(argv, cwd=ROOT, env=worker_environment(ROOT), check=True)
     if fingerprint(dataset) != identity:
         raise ValueError('Training dataset changed during the run')
+    if manifest.get('storage') and fingerprint(manifest['storage']['root'])!=manifest['storage']['sha256']:
+        raise ValueError('LeRobot dataset changed during the run')
     if not (model / 'best.pt').is_file() or not (model / 'last.pt').is_file():
         raise ValueError('Model trainer did not produce complete checkpoints')
     import xml.etree.ElementTree as ET
@@ -316,9 +329,10 @@ def train(request, output):
 
 
 def train_from_lerobot(artifact, options, output):
-    """Adapt the selected LeRobot frames; preserve measured state and action alignment."""
+    """Publish small index/statistics only; Episodes reads original Parquet/MP4 lazily."""
     from ..so101_joint_mapping import RobotCoordinates
-    from .episodes import prepare_dataset
+    from .episodes import split_episodes
+    from ..learning.minivla.data import fit_statistics
     from .artifacts import fingerprint
     root = Path(artifact['path'])
     if options.get('resume_checkpoint'):
@@ -338,56 +352,59 @@ def train_from_lerobot(artifact, options, output):
     info = json.loads((root / 'meta/info.json').read_text())
     ds = LeRobotDataset(options.get('dataset_repo_id', info.get('repo_id', 'local/so101')), root=root)
     output.mkdir(parents=True, exist_ok=False)
-    source = output / 'canonical_source'; source.mkdir()
-    coords = RobotCoordinates()
+    provenance = artifact.get('provenance', {})
+    coordinate_contract=artifact['coordinates']
+    from ..representation import describe
+    from ..so101_dataset_contract import JOINT_SPACE,read_contract
+    describe(coordinate_contract)
+    if coordinate_contract!=read_contract(root) or coordinate_contract['action_space']!=JOINT_SPACE:
+        raise ValueError('LeRobot training requires unchanged model-radian coordinates')
+    endpoints=provenance.get('canonical_coordinates') or {}
+    coords = RobotCoordinates(endpoints.get('gripper_closed_rad'),endpoints.get('gripper_open_rad'))
     manifest = {'schema_version': 1, 'joint_names': list(coords.metadata()['joint_order']),
         'units': ['rad'] * 5 + ['fraction'], 'control_hz': info['fps'],
         'action_semantics': 'absolute_target_after_observation', 'episodes': [],
         'cameras':[k.removeprefix('observation.images.').removesuffix('_cam') for k in info['features'] if k.startswith('observation.images.')]}
+    source_identity=fingerprint(root)
+    manifest['storage']={'format':'lerobot','root':str(root.resolve()),'repo_id':options.get('dataset_repo_id',info.get('repo_id','local/so101')),
+        'sha256':source_identity,'coordinate_contract':coordinate_contract,'canonical_coordinates':coords.metadata(),
+        'action_source':coordinate_contract.get('action_source') or provenance.get('action_source'),
+        'camera_keys':{k.removeprefix('observation.images.').removesuffix('_cam'):k for k in info['features'] if k.startswith('observation.images.')},
+        'decode':'torchcodec_cpu_exact','num_workers':0,'decoder_cache_limit':2,'rgb_cache_frames':8,'rgb_cache_bytes':16*2**20}
     # Converted generated variants need explicit source groups, never random frame splitting.
-    provenance = artifact.get('provenance', {})
-    generated = bool(provenance.get('generation_method') or provenance.get('source_env_args', {}).get('generation')) or 'datagen' in str(provenance.get('source_dataset', '')).lower()
     source_groups = options.get('source_groups') or provenance.get('source_groups', {})
     source_tasks = {str(e['episode_index']):e.get('task_definition') for e in provenance.get('episodes',[])}
-    if generated and not source_groups:
-        raise ValueError('MiniVLA split requires source_groups for generated LeRobot episodes')
-    by_episode = {}
-    for i in range(len(ds)):
-        index = int(ds.hf_dataset[i]['episode_index'])
-        by_episode.setdefault(index, []).append(i)
-    for index, indices in sorted(by_episode.items()):
+    if not source_groups or any(str(g).startswith('UNKNOWN:') for g in source_groups.values()):
+        raise ValueError('MiniVLA Direct split requires verified source_groups; unknown generated lineage cannot be split independently')
+    for meta in ds.meta.episodes:
+        index=int(meta['episode_index']);start,end=int(meta['dataset_from_index']),int(meta['dataset_to_index'])
         if source_groups and str(index) not in source_groups:
             raise ValueError('Source group mapping must cover every episode')
-        rows = [ds[i] for i in indices]
-        name = f'episode_{index:04d}'; folder = source / name; folder.mkdir()
-        states = np.stack([r['observation.state'].numpy() for r in rows])
-        actions = np.stack([r['action'].numpy() for r in rows])
-        np.save(folder / 'state.npy', coords.to_policy(states, measured=True))
-        np.save(folder / 'action.npy', coords.to_policy(actions))
-        np.save(folder / 'raw_state.npy', states); np.save(folder / 'raw_action.npy', actions)
-        times = np.arange(len(rows), dtype=float) / info['fps']
-        for camera in manifest['cameras']:
-            key='observation.images.'+camera+'_cam'
-            frames=np.stack([np.clip(r[key].numpy().transpose(1,2,0)*255,0,255).astype(np.uint8) for r in rows])
-            np.save(folder/(camera+'.npy'),frames);np.save(folder/(camera+'_timestamp.npy'),times)
-        for key in ('timestamp','action_timestamp'):np.save(folder/(key+'.npy'),times)
-        atomic(folder / 'outcome.json', {'success': False, 'success_known': False, 'validation_only': False})
+        row=ds.hf_dataset[start];instruction=str(ds.meta.tasks.iloc[int(row['task_index'])].name)
+        name = f'episode_{index:04d}'
+        review=provenance.get('episode_review',{}).get(str(index),{})
+        if review.get('validation_only') or provenance.get('source_env_args',{}).get('validation_only'):
+            raise ValueError('Synthetic smoke data cannot be trained')
         scene_configuration=provenance.get('episode_scene_configurations',{}).get(str(index),provenance.get('scene_configuration'))
-        manifest['episodes'].append({'id': name, 'path': name, 'split': 'train', 'instruction': rows[0]['task'],
-            'group_id': source_groups.get(str(index), name),
+        manifest['episodes'].append({'id': name,'dataset_episode_index':index,'from_index':start,'to_index':end,'frames':end-start,
+            'split': 'train', 'instruction': instruction,
+            'group_id': source_groups[str(index)],
             'task_definition':source_tasks.get(str(index)) or (scene_configuration or {}).get('task_definition'),
-            'scene_configuration':scene_configuration})
-    atomic(source / 'manifest.json', manifest)
-    atomic(source / 'project_provenance.json', {'schema': 'so101.minivla-dataset/1',
+            'scene_configuration':scene_configuration,'recorded_review':review})
+    manifest['episodes'],_=split_episodes(manifest['episodes'])
+    prepared = output / 'dataset';prepared.mkdir()
+    atomic(prepared / 'manifest.json', manifest)
+    atomic(prepared / 'project_provenance.json', {'schema': 'so101.minivla-dataset/1',
         'workspace': artifact['workspace'], 'backend': artifact.get('backend', 'isaac'),
         'coordinates': coords.metadata(), 'task_definitions': artifact.get('tasks', []),
         'coordinate_contract': artifact['coordinates'],
-        'source_dataset': str(root), 'source_sha256': fingerprint(root),
+        'source_dataset': str(root.resolve()), 'source_sha256': source_identity,'loader':'lerobot_direct',
+        'source_groups':source_groups,
         'scene_configuration':provenance.get('scene_configuration'),
         'scene_configurations':provenance.get('scene_configurations',[]),
-        'episode_scene_configurations':provenance.get('episode_scene_configurations',{}), 'outcomes': 'unknown; preserving selected training data'})
-    prepared = output / 'dataset'
-    prepare_dataset(source, prepared, include_failed=True)
+        'episode_scene_configurations':provenance.get('episode_scene_configurations',{}),
+        'episode_review':provenance.get('episode_review',{}), 'outcomes': 'unknown; preserving selected training data'})
+    fit_statistics(prepared/'manifest.json',prepared/'statistics.json',manifest['cameras'])
     workspace = options['workspace']
     request = {'input': str(prepared), 'workspace': workspace,
         'config': options.get('model_config', str(MODEL_ROOT / 'configs/default.json')), 'options': options}

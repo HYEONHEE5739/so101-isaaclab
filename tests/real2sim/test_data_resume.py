@@ -3,6 +3,18 @@ import numpy as np
 from soarm101_lab.workflow.data_resume import combine
 
 
+def test_merge_rejects_different_simulation_calibration_before_modifying_output(tmp_path):
+    import pytest,json
+    from soarm101_lab.so101_dataset_contract import write_contract
+    paths=[tmp_path/'old.hdf5',tmp_path/'new.hdf5']
+    for path,mode in zip(paths,['urdf_identity','precision_bound_residual']):
+        with h5py.File(path,'w') as h:h.create_group('data').create_group('demo_0').create_dataset('actions',data=np.zeros((3,6)))
+        write_contract(path,{'schema':'so101.coordinate-contract/1','simulation_model':{'model_mode':mode}})
+    before=[p.read_bytes() for p in paths]
+    with pytest.raises(ValueError,match='calibration/robot/coordinate'):combine(*paths)
+    assert [p.read_bytes() for p in paths]==before
+
+
 def test_merge_preserves_previous_and_orders_completed_episodes(tmp_path):
     old = tmp_path / 'old.hdf5'
     new = tmp_path / 'new.hdf5'

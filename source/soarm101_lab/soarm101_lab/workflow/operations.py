@@ -239,6 +239,8 @@ class Operations:
             cli += ['scripts/real2sim/workspace.py', 'source-demo', ws, '--port', opts['port'],
                     '--dataset_file', str(output), '--num_episodes', str(opts.get('episodes', 1)),
                     '--episode_time_s', str(opts.get('episode_time_s', 20)), '--reset_time_s', str(opts.get('reset_time_s', 5)), '--device', device, *headless]
+            if opts.get('identity_sim_for_validation'):cli.append('--identity_sim_for_validation')
+            if opts.get('resume_data'):cli+=['--resume_data',str(opts['resume_data'])]
         elif stage == 'replay':
             cli += ['scripts/real2sim/workspace.py', 'replay', ws, '--dataset', path, '--report', str(output), '--device', device, *headless]
         elif stage in ('annotate', 'datagen'):

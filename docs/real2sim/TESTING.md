@@ -67,6 +67,19 @@ Renderer/engine guard를 테스트 때문에 우회하지 않는다. 최신 분�
 실제 Isaac GPU 렌더·20-frame HDF5 Replay·HDF5/LeRobot 변환 및 초기 실패 기록은
 `outputs/workflow_validation/active_scene_objects/REPORT.md` 참조. 모델 학습·물리 grasp 성공과 구분한다.
 
+## Data Curation 동기 재생 (2026-10-15)
+
+`test_curation.py`는 단일/다중 active object, 임의 Builder ID와 치수, 회전·이동된 base의
+Robot FK/EE/object 등록, canonical/HDF5 pre/post/initial-only, grasp/transport/place,
+timestamp 오류 거절, lazy RGB 및 UI worker/seek/필터, composition/group 선별과
+Export→Registry→Convert provenance/원본 보존을 검사한다. 대형 HDF5는 10000-frame sparse
+fixture이며 실제 18GiB RGB를 메모리에 적재하지 않는다. 파일 크기와 scalar frame read를 검사한다.
+
+MuJoCo/모델 group과 USD group은 독립 process로 실행한다. 실제 두 엔진의 pre-step 기록,
+Qt 저장 frame 재생, 영상/Parquet 변환과 MiniVLA 입력 adapter 실행은 별도 probe다.
+로그·명령·화면·최초 실패·실행 한계: `outputs/workflow_validation/curation_object_playback/REPORT.md`.
+검증용 home-hold/합성 fixture를 실제 성공 demonstration으로 등록하거나 학습하지 않는다.
+
 ## 3. Joint 변경 시 최소 검증
 
 - known degree → expected rad

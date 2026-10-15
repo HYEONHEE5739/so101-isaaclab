@@ -68,7 +68,8 @@ def test_intermediate_checkpoint_import_uses_training_provenance(tmp_path):
     dest = run / 'policy/checkpoints/040000'
     dest.parent.mkdir(parents=True)
     shutil.move(str(root), dest)
-    artifact.update(id='dataset-id', tasks=[{'task_id': 'pick'}], workspace={'id': 'w'})
+    review={'0':{'recorded_success':True,'success_source':'operator_saved_unverified','pose_reference':{'episode':'demo_0','source_dataset':'recorded.hdf5'}}}
+    artifact.update(id='dataset-id', tasks=[{'task_id': 'pick'}], workspace={'id': 'w'},provenance={'episode_review':review})
     model = dest / 'pretrained_model'
     for name in ('policy_preprocessor.json', 'policy_postprocessor.json'):
         (model / name).write_text('{}')
@@ -83,6 +84,7 @@ def test_intermediate_checkpoint_import_uses_training_provenance(tmp_path):
     result = import_checkpoint(dest, Registry())
     assert result['path'] == str(model)
     assert json.loads((model / 'workflow_provenance.json').read_text())['workspace'] == {'id': 'w'}
+    assert json.loads((model / 'workflow_provenance.json').read_text())['episode_review']==review
     (model / 'workflow_provenance.json').unlink()
     (run / 'request.json').unlink()
     with pytest.raises(ValueError, match='provenance missing'):

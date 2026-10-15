@@ -8,6 +8,7 @@ from html import escape
 
 # key: (JSON type, suggested/default value, explanation)
 FIELDS = {
+    'identity_sim_for_validation':('true/false',False,'명시적 URDF 원형 검증: Scene 관절 잔차만 제외합니다. Hardware Precision은 유지합니다. 파생 단계는 원본 모델 계약을 상속합니다.'),
     'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
     'output': ('문자열', '', '선택. 비우면 고유 run 폴더에 자동 저장합니다. 직접 지정할 때는 아직 존재하지 않는 경로를 사용하세요.'),
     'device': ('문자열', 'cuda:0', '실행 장치. 예: cuda:0. Isaac 작업에는 현재 NVIDIA GPU 설정을 유지하세요.'),
@@ -43,7 +44,7 @@ FIELDS = {
     'enable_motion': ('true/false', False, '실제 모터 동작 허용. 실제 평가를 의도할 때만 true로 변경하세요.'),
 }
 KEYS = {
-    'source': ['device', 'renderer', 'output'],
+    'source': ['identity_sim_for_validation','device', 'renderer', 'output'],
     'replay': ['device', 'renderer', 'output'],
     'annotate': ['device', 'renderer', 'output'],
     'datagen': ['num_successful_demos', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],

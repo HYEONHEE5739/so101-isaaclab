@@ -147,6 +147,7 @@ def train(artifact, options, output):
            'task_definitions': artifact.get('tasks') or options.get('tasks', []),
            'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
            'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
+           'episode_review':artifact.get('provenance',{}).get('episode_review',{}),
            'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{})})
 
 
@@ -187,6 +188,7 @@ def import_checkpoint(path, registry):
         'training': config, 'task_definitions': artifact.get('tasks', []),
         'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
         'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
+        'episode_review':artifact.get('provenance',{}).get('episode_review',{}),
         'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{}),
         'checkpoint_import': True})
     return registry.register('policy', model, parents=[artifact['id']])

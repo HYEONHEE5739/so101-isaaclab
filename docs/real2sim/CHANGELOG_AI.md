@@ -1,3 +1,24 @@
+## 2026-10-15 — LeRobot Direct 및 Precision/Sim 모델 계약 통합
+
+- 기존 MiniVLA Episodes에 CPU lazy MP4/숫자 Parquet 경로 추가. 학습 준비 RGB NPY 복제 제거.
+- group split/train-only stats/H40/단위/시각 유지, dataset byte identity Resume 검사와 과거 loader 보존.
+- precision.simulation_configuration에서 hardware role mapping과 model residual을 분리해 공통 결정.
+- Source/Runtime은 검증된 binding, Replay/Annotation/DataGen/SimEval은 기록 모델 상속. IK/Physics 대응.
+- Real Eval은 Follower model 호환성 사전 검사. Sim 잔차는 hardware target에 적용하지 않음.
+- 기존 Curation/ACT/SmolVLA/identity debug/장치 검사 보존. 모델/보정/원본 데이터 변경 없음.
+- 435 PASS/2 SKIP, 실제 Qwen F/B/optimizer/Resume와 Isaac/MuJoCo 모델 비교. 하드웨어 미사용.
+- 실행·실패·사용법·보존: outputs/workflow_validation/lerobot_direct_calibration/REPORT.md.
+
+## 2026-10-15 — Data Curation Robot/Object 재생 및 학습 연계
+
+- 기존 Curation dialog에 recorded active object geometry/path, Robot/EE 공통 base frame, RGB lazy playback와 이벤트 동기화.
+- Summary chunk read, selected plot 최대1500sample, 8frame/16MiB cache와 기존 Qt worker/seek coalescing.
+- MuJoCo target pose 재사용/distractor compact pose 추가. Isaac Source/Mimic pre-step pose/timestamp 기록.
+- 구형 initial-only 경로는 unavailable, 실제 post-state만 initial+shift로 해석. 미기록 movement/성공 추정 없음.
+- 기존 지표+물체 이동/Lift/거리/기록 event, Task/active/Scene/group/status filter와 구성별 분포 선별.
+- subset/Registry/Convert/학습 provenance에 기존 group/annotation/success 보존. 모델 구조·원본 데이터·장치 경로 유지.
+- 실행 범위/초기 실패/회귀: outputs/workflow_validation/curation_object_playback/REPORT.md.
+
 ## 2026-10-15 — Workspace 선택형 조작 물체 / Workflow 전달
 
 - 기존 TaskSelector에 Scene objects 체크박스/count/Workspace별 선택 저장. Task 충돌은 명시적으로 처리.

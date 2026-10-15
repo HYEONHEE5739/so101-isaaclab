@@ -3,10 +3,10 @@ import json
 from pathlib import Path
 import numpy as np
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal, QThread, QTimer, QElapsedTimer
-from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF
+from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QImage, QPixmap
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QListWidget,
-    QListWidgetItem,QSpinBox,QFileDialog,QMessageBox,QSplitter,QCheckBox,QWidget,QSlider,QComboBox)
-from .curation import analyze, select_distribution, export_subset
+    QListWidgetItem,QSpinBox,QFileDialog,QMessageBox,QSplitter,QCheckBox,QWidget,QSlider,QComboBox,QFormLayout)
+from .curation import analyze, load_episode, EpisodeReader, select_distribution, export_subset
 
 
 class Job(QThread):
@@ -24,7 +24,7 @@ class Plot(QWidget):
     def __init__(self, mode):
         super().__init__();self.mode=mode;self.rows=[];self.row=None;self.excluded=set();self.selected=-1
         self.yaw=.7;self.pitch=.55;self.drag=None;self.screen=[];self.zoom=1.0
-        self.robot=None;self.frame=0;self.mesh=None
+        self.robot=None;self.frame=0;self.mesh=None;self.payload={};self.sample_frame=0
         self.setMinimumSize(240,200)
     def set_view(self, name):
         self.zoom=1.0
@@ -36,6 +36,11 @@ class Plot(QWidget):
         lo,hi=xyz.min(0),xyz.max(0)
         if self.robot is not None:
             lo=np.minimum(lo,self.robot_bounds[0]);hi=np.maximum(hi,self.robot_bounds[1])
+        for poses in self.row.get('object_paths',{}).values():
+            if poses is not None:
+                points=poses[:,:3,3];lo=np.minimum(lo,points.min(0)-.03);hi=np.maximum(hi,points.max(0)+.03)
+        for pose in self.payload.get('initial_object_poses',{}).values():
+            if pose is not None:lo=np.minimum(lo,pose[:3,3]-.03);hi=np.maximum(hi,pose[:3,3]+.03)
         pad=np.maximum((hi-lo)*.12,.01)
         return lo-pad,hi+pad
 
@@ -46,8 +51,11 @@ class Plot(QWidget):
             a,b=self.yaw,self.pitch
             p=p@np.array([[np.cos(a),-np.sin(a),0],[np.sin(a),np.cos(a),0],[0,0,1]])
             p=p@np.array([[1,0,0],[0,np.cos(b),-np.sin(b)],[0,np.sin(b),np.cos(b)]])
-            # Equal metric scale on all axes, stable while rotating.
-            scale=max(1,min(self.width()-150,self.height()-125))/max(np.linalg.norm(hi-lo),1e-6)
+            # Equal metric scale; fit the projected box rather than its 3D diagonal.
+            a,b=self.yaw,self.pitch
+            rot=np.array([[np.cos(a),-np.sin(a),0],[np.sin(a),np.cos(a),0],[0,0,1]])@np.array([[1,0,0],[0,np.cos(b),-np.sin(b)],[0,np.sin(b),np.cos(b)]])
+            span=(hi-lo)@np.abs(rot)
+            scale=min(max(1,self.width()-90)/max(span[0],1e-6),max(1,self.height()-80)/max(span[1],1e-6))
             p=p[:,:2]*scale*self.zoom
         else:
             p=p[:,:2];lo=p.min(0);span=np.maximum(p.max(0)-lo,1e-6)
@@ -78,10 +86,39 @@ class Plot(QWidget):
                 painter.drawEllipse(point,2,2)
                 offset=QPointF(5,14+axis*12 if t==0 else -6)
                 painter.drawText(point+offset,f'{name} {v[axis]*1000:.0f}')
-    def set_frame(self,frame):
+    def set_frame(self,frame,payload=None):
         self.frame=frame
-        self.mesh=self.robot.triangles(self.row['robot_q'][frame]) if self.robot is not None else None
+        self.payload=payload or {}
+        samples=self.row.get('sample_indices',np.arange(len(self.row['ee'])))
+        self.sample_frame=int(np.clip(np.searchsorted(samples,frame),0,len(samples)-1))
+        q=self.payload.get('robot_q')
+        if q is None and self.row.get('robot_q') is not None:q=self.row['robot_q'][self.sample_frame]
+        self.mesh=self.robot.triangles(q) if self.robot is not None and q is not None else None
         self.update()
+
+    def draw_objects(self,painter):
+        from .robot_preview import object_triangles
+        for name,poses in self.row.get('object_paths',{}).items():
+            spec=self.row.get('object_specs',{}).get(name,{})
+            rgb=spec.get('appearance',{}).get('color',[.6,.65,.7]);color=QColor(*[int(np.clip(v,0,1)*255) for v in rgb])
+            target=name==self.row.get('pick_object_id');painter.setPen(QPen(color.lighter(160),2 if target else 1,Qt.PenStyle.SolidLine if target else Qt.PenStyle.DashLine))
+            if poses is not None:
+                points=self.project(poses[:,:3,3])
+                for a,b in zip(points,points[1:]):painter.drawLine(a,b)
+            pose=self.payload.get('object_poses',{}).get(name)
+            if pose is None:
+                initial=self.payload.get('initial_object_poses',{}).get(name)
+                if initial is not None:
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    point=self.project([initial[:3,3]])[0];painter.drawEllipse(point,5,5);painter.drawText(point,name+' initial only')
+                continue
+            if spec.get('dimensions_m') and spec.get('shape'):
+                triangles=object_triangles(spec,pose);fill=QColor(color);fill.setAlpha(100);painter.setBrush(fill)
+                vertices=self.project(triangles.reshape(-1,3))
+                for i in range(len(triangles)):painter.drawPolygon(QPolygonF(vertices[3*i:3*i+3]))
+            point=self.project([pose[:3,3]])[0];painter.setBrush(color);painter.drawEllipse(point,4,4)
+            painter.setPen(QColor('#ffffff' if target else '#b5c5d3'))
+            painter.drawText(point,name+(' [Target]' if target else ' [Distractor]'))
 
     def draw_robot(self,painter):
         if self.mesh is None:return
@@ -102,36 +139,44 @@ class Plot(QWidget):
     def paintEvent(self,event):
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
-        title={'scatter':'초기 목표 물체 · Workspace XY [mm]','trajectory':'EE 경로 · XYZ [mm] · 드래그 회전 / 휠 확대·축소','actions':'관절 목표값 [rad] · 가로축: 시간 [s]'}[self.mode]
+        title={'scatter':'초기 목표 물체 · Workspace XY [mm]','trajectory':'Robot / EE / Objects · '+str((self.row or {}).get('display_frame',''))+' [mm]','actions':'관절 목표값 [rad] · 가로축: 시간 [s]'}[self.mode]
         painter.drawText(12,22,title)
         if self.mode=='scatter' and self.rows:
             self.screen=self.project([r['xy'] for r in self.rows])
             for i,(row,point) in enumerate(zip(self.rows,self.screen)):
+                selected=getattr(self,'original_indices',list(range(len(self.rows))))[i]==self.selected
                 color='#66717d' if row['name'] in self.excluded else '#efb467' if row['flags'] else '#55d6b0'
-                painter.setPen(QPen(QColor('#ffffff' if i==self.selected else color),2))
-                painter.setBrush(QColor(color));painter.drawEllipse(point,6 if i==self.selected else 4,6 if i==self.selected else 4)
+                painter.setPen(QPen(QColor('#ffffff' if selected else color),2))
+                painter.setBrush(QColor(color));painter.drawEllipse(point,6 if selected else 4,6 if selected else 4)
             xy=np.asarray([r['xy'] for r in self.rows])*1000
             painter.setPen(QColor('#b5c5d3'));painter.drawText(12,self.height()-10,f"X {xy[:,0].min():.1f} … {xy[:,0].max():.1f} / Y {xy[:,1].min():.1f} … {xy[:,1].max():.1f} mm")
         elif self.row and self.mode=='trajectory':
             self.draw_axes(painter)
             self.draw_robot(painter)
+            self.draw_objects(painter)
             points=self.project(self.row['ee']);painter.setPen(QPen(QColor('#55d6b0'),2))
             for i,(a,b) in enumerate(zip(points,points[1:])):
-                painter.setPen(QPen(QColor('#55d6b0' if i<self.frame else '#4b6870'),2));painter.drawLine(a,b)
-            painter.setPen(QColor('#ffffff'));painter.setBrush(QColor('#ffffff'));painter.drawEllipse(points[self.frame],6,6)
+                painter.setPen(QPen(QColor('#55d6b0' if i<self.sample_frame else '#4b6870'),2));painter.drawLine(a,b)
+            current=self.project([self.payload['ee']])[0] if 'ee' in self.payload else points[self.sample_frame]
+            painter.setPen(QColor('#ffffff'));painter.setBrush(QColor('#ffffff'));painter.drawEllipse(current,6,6)
             for point,label,color in [(points[0],'START','#55d6b0'),(points[-1],'END','#efb467')]:
                 painter.setPen(QColor(color));painter.drawEllipse(point,5,5);painter.drawText(point,label)
             xyz=np.asarray(self.row['ee']);painter.drawText(12,self.height()-10,'XYZ span [mm]: '+str(np.round(np.ptp(xyz,axis=0)*1000,1)))
         elif self.row and self.mode=='actions':
             q=np.asarray(self.row['actions']);low=q.min();span=max(q.max()-low,1e-6)
+            indices=self.row.get('sample_indices',np.arange(len(q)));total=max(self.row.get('frames',len(q))-1,1)
+            times=self.row.get('timestamps')
+            def phase(i):return (times[i]-times[0])/max(times[-1]-times[0],1e-9) if times is not None else i/total
             colors=['#55d6b0','#69b9ff','#efb467','#d196fa','#fb9292','#e5e7eb']
             for j,color in enumerate(colors):
                 painter.setPen(QPen(QColor(color),1))
-                points=[QPointF(35+i/max(len(q)-1,1)*(self.width()-55),self.height()-35-(v-low)/span*(self.height()-75)) for i,v in enumerate(q[:,j])]
+                points=[QPointF(35+phase(indices[i])*(self.width()-55),self.height()-35-(v-low)/span*(self.height()-75)) for i,v in enumerate(q[:,j])]
                 for a,b in zip(points,points[1:]):painter.drawLine(a,b)
                 painter.drawText(15+j*65,40,str(j+1))
             painter.setPen(QPen(QColor('#ffffff'),1))
-            x=35+self.frame/max(len(q)-1,1)*(self.width()-55);painter.drawLine(QPointF(x,45),QPointF(x,self.height()-35))
+            x=35+phase(self.frame)*(self.width()-55);painter.drawLine(QPointF(x,45),QPointF(x,self.height()-35))
+            for label,index in self.row.get('events',{}).items():
+                x=35+phase(index)*(self.width()-55);painter.setPen(QPen(QColor('#efb467'),1,Qt.PenStyle.DashLine));painter.drawLine(QPointF(x,45),QPointF(x,self.height()-35));painter.drawText(QPointF(x,55),label)
             painter.drawText(12,self.height()-10,f"0 … {self.row['duration']:.2f}s / {low:.2f} … {q.max():.2f} rad (1–5 arm, 6 gripper)")
         painter.end()
     def wheelEvent(self,event):
@@ -146,7 +191,8 @@ class Plot(QWidget):
         self.drag=event.position()
         if self.mode=='scatter' and self.screen:
             d=[(p.x()-self.drag.x())**2+(p.y()-self.drag.y())**2 for p in self.screen]
-            if min(d)<225:self.picked.emit(int(np.argmin(d)))
+            if min(d)<225:
+                index=int(np.argmin(d));self.picked.emit(getattr(self,'original_indices',list(range(len(d))))[index])
     def mouseMoveEvent(self,event):
         if self.drag is not None and self.mode=='trajectory':
             delta=event.position()-self.drag;self.yaw+=delta.x()*.01;self.pitch+=delta.y()*.01
@@ -157,6 +203,7 @@ class Plot(QWidget):
 class CurationDialog(QDialog):
     def __init__(self,registry,parent=None):
         super().__init__(parent);self.registry=registry;self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None
+        self.reader=None;self.frame_job=None;self.pending_frame=None;self.generation=0;self.seek_generation=0;self.pending_selection=None
         self.setWindowTitle('Data Curation · 분포와 동작 검토');self.resize(1400,900)
         layout=QVBoxLayout(self);bar=QHBoxLayout();layout.addLayout(bar)
         load=QPushButton('데이터 열기');load.clicked.connect(self.open_file);bar.addWidget(load)
@@ -170,6 +217,11 @@ class CurationDialog(QDialog):
         left=QWidget();ll=QVBoxLayout(left);split.addWidget(left)
         self.scatter=Plot('scatter');ll.addWidget(self.scatter,1)
         self.only_flags=QCheckBox('확인 필요 에피소드만 표시');self.only_flags.toggled.connect(self.refresh_list);ll.addWidget(self.only_flags)
+        self.filters={};form=QFormLayout();ll.addLayout(form)
+        for key,label in [('task_id','Task'),('active_object_count','Active count'),('active_object_ids','Active IDs'),('pick_object_id','Target'),
+                          ('scene_configuration','Scene hash'),('source_group','Source group'),('recorded_success','Recorded success'),('annotation_status','Annotation')]:
+            combo=QComboBox();combo.addItem('전체',None);combo.currentIndexChanged.connect(self.refresh_list)
+            self.filters[key]=combo;form.addRow(label,combo)
         self.list=QListWidget();ll.addWidget(self.list,1)
         self.exclude=QPushButton('선택 episode 제외 / 복원');self.exclude.clicked.connect(self.toggle);ll.addWidget(self.exclude)
         right=QWidget();rl=QVBoxLayout(right);split.addWidget(right)
@@ -188,7 +240,10 @@ class CurationDialog(QDialog):
         self.rate.currentIndexChanged.connect(self.pause);playbar.addWidget(self.rate);rl.addLayout(playbar)
         self.play_timer=QTimer(self);self.play_timer.setInterval(33);self.play_timer.timeout.connect(self.advance)
         self.elapsed=QElapsedTimer();self.play_start=0;self.robot_cache={}
-        self.actions=Plot('actions');rl.addWidget(self.actions,1)
+        self.actions=Plot('actions');self.actions.setMinimumHeight(145);rl.addWidget(self.actions,1)
+        rgbbar=QHBoxLayout();rgbbar.addWidget(QLabel('RGB'));self.camera=QComboBox();self.camera.currentIndexChanged.connect(lambda:self.seek(self.timeline.value()))
+        rgbbar.addWidget(self.camera);self.event_label=QLabel('Annotation unavailable');self.event_label.setWordWrap(True);rgbbar.addWidget(self.event_label,1);rl.addLayout(rgbbar)
+        self.rgb=QLabel('RGB unavailable');self.rgb.setAlignment(Qt.AlignmentFlag.AlignCenter);self.rgb.setMinimumSize(240,160);self.rgb.setMaximumHeight(210);rl.addWidget(self.rgb)
         split.setSizes([450,850])
         self.scatter.picked.connect(self.select);self.list.currentItemChanged.connect(self.from_list)
     def pause(self,*args):
@@ -202,34 +257,70 @@ class CurationDialog(QDialog):
 
     def advance(self):
         speed=(.25,.5,1.,2.)[self.rate.currentIndex()]
-        frame=self.play_start+int(self.elapsed.elapsed()/1000*speed/self.trajectory.row.get('dt',1/30))
+        times=self.trajectory.row.get('timestamps')
+        frame=int(np.searchsorted(times,times[self.play_start]+self.elapsed.elapsed()/1000*speed,side='right')-1) if times is not None else self.play_start+int(self.elapsed.elapsed()/1000*speed/self.trajectory.row.get('dt',1/30))
         self.timeline.blockSignals(True);self.timeline.setValue(min(frame,self.timeline.maximum()));self.timeline.blockSignals(False)
         self.show_frame(self.timeline.value())
         if frame>=self.timeline.maximum():self.pause()
 
     def seek(self,frame):
-        self.pause();self.show_frame(frame)
+        self.pause();self.seek_generation+=1;self.show_frame(frame)
 
     def show_frame(self,frame):
-        self.trajectory.set_frame(frame)
+        if self.trajectory.row is None:return
+        if self.reader is not None:
+            self.pending_frame=(self.generation,frame,self.camera.currentData())
+            self.start_frame_job();return
+        self.apply_frame({'index':frame})
+
+    def start_frame_job(self):
+        if self.frame_job is not None or self.pending_frame is None:return
+        generation,frame,camera=self.pending_frame;self.pending_frame=None;reader=self.reader;seek_generation=self.seek_generation
+        if reader is None:return
+        self.frame_job=Job(lambda:reader.frame(frame,camera),self)
+        self.frame_job.result.connect(lambda payload:self.apply_frame(payload) if generation==self.generation and seek_generation==self.seek_generation else None)
+        self.frame_job.failed.connect(lambda error:self.info.setText(error) if generation==self.generation else None)
+        def finished():
+            self.frame_job=None;self.start_frame_job()
+        self.frame_job.finished.connect(finished);self.frame_job.finished.connect(self.frame_job.deleteLater);self.frame_job.start()
+
+    def apply_frame(self,payload):
+        frame=payload['index'];self.trajectory.set_frame(frame,payload)
+        self.timeline.blockSignals(True);self.timeline.setValue(frame);self.timeline.blockSignals(False)
         dt=self.trajectory.row.get('dt',1/30)
         self.actions.frame=frame;self.actions.update()
-        self.clock_label.setText(f'{frame*dt:.2f}s / {self.timeline.maximum()*dt:.2f}s · {frame+1} frame')
+        times=self.trajectory.row.get('timestamps');start=times[0] if times is not None else 0
+        stamp=payload.get('timestamp',frame*dt)
+        duration=times[-1]-start if times is not None else self.timeline.maximum()*dt
+        self.clock_label.setText(f'{stamp-start:.2f}s / {duration:.2f}s · {frame+1} frame')
+        self.event_label.setText(' · '.join(f'{n}: frame {i+1}'+(' ✓' if frame>=i else '') for n,i in self.trajectory.row.get('events',{}).items()) or 'Grasp/Place annotation unavailable')
+        if payload.get('rgb') is not None:
+            rgb=payload['rgb'];h,w,_=rgb.shape;picture=QImage(rgb.data,w,h,rgb.strides[0],QImage.Format.Format_RGB888).copy()
+            self.rgb.setPixmap(QPixmap.fromImage(picture).scaled(self.rgb.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+        elif self.reader is not None:self.rgb.clear();self.rgb.setText('RGB unavailable')
 
     def error(self,exc):QMessageBox.warning(self,'Curation',str(exc))
     def run_job(self,fn,done):
         if self.job is not None and self.job.isRunning():
             self.error('현재 분석/저장이 끝난 뒤 실행하세요.');return
-        self.job=Job(fn,self)
-        self.job.result.connect(done);self.job.failed.connect(self.error)
+        self.job=Job(fn,self);result=[];errors=[]
+        self.job.result.connect(result.append);self.job.failed.connect(errors.append)
+        def finish():
+            self.job=None
+            if errors:self.error(errors[0])
+            elif result:done(result[0])
+            if self.pending_selection is not None:
+                index=self.pending_selection;self.pending_selection=None;self.select(index)
+        self.job.finished.connect(finish);self.job.finished.connect(self.job.deleteLater)
         self.job.start()
     def reject(self):
-        self.pause()
-        if self.job is not None and self.job.isRunning():
+        self.pause();self.pending_frame=None
+        if any(j is not None and j.isRunning() for j in (self.job,self.frame_job)):
             self.error('저장/분석 완료 후 닫아주세요.');return
         super().reject()
     def closeEvent(self,event):
-        if self.job is not None and self.job.isRunning():event.ignore()
+        self.pause();self.pending_frame=None
+        if any(j is not None and j.isRunning() for j in (self.job,self.frame_job)):event.ignore()
         else:super().closeEvent(event)
     def open_file(self):
         path,_=QFileDialog.getOpenFileName(self,'Source / Datagen HDF5', '', 'HDF5 (*.hdf5 *.h5)')
@@ -254,43 +345,80 @@ class CurationDialog(QDialog):
                     self.kind='annotated' if 'obs/datagen_info/subtask_term_signals/grasp' in g else 'source'
             if self.kind not in ('source','annotated','datagen'):raise ValueError('Source / Annotation / Datagen 데이터만 지원합니다.')
             self.count.setMaximum(len(self.rows));self.count.setValue(len(self.rows))
+            for key,combo in self.filters.items():
+                combo.blockSignals(True);combo.clear();combo.addItem('전체',None)
+                for value in sorted({self.filter_value(r,key) for r in rows}):combo.addItem(value,value)
+                combo.blockSignals(False)
             self.scatter.rows=self.rows;self.refresh_list();self.select(0)
         except Exception as exc:self.error(exc)
     def refresh_list(self):
         self.list.blockSignals(True);self.list.clear()
+        visible=[]
         for i,r in enumerate(self.rows):
             if self.only_flags.isChecked() and not r['flags']:continue
+            if any(c.currentData() is not None and self.filter_value(r,k)!=c.currentData() for k,c in self.filters.items()):continue
+            visible.append(i)
             text=('제외 · ' if r['name'] in self.excluded else '')+r['name']+' · '+r['task_id']+' · '+(', '.join(r['flags']) or '특이 지표 없음')
             item=QListWidgetItem(text);item.setData(Qt.ItemDataRole.UserRole,i);self.list.addItem(item)
-        self.list.blockSignals(False);self.scatter.excluded=self.excluded;self.scatter.update()
+        self.list.blockSignals(False);points=[i for i in visible if self.rows[i].get('xy') is not None]
+        self.scatter.rows=[self.rows[i] for i in points];self.scatter.original_indices=points
+        self.scatter.excluded=self.excluded;self.scatter.update()
         self.info.setText(f'포함 {len(self.rows)-len(self.excluded)} / 전체 {len(self.rows)} · 확인 필요 {sum(bool(r["flags"]) for r in self.rows)} · 원본 보존 / 회색=제외 · 지표는 불량 확정이 아닙니다.')
+
+    @staticmethod
+    def filter_value(row,key):
+        value=row.get(key)
+        if key=='scene_configuration':value=(value or {}).get('sha256')
+        if isinstance(value,(list,tuple)):return ', '.join(value)
+        return 'UNKNOWN' if value is None else str(value)
     def from_list(self,current,previous):
         if current:self.select(current.data(Qt.ItemDataRole.UserRole))
     def select(self,i):
-        self.pause()
-        r=self.rows[i];self.scatter.selected=i;self.scatter.update()
-        self.trajectory.robot=None;self.trajectory.mesh=None;self.trajectory.frame=0
-        path=r.get('robot_urdf')
-        if path and r.get('robot_q') is not None:
-            try:
+        if not 0<=i<len(self.rows):return
+        self.pause();self.generation+=1;generation=self.generation
+        self.scatter.selected=i;self.scatter.update();self.pending_frame=None;self.reader=None
+        self.trajectory.row=None;self.rgb.clear();self.rgb.setText('Episode loading…')
+        row=self.rows[i]
+        if 'data_ref' not in row:
+            self.install_episode(row,None,None);return
+        if self.job is not None and self.job.isRunning():
+            self.pending_selection=i;return
+        self.metrics.setText(row['name']+' · telemetry/URDF loading…')
+        def prepare():
+            loaded=load_episode(row);model=None;bounds=None;path=loaded.get('robot_urdf')
+            if path and loaded.get('robot_q') is not None and loaded['display_frame']=='robot_base':
                 from .robot_preview import RobotPreview
                 if path not in self.robot_cache:self.robot_cache[path]=RobotPreview(path)
-                model=self.robot_cache[path]
-                q=np.asarray(r['robot_q'],dtype=float)
-                if q.shape!=(len(r['ee']),6) or not np.isfinite(q).all():raise ValueError('관절 상태 길이/값 불일치')
-                # Link extents across the whole episode keep framing steady during playback.
-                lows=[];highs=[]
-                for state in q:
-                    poses=model.transforms(state)
-                    pts=np.array([t[:3,3] for t in poses.values()])
-                    lows.append(pts.min(0)-.07);highs.append(pts.max(0)+.07)
-                self.trajectory.robot_bounds=(np.min(lows,axis=0),np.max(highs,axis=0))
-                self.trajectory.robot=model
-            except Exception as exc:self.error(f'URDF 표시 실패: {exc}')
-        for p in (self.trajectory,self.actions):p.row=r;p.update()
-        self.timeline.blockSignals(True);self.timeline.setRange(0,len(r['ee'])-1);self.timeline.setValue(0);self.timeline.blockSignals(False)
+                model=self.robot_cache[path];q=np.asarray(loaded['robot_q'],dtype=float)
+                if q.shape!=(len(loaded['ee']),6) or not np.isfinite(q).all():raise ValueError('Recorded joint state alignment mismatch')
+                points=np.array([t[:3,3] for state in q[::max(1,len(q)//120)] for t in model.transforms(state).values()])
+                bounds=(points.min(0)-.07,points.max(0)+.07)
+            return loaded,model,bounds
+        self.run_job(prepare,lambda result:self.install_episode(*result) if generation==self.generation else None)
+
+    def install_episode(self,row,model,bounds):
+        self.trajectory.robot=model;self.trajectory.mesh=None;self.trajectory.frame=0
+        if bounds is not None:self.trajectory.robot_bounds=bounds
+        self.reader=EpisodeReader(row) if 'data_ref' in row else None
+        for plot in (self.trajectory,self.actions):plot.row=row;plot.update()
+        self.camera.blockSignals(True);self.camera.clear()
+        for name in row.get('cameras',{}):self.camera.addItem(name,name)
+        self.camera.blockSignals(False)
+        self.timeline.blockSignals(True);self.timeline.setRange(0,row.get('frames',len(row['ee']))-1);self.timeline.setValue(0);self.timeline.blockSignals(False)
         self.show_frame(0)
-        self.metrics.setText(f"{r['name']} · {r['task_id']}\n시간 {r['duration']:.2f}s · EE 정지 비율 {100*r['stop_fraction']:.1f}% (<2mm/s)\n정지 명령 비율 {100*r.get('command_stop_fraction',0):.1f}% (<1deg/s)\nArm 명령 가속도 RMS {r['jitter']:.2f} rad/s² · gripper {r['gripper_jitter']:.2f} rad/s²\n"+(' / '.join(r['flags']) or '통계적 이상 없음'))
+        def mm(value):return 'UNKNOWN' if value is None else f'{value*1000:.1f}mm'
+        missing=[n for n,v in row.get('object_paths',{}).items() if v is None]
+        self.metrics.setText(f"{row['name']} · {row['task_id']} · Target {row.get('pick_object_id','UNKNOWN')}\n"
+            f"Active {row.get('active_object_count','UNKNOWN')}: {', '.join(row.get('active_object_ids') or [])} · Group {row.get('source_group','UNKNOWN')}\n"
+            f"Scene {((row.get('scene_configuration') or {}).get('sha256') or 'UNKNOWN')[:16]} · Recorded success {self.filter_value(row,'recorded_success')} / Physical {self.filter_value(row,'physical_success')} ({row.get('success_source','unknown')})\n"
+            f"시간 {row['duration']:.2f}s · EE 정지 {100*row['stop_fraction']:.1f}% · 정지 명령 {100*row.get('command_stop_fraction',0):.1f}% · Jitter {row['jitter']:.2f} / {row['gripper_jitter']:.2f}rad/s²\n"
+            f"Target 이동 {mm(row.get('target_movement_m'))} · Lift {mm(row.get('lift_height_m'))} · EE 최소거리 {mm(row.get('target_ee_distance_m',{}).get('min'))}\n"
+            f"Grasp 전/후 이동 {mm(row.get('movement_before_grasp_m'))} / {mm(row.get('movement_after_grasp_m'))} · Annotation {row.get('annotation_status','UNAVAILABLE')}\n"
+            +('Trajectory unavailable: '+', '.join(missing) if missing else '')
+            +(' · 기하/모델 근거 없음: pose marker만 표시' if not row.get('object_specs') else '')
+            +'\n객체별 최소 접근: '+', '.join(n+': '+mm(v['min_distance_m']) for n,v in row.get('object_approach',{}).items())
+            +' · 접근 거리는 grasp 성공 판정이 아닙니다.')
+
     def toggle(self):
         if not self.rows:return
         name=self.rows[self.scatter.selected]['name']

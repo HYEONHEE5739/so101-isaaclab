@@ -102,6 +102,7 @@ class Runtime:
             workspace=getattr(self, 'live_workspace', None),
             precision=self.precision.status() if getattr(self, 'precision', None) else None,
             precision_run_configuration=getattr(self, 'precision_options', {}),
+            simulation_configuration=getattr(self,'simulation_configuration',None),
             precision_teleop_ready=self.precision_teleop_ready(),
         )
 
@@ -152,7 +153,8 @@ class Runtime:
         p = load(payload["profile"])
         self.precision_options = copy.deepcopy(payload.get('precision_options', {}))
         precision_residual_reference = None
-        if self.precision_options.get('use_precision'):
+        self.simulation_configuration=None
+        if self.precision_options.get('use_precision') and not payload.get('workspace'):
             from ..so101_robot_spec import simulation_joint_offsets
             offsets = simulation_joint_offsets(p.get('simulation_joint_offsets_rad'), JOINTS)
             if self.backend!='real' and np.any(abs(offsets) > 1e-12):
@@ -191,6 +193,14 @@ class Runtime:
         if self.live_workspace:
             from .workspaces.package import load as read_workspace
             workspace=read_workspace(self.live_workspace)
+            if self.backend!='real':
+                from .precision import approved_mappings,simulation_configuration,calibration_status
+                mappings=(approved_mappings(workspace,Path(self.args.workspace)/'joint_calibration') if self.precision_options.get('use_precision') else {}) if not payload.get('preview_only') else None
+                self.simulation_configuration=simulation_configuration(workspace,mappings=mappings,
+                    identity=self.precision_options.get('identity_sim_for_validation',False),backend=self.backend,hardware_role='follower')
+                if self.simulation_configuration['identity_sim']:
+                    p=copy.deepcopy(p);p.pop('simulation_joint_offsets_rad',None)
+                print('[WORKFLOW] '+calibration_status(self.simulation_configuration),flush=True)
             bindings=workspace['task'].get('real_camera_bindings',{})
             manifest=workspace['manifest']
             if manifest.get('builder'):
@@ -236,6 +246,11 @@ class Runtime:
                 if active:
                     attach_precision(adapter, role, active, model_hash); found = True
             if not found: raise ValueError('Activate a validated precision profile first')
+            if self.simulation_configuration is not None:
+                actual={role:self.mapper(role).metadata() for role in ('leader','follower') if getattr(getattr(self,role),'precision_mapper',None) is not None}
+                checked=simulation_configuration(workspace,mappings=actual,identity=self.precision_options.get('identity_sim_for_validation',False),backend=self.backend,hardware_role='follower')
+                if checked['precision_mappings']!=self.simulation_configuration['precision_mappings']:
+                    raise ValueError('Active mappings changed during Real/Sim connection')
             if precision_residual_reference is not None:
                 from ..so101_robot_spec import require_precision_simulation_binding
                 require_precision_simulation_binding(precision_residual_reference, self.mapper().metadata())
@@ -303,7 +318,8 @@ class Runtime:
                 raise ValueError('Real/Sim MuJoCo currently requires equal side/wrist resolutions')
             self.env = MujocoBackend(asset_dir, inputs, render_backend=self.args.renderer,
                                      width=w, height=h, timestep=1/300, decimation=10,
-                                     full_workspace=True, task_definition=getattr(self, 'task_definition', None))
+                                     full_workspace=True, task_definition=getattr(self, 'task_definition', None),
+                                     simulation_configuration=getattr(self,'simulation_configuration',None))
             # Live inspection shows the profile's measured layout, without reset randomization.
             for name in self.env.metadata['dynamic_objects']:
                 self.env.set_object_pose(name, p['objects'][name]['T_workspace'])
@@ -319,12 +335,7 @@ class Runtime:
         if self.live_workspace:
             from .workspaces.environment import make_config
             ec = make_config(self.live_workspace, self.args.device,
-                             task_definition=getattr(self, 'task_definition', None))
-            if getattr(self, 'precision_options', {}).get('use_precision') and self.precision_options.get('identity_sim_for_validation'):
-                # Session configuration only. Do not rewrite the immutable calibrated USD.
-                from .workspaces.package import load as load_workspace
-                w = load_workspace(self.live_workspace)
-                ec.scene.robot.spawn.usd_path = str(w['root']/w['manifest'].get('identity_robot_asset','assets/SO101/usd/so101_isaaclab.usd'))
+                             task_definition=getattr(self, 'task_definition', None),simulation=getattr(self,'simulation_configuration',None))
         else:
             ec = SO101TeleopEnvCfg()
         ec.scene.num_envs = 1
@@ -674,6 +685,7 @@ class Runtime:
             "joint_names": list(JOINTS),
             "joint_convention": CONVENTION,
             "sim_joint_mapping": self.mapper().metadata(),
+            'simulation_configuration':copy.deepcopy(getattr(self,'simulation_configuration',None)),
             'precision_run_configuration': copy.deepcopy(getattr(self, 'precision_options', {})),
             'tracking': self.tracking(native, real, sent, sim_q, observation_only=sent is None),
             'precision_observation_only':sent is None, 'joint_limit_warnings':limit_warnings,
@@ -780,6 +792,7 @@ class Runtime:
         self.images={n:p['rgb'] for n,p in packets.items() if p is not None}
         self.snapshot_data={'joint_names':list(JOINTS),'joint_convention':CONVENTION,
             'sim_joint_mapping':self.mapper().metadata(),'physical_follower_measured_joint_state':real,
+            'simulation_configuration':copy.deepcopy(getattr(self,'simulation_configuration',None)),
             'tracking':self.tracking(native,real,sent,observation_only=observation_only),'precision_run_configuration':copy.deepcopy(getattr(self,'precision_options',{})),
             'precision_observation_only':observation_only, 'joint_limit_warnings':limit_warnings,
             'precision_raw_feedback':{'leader':getattr(self.leader,'last_raw',None),'follower':getattr(getattr(self,'follower',None),'last_raw',None)},

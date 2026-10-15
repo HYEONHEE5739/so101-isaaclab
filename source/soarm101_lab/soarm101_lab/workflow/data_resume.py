@@ -26,6 +26,9 @@ def validate(stage, path, workspace, tasks, source=None, scene_configuration=Non
 def combine(previous, segment):
     """Atomic replacement of the NEW segment only; previous HDF5 is read-only."""
     import h5py
+    from ..so101_dataset_contract import read_contract
+    if read_contract(previous)!=read_contract(segment):
+        raise ValueError('Resume calibration/robot/coordinate contract differs; refusing to mix episode models')
     segment = Path(segment)
     temporary = segment.with_suffix('.merging.hdf5')
     try:

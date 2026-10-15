@@ -37,6 +37,9 @@ class EpisodeWriter:
                                env.backend.metadata['dynamic_objects'], backend='mujoco')['scene_configuration']
             self.provenance['scene_configuration'] = scene
             self.provenance['scene']['scene_configuration'] = copy.deepcopy(scene)
+        w=env.backend.workspace
+        self.provenance['workspace_path']=str(w['root']) if w.get('root') else None
+        self.provenance['scene']['robot_base_T_world']=copy.deepcopy(w['profile']['robot_base']['T_world'])
         self.instruction = instruction
         self.flush_manifest()
 
@@ -59,7 +62,7 @@ class EpisodeWriter:
         previous_contract = provenance.get('coordinate_contract') or {}
         current_contract = self.provenance.get('coordinate_contract') or {}
         if any(previous_contract.get(key) != current_contract.get(key)
-               for key in ('hardware_mapping', 'simulation_joint_frame')):
+               for key in ('hardware_mapping', 'simulation_joint_frame','simulation_model')):
             raise ValueError('Resume hardware calibration/collection coordinates differ; use a new dataset')
         for entry in manifest['episodes']:
             folder = (source / entry['path']).resolve()
@@ -84,9 +87,10 @@ class EpisodeWriter:
                           'camera_images': {n:a.copy() for n,a in observation.get('camera_images', {'side':observation['images'][0]}).items()},
                           'timestamp': observation['timestamp'],
                           'eef_pose': observation['eef_pose'].copy(),
+                          'object_poses': {n:observation['object_poses'][n].copy() for n in self.env.backend.metadata['dynamic_objects']},
                           'object_pose': observation['object_poses'][self.env.backend.metadata['pick']].copy()})
 
-    def save(self, success, validation_only=False):
+    def save(self, success, validation_only=False, success_source='unknown'):
         if not self.rows:
             raise ValueError('Cannot save an empty episode')
         name = f'episode_{len(self.manifest["episodes"]):04d}'
@@ -102,10 +106,22 @@ class EpisodeWriter:
             np.save(folder / (camera+'_timestamp.npy'), times)
         for key in ('timestamp', 'action_timestamp'):
             np.save(folder / f'{key}.npy', times)
+        # Reuse the existing target matrix/timestamps; only distractors need another compact array.
+        active=self.env.backend.metadata['dynamic_objects'];pick=self.env.backend.metadata['pick']
+        telemetry={pick:{'file':'object_pose.npy','pose_format':'matrix4','frame':'workspace','timestamp_file':'timestamp.npy'}}
+        others=[n for n in active if n!=pick]
+        if others:
+            from scipy.spatial.transform import Rotation
+            poses=np.array([[r['object_poses'][n] for n in others] for r in self.rows])
+            quat=Rotation.from_matrix(poses[...,:3,:3].reshape(-1,3,3)).as_quat().reshape(len(poses),len(others),4)[...,[3,0,1,2]]
+            np.save(folder/'object_poses.npy',np.concatenate([poses[...,:3,3],quat],axis=-1).astype(np.float32))
+            telemetry.update({n:{'file':'object_poses.npy','index':i,'pose_format':'xyz_wxyz','frame':'workspace','timestamp_file':'timestamp.npy'} for i,n in enumerate(others)})
         atomic(folder / 'replay.json', self.initial)
         atomic(folder / 'outcome.json', {'success': bool(success), 'validation_only': validation_only,
+                                       'success_source':success_source,
                                        'coordinates': self.env.coordinates.metadata()})
         entry = {'id': name, 'path': name, 'split': 'train', 'instruction': self.instruction,
+            'object_telemetry':telemetry,
             'scene_configuration':copy.deepcopy(self.provenance.get('scene_configuration')),
             'task_definition':copy.deepcopy(self.provenance['scene'].get('task_definition')),
                  'group_id': self.provenance['source_group_prefix'] + '/' + name}
@@ -118,6 +134,35 @@ class EpisodeWriter:
         atomic(self.root / 'manifest.json', self.manifest)
         self.provenance['coordinates'] = self.env.coordinates.metadata()
         atomic(self.root / 'project_provenance.json', self.provenance)
+
+
+def split_episodes(eligible,splits=None,require_validation=True):
+    """Existing deterministic source-group split, shared by NPY and direct LeRobot."""
+    if not eligible or (require_validation and len(eligible) < 2):
+        raise ValueError('At least two eligible independent source groups for train/val required')
+    groups = sorted({e['group_id'] for e in eligible})
+    if splits is None:
+        if require_validation and len(groups) < 2:
+            raise ValueError('Need independent train/val source groups')
+        # Deterministic group split. No frame split or generated-variant leakage.
+        assignment = {g: 'train' for g in groups}
+        if len(groups) >= 2: assignment[groups[-1]] = 'val'
+        if len(groups) >= 3:
+            assignment[groups[-2]] = 'test'
+        splits = {e['id']: assignment[e['group_id']] for e in eligible}
+    if set(splits) != {e['id'] for e in eligible}:
+        raise ValueError('Split map must cover exactly the eligible episode IDs')
+    entries = [{**{k: v for k, v in e.items() if not k.startswith('_')}, 'split': splits[e['id']]} for e in eligible]
+    grouped = {}
+    for entry in entries:
+        if entry['split'] not in ('train', 'val', 'test'):
+            raise ValueError('Prepared training split must be train/val/test')
+        if entry['group_id'] in grouped and grouped[entry['group_id']] != entry['split']:
+            raise ValueError('Source group leakage')
+        grouped[entry['group_id']] = entry['split']
+    if require_validation and not {'train', 'val'}.issubset(grouped.values()):
+        raise ValueError('Training and validation groups both required')
+    return entries,grouped
 
 
 def prepare_dataset(source, output, splits=None, include_failed=False, require_validation=True):
@@ -136,30 +181,7 @@ def prepare_dataset(source, output, splits=None, include_failed=False, require_v
         if outcome['success'] or include_failed:
             episode_arrays(entry, manifest.get('cameras',['side']), manifest['control_hz'])
             eligible.append(entry)
-    if not eligible or (require_validation and len(eligible) < 2):
-        raise ValueError('At least two eligible independent source groups for train/val required')
-    groups = sorted({e['group_id'] for e in eligible})
-    if splits is None:
-        if require_validation and len(groups) < 2:
-            raise ValueError('Need independent train/val source groups')
-        # Deterministic group split. No frame split or generated-variant leakage.
-        assignment = {g: 'train' for g in groups}
-        if len(groups) >= 2: assignment[groups[-1]] = 'val'
-        if len(groups) >= 3:
-            assignment[groups[-2]] = 'test'
-        splits = {e['id']: assignment[e['group_id']] for e in eligible}
-    if set(splits) != {e['id'] for e in eligible}:
-        raise ValueError('Split map must cover exactly the eligible episode IDs')
-    entries = [{**{k: v for k, v in e.items() if k != '_path'}, 'split': splits[e['id']]} for e in eligible]
-    grouped = {}
-    for entry in entries:
-        if entry['split'] not in ('train', 'val', 'test'):
-            raise ValueError('Prepared training split must be train/val/test')
-        if entry['group_id'] in grouped and grouped[entry['group_id']] != entry['split']:
-            raise ValueError('Source group leakage')
-        grouped[entry['group_id']] = entry['split']
-    if require_validation and not {'train', 'val'}.issubset(grouped.values()):
-        raise ValueError('Training and validation groups both required')
+    entries,grouped=split_episodes(eligible,splits,require_validation)
     output.mkdir(parents=True)
     for original, entry in zip(eligible, entries):
         shutil.copytree(original['_path'], output / entry['path'])
@@ -216,11 +238,16 @@ def convert_dataset(source, output, options):
     with h5py.File(intermediate, 'w') as h:
         data = h.create_group('data')
         data.attrs['env_args'] = json.dumps({'workspace': provenance['workspace'], 'task_definitions': definitions,
-            'scene_configuration':provenance.get('scene_configuration')})
+            'scene_configuration':provenance.get('scene_configuration'),'canonical_coordinates':provenance['coordinates']})
         for i, entry in enumerate(manifest['episodes']):
             folder = dataset / entry['path']; group = data.create_group(f'demo_{i}')
             group.attrs['task_definition'] = json.dumps(entry.get('task_definition') or definition)
             group.attrs['scene_configuration'] = json.dumps(entry.get('scene_configuration') or provenance.get('scene_configuration'))
+            outcome=json.loads((folder/'outcome.json').read_text())
+            group.attrs['success']=bool(outcome['success']);group.attrs['success_source']=outcome.get('success_source','unknown')
+            group.attrs['source_group']=entry['group_id']
+            if (folder/'annotation.json').is_file():group.attrs['annotation']= (folder/'annotation.json').read_text()
+            group.attrs['pose_reference']=json.dumps({'source_dataset':str(dataset.resolve()),'episode':entry['path'],'object_telemetry':entry.get('object_telemetry')})
             actions = np.load(folder / 'raw_action.npy', allow_pickle=False)
             group.create_dataset('actions', data=actions)
             group.create_dataset('joint_targets', data=actions)
@@ -399,7 +426,7 @@ def datagen(request, output, publish, bridge, environment_factory, preview):
                 except ValueError as exc:
                     success = False; reason = str(exc)
                 if success:
-                    name = writer.save(True)
+                    name = writer.save(True,success_source='simulation_stable_grasp_and_place')
                     writer.manifest['episodes'][-1]['group_id'] = entry['group_id']
                     writer.flush_manifest()
                     print('[WORKFLOW] Generated ' + name, flush=True)

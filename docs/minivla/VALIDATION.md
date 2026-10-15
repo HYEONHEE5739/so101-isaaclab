@@ -1,5 +1,37 @@
 # MiniVLA 검증 — 2026-10-15
 
+## LeRobot Direct / Precision·Sim 모델 통합
+
+최신 실행 근거는 `outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`다.
+아래 Flow-DiT 교체 검사는 별도 선행 결과다. 모델 구조/학습식/보정 계수는 바꾸지 않았다.
+
+| 검사 | 결과 |
+|---|---|
+| MiniVLA/Direct/기존 Canonical/Source/Replay/Fake Real Eval/UI/Resume |139 PASS, 1 SKIP|
+| 별도 USD/Precision/Fake hardware/Workspace/Snapshot/Task/기존 경로 |296 PASS, 1 SKIP|
+| 실제 MP4/Parquet 2episode·16frame·640×480 |state/action/chunk/mask/statistics 일치, RGB 최대 차이 0|
+| 학습 준비 생성물 |기존 29,504,444B → Direct 13,352B, NPY 0개|
+| 실제 Qwen NF4/Flow-DiT F/B/AdamW |두 loader 각각 2step, loss 동일; 저장 optimizer 재개 후 3step 완료|
+| Isaac Source/Pinocchio IK/PhysX |bound/identity 각각 3자세, 대응 URDF/USD FK 일치, Side/Wrist 렌더|
+| Isaac/MuJoCo 같은 q FK |bound/identity 모두 최대 행렬 원소 오차 <1e-6, target 불변|
+
+고유 자동 검사 435 PASS, 2 SKIP. Skip은 선택적인 Qwen processor 경로와 Blender executable
+미지정 검사다. 실제 GPU probe에서는 로컬 Qwen processor/가중치를 사용했다. 과거 데이터 계약,
+바뀐 byte identity Resume 거절, role별 mapping, residual mismatch/unknown 거절 및 identity
+debug, 1/2/3개 active 구성, Real Eval Activate 전 거절을 검사했다.
+
+작은 합성 format fixture 준비 프로세스의 peak RSS는 881.97→769.12MiB였다. GPU F/B의 peak
+allocated는 1.62612→1.62661GiB, reserved는 1.76758→1.77148GiB로 비슷하다. 그때 steady RSS는
+3643.13→3744.37MiB로 Direct가 더 컸다. 영상 전체의 디스크 복제를 없앴지만 학습 RAM/VRAM이
+일괄 감소했다고 주장하지 않는다. 한 프로세스에서 기존 loader가 먼저 GPU를 예열했으므로
+실행 시간 차이를 loader 속도 향상으로 해석하지 않는다. 모델 로드 중 process max RSS는 7189.03MiB.
+
+Source Group/Task/Scene은 synthetic 형식 fixture이며 실물 성공 데모가 아니다. 실제 Source 장치
+수집·완전한 성공 MimicGen trial·새 학습 정책의 pick/place 및 Real Eval은 HARDWARE_NOT_TESTED다.
+실패 로그와 보존 hash 검사, 단계별 호출 경로/재현 명령은 상세 보고서에 있다.
+
+## 선행 Flow-DiT 모델 교체 검사
+
 기존 MiniVLA를 Qwen3-VL-2B + Small Flow-DiT로 교체한 코드 기준이다.
 실행 근거: `outputs/workflow_validation/minivla_flow_dit/`. 사용자 Scene/Calibration/사진/
 Dataset/기존 checkpoint는 수정하지 않았다. 환경 dependency 설치/버전 변경 없음.

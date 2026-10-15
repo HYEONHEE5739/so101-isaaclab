@@ -41,7 +41,7 @@ def configure_rendering(backend):
 class MujocoBackend(SimBackend):
     def __init__(self, output_dir, workspace=None, *, render_backend='none', width=320, height=240,
                  timestep=.002, decimation=10, task_definition=None, full_workspace=False,
-                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None):
+                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None):
         if any(n.split('.')[0] in ('isaaclab', 'omni', 'pxr') for n in sys.modules):
             raise RuntimeError('Run MuJoCo in an independent worker without Isaac/Omniverse/USD imports')
         configure_rendering(render_backend)
@@ -52,9 +52,11 @@ class MujocoBackend(SimBackend):
         self.viewer = None
         self.closed = False
         self.width, self.height = width, height
+        if simulation_configuration is not None:identity_sim=simulation_configuration['identity_sim']
         self.scene_path, self.workspace, self.metadata = build_scene(
             output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids)
         if identity_sim: self.metadata['simulation_joint_frame'] = 'urdf'
+        if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
         self.model = mujoco.MjModel.from_xml_path(str(self.scene_path))
         self.data = mujoco.MjData(self.model)
         self.decimation = decimation
@@ -361,7 +363,7 @@ class MujocoBackend(SimBackend):
 class PolicyEnvironment:
     def __init__(self, output, workspace, renderer='egl', control_hz=30, width=320, height=240,
                  closed_rad=None, open_rad=None, task_definition=None, full_workspace=True, viewer=False,
-                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None):
+                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None):
         if not np.isfinite(control_hz) or not 10 <= control_hz <= 200:
             raise ValueError('control_hz must be in [10,200]')
         self.hz = float(control_hz)
@@ -369,7 +371,8 @@ class PolicyEnvironment:
         self.backend = MujocoBackend(output, workspace, render_backend=renderer, width=width,
                                      height=height, timestep=1 / (self.hz * 10), decimation=10,
                                      task_definition=task_definition, full_workspace=full_workspace,
-                                     physics_profile=physics_profile, identity_sim=identity_sim, active_object_ids=active_object_ids)
+                                     physics_profile=physics_profile, identity_sim=identity_sim, active_object_ids=active_object_ids,
+                                     simulation_configuration=simulation_configuration)
         limits = self.backend.limits.copy()
         if self.coordinates.closed < limits[5, 0] or self.coordinates.open > limits[5, 1] + 1e-5:
             self.backend.close()

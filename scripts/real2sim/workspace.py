@@ -33,9 +33,8 @@ try:
         w,_=verify_dataset(dataset,args.workspace);require_joint_replay(dataset)
     from soarm101_lab.tasks.manager_based.soarm101_lab import SO101TeleopEnvCfg
     legacy_before=SO101TeleopEnvCfg().scene.to_dict()
-    from soarm101_lab.real2sim.precision import uses_urdf_frame
     from soarm101_lab.so101_dataset_contract import read_contract
-    cfg=make_config(w,args.device,identity_sim=uses_urdf_frame(read_contract(dataset)) if args.command=='replay' else False)
+    cfg=make_config(w,args.device,coordinates=read_contract(dataset) if args.command=='replay' else None)
     w=cfg.workflow_workspace
     assert SO101TeleopEnvCfg().scene.to_dict()==legacy_before, 'Legacy scene mutated'
     from soarm101_lab.workflow.presentation import attach
@@ -48,7 +47,7 @@ try:
         if dataset.exists():raise FileExistsError(dataset)
         episode=EpisodeData();recording.add_initial_state(episode,env);q0=env.scene['robot'].data.joint_pos[:,[env.scene['robot'].joint_names.index(n) for n in cfg.actions.joint_positions.joint_names]].clone();prev=obs['policy']['ee_state'][0].clone()
         for t in range(args.steps):
-            recording.add_observation(episode,obs)
+            recording.add_observation(episode,obs,env)
             action=q0.clone();action[:,3]+=.02*np.sin(2*np.pi*t/max(1,args.steps))
             next_obs,_=env.step(action);next_ee=next_obs['policy']['ee_state'][0].clone()
             episode.add('actions',recording.to_cpu(recording.pose_delta_action(prev,next_ee,action[0,-1])))
@@ -61,6 +60,8 @@ try:
             'grasp_object':w['task']['pick'],'place_bin':w['task']['place'],'control_dt':env.step_dt,
             'validation_only':True,'root_quaternion_order':'wxyz',
             'scene_configuration':cfg.workflow_workspace['scene_configuration']})
+        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import telemetry_metadata
+        writer.add_env_args(telemetry_metadata(w['task']['dynamic']))
         episode.success=False;episode.pre_export();writer.write_episode(episode);writer.flush();writer.close()
         print('SMOKE_RECORDED',dataset,flush=True)
     if args.command in ('smoke','replay'):

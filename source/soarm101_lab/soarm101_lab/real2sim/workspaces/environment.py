@@ -113,7 +113,7 @@ def task_success_details(env, workspace):
         speed_limit=task['success']['max_speed_m_s'], wall_tolerance=WALL_TOLERANCE_M)
 
 
-def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None):
+def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None, simulation=None, coordinates=None):
     if num_envs!=1:raise ValueError('Workspace Phase 1 supports num_envs=1')
     from isaaclab.utils import configclass
     from isaaclab.envs import ManagerBasedEnvCfg
@@ -127,6 +127,11 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from ..profile import pose, render_k
     from ...workflow.tasks import configured
     w=configured(workspace if isinstance(workspace,dict) else load(workspace), task_definition or (workspace.get('task_definition') if isinstance(workspace,dict) else None), active_object_ids, backend='isaac');p=w['profile'];task=w['task'];root=w['root']
+    from ..precision import simulation_configuration,calibration_status
+    simulation=simulation_configuration(w,coordinates={'simulation_model':simulation} if simulation else coordinates,
+        identity=identity_sim,backend='isaac',scene_configuration=w['scene_configuration'])
+    identity_sim=simulation['identity_sim']
+    print('[WORKFLOW] '+calibration_status(simulation),flush=True)
     class RuntimeCamera(Camera):
         def _update_poses(self, env_ids):
             # USD Xform reads remain at the authored pose with Fabric enabled.
@@ -156,11 +161,10 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     class TaskObservations(ObservationGroupCfg):
         success=ObservationTermCfg(func=task_success,params={'workspace':w})
     cfg=ManagerBasedEnvCfg();cfg.scene=InteractiveSceneCfg(num_envs=1,env_spacing=2.)
+    cfg.simulation_configuration=simulation
     scene=cfg.scene
     scene.robot=SO101_FOLLOWER_CFG.copy();scene.robot.prim_path='{ENV_REGEX_NS}/Robot'
-    scene.robot.spawn.usd_path=str(root/w['manifest']['robot_asset'])
-    if identity_sim:
-        scene.robot.spawn.usd_path=str(root/w['manifest'].get('identity_robot_asset','assets/SO101/usd/so101_isaaclab.usd'))
+    scene.robot.spawn.usd_path=str(root/simulation['robot_model']['usd'])
     scene.robot.spawn.func=spawn_workspace_robot
     if w['manifest'].get('builder'):
         from functools import partial

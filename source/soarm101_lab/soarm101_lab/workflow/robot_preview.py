@@ -20,6 +20,50 @@ def origin(element):
     return t
 
 
+def pose_matrix(value, quaternion_order='wxyz'):
+    """Recorded SE(3), without a simulator or SciPy dependency in the UI."""
+    value=np.asarray(value,dtype=float)
+    if value.shape[-2:]==(4,4):
+        if not np.isfinite(value).all():raise ValueError('Nonfinite recorded pose')
+        return value.copy()
+    if value.shape[-1]!=7:raise ValueError('Expected matrix4 or xyz + quaternion pose')
+    q=value[...,3:7]
+    if quaternion_order=='xyzw':q=q[...,[3,0,1,2]]
+    elif quaternion_order!='wxyz':raise ValueError('Unknown quaternion order')
+    norm=np.linalg.norm(q,axis=-1,keepdims=True)
+    if not np.isfinite(value).all() or np.any(norm<1e-10):raise ValueError('Invalid recorded pose')
+    w,x,y,z=np.moveaxis(q/norm,-1,0)
+    result=np.broadcast_to(np.eye(4),value.shape[:-1]+(4,4)).copy()
+    result[...,0,:3]=np.stack([1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w)],-1)
+    result[...,1,:3]=np.stack([2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w)],-1)
+    result[...,2,:3]=np.stack([2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)],-1)
+    result[...,:3,3]=value[...,:3]
+    return result
+
+
+def object_triangles(spec, transform):
+    """Profile geometry preview, explicitly a bounds proxy for exported mesh shapes."""
+    size=np.asarray(spec['dimensions_m'],dtype=float);shape=spec['shape']
+    if shape=='sphere':
+        a=np.linspace(0,2*np.pi,17);b=np.linspace(-np.pi/2,np.pi/2,9)
+        points=np.array([[[np.cos(v)*np.cos(u),np.cos(v)*np.sin(u),np.sin(v)] for u in a] for v in b])*size/2
+        vertices=np.array([tri for j in range(8) for i in range(16) for tri in ([points[j,i],points[j,i+1],points[j+1,i]],[points[j+1,i],points[j,i+1],points[j+1,i+1]])])
+    elif shape in ('cylinder','cup','cup_proxy','capsule'):
+        rings=[]
+        for z in (-size[2]/2,size[2]/2):
+            angles=np.arange(17)*2*np.pi/16
+            rings.append(np.stack([np.cos(angles)*size[0]/2,np.sin(angles)*size[1]/2,np.full(17,z)],-1))
+        tri=[]
+        for i in range(16):
+            tri.extend([[rings[0][i],rings[0][i+1],rings[1][i]], [rings[1][i],rings[0][i+1],rings[1][i+1]]])
+        vertices=np.asarray(tri)
+    else:
+        vertices=np.array([[a,b,c] for a in (-1,1) for b in (-1,1) for c in (-1,1)])*size/2
+        faces=[[0,1,3],[0,3,2],[4,6,7],[4,7,5],[0,4,5],[0,5,1],[2,3,7],[2,7,6],[0,2,6],[0,6,4],[1,5,7],[1,7,3]]
+        vertices=vertices[faces]
+    return vertices@transform[:3,:3].T+transform[:3,3]
+
+
 class RobotPreview:
     def __init__(self,path):
         path=Path(path);root=ET.parse(path).getroot()

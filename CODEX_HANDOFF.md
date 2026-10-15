@@ -1,5 +1,40 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — MiniVLA LeRobot Direct / 공통 Sim 모델 계약 (2026-10-15)
+
+docs/minivla/DATA_CONTRACT.md, VALIDATION.md와 docs/real2sim/PRECISION_CALIBRATION.md,
+DATA_FLOW.md, JOINT_CONTROL.md 우선. Episodes가 원본 MP4/Parquet를 읽고 학습 준비는
+index/statistics만 생성한다. CPU exact decode/FFmpeg thread1/decoder2/RGB8frame·16MiB,
+기존 batch/H40/6D/RobotCoordinates/Train-only stats와 source-group split 유지.
+Source Group이 없거나 UNKNOWN인 생성 계보는 독립 split을 만들지 않는다.
+새 checkpoint dataset_identity로 입력 byte/manifest 변경 Resume 거절. 구형 Canonical은 원래
+Workflow byte hash 증명이 필요하며 원래 loader로 재개한다. 기존 추론은 유지한다.
+precision.simulation_configuration이 numeric URDF frame과 Sim residual geometry를 분리한다.
+Scene2v8 잔차는 Builder 증거의 Follower mapping binding이고 Source Leader hash는 달라도 된다.
+새 Source/Runtime은 실제 role mapping 검사, Replay/Annotation/DataGen/SimEval은 기록 계약 상속.
+Isaac IK URDF와 Physics USD를 같은 모델로 선택한다. Real Eval은 승인 Follower/모델 검증 후
+기존 inverse만 사용하며 Sim offset을 motor action에 더하지 않는다. 명시 identity debug 유지.
+435 PASS/2 SKIP, 실제 Qwen F/B/optimizer/Resume 및 Isaac/MuJoCo FK/render 완료.
+작업 성공률/실물 구동 검증 아님. 원본 Profile/Workspace/모델/데이터 보존, 보정 재계산 없음.
+상세/실패/재현/메모리: outputs/workflow_validation/lerobot_direct_calibration/REPORT.md.
+기존 미커밋 Curation 변경을 유지했다. 현재 작업 자동 commit/push 없음.
+
+## 최신 — Data Curation Robot/Object 동기 재생 (2026-10-15)
+
+기존 workflow.curation/curation_ui/robot_preview와 두 엔진 Recorder를 확장했다. 새 앱/엔진 없음.
+Dataset summary는 저용량 telemetry chunk, 선택 episode는 최대1500 plot sample, RGB는 단일 frame
+background read/8frame·16MiB LRU. 최신 seek만 표시하며 robot/EE/object/graph/RGB를 같이 갱신한다.
+MuJoCo 기존 target matrix는 재사용하고 distractor만 float32 xyz+wxyz 추가. Isaac Source/Mimic은
+obs/object_poses/<id>와 obs/timestamp를 pre-step 관측에 기록한다. post-state를 같은 frame으로 쓰지 않는다.
+기록 Workspace identity/변환/해당 URDF로 base frame에 맞춘다. 근거 없는 overlay/movement/success는 UNKNOWN.
+과거 initial-only는 Trajectory unavailable; 기존 post-state는 initial[0]+post[:-1]로 복원한다.
+Task/active/Scene/group/status filter와 composition별 XY 비율+group 균형 선별. Export는 원본 보존,
+Registry→Convert→MiniVLA adapter에 group/Task/Scene/annotation/success 근거를 전달한다.
+정확한 원본 demo 계보가 없는 Isaac 생성 결과는 공통 UNKNOWN group으로 묶어 독립 split을 만들지 않는다.
+자동 성공 인증/새 학습 모델/실제 하드웨어 검증이 아니다. 사용자 원본/보정/Workspace 불변.
+사용법: docs/real2sim/MINIVLA_INTEGRATION.md, telemetry: DATA_FLOW.md와 docs/minivla/DATA_CONTRACT.md.
+실행 근거/초기 실패/한계: outputs/workflow_validation/curation_object_playback/REPORT.md.
+
 ## 최신 — Workflow Active Object Set (2026-10-15)
 
 `docs/real2sim/BUILDER_WORKSPACE.md` 맨 위와 `DATA_FLOW.md`, `docs/minivla/EVALUATION.md` 우선.
@@ -85,7 +120,8 @@ model residual을 제외하는 checkbox가 켜지면 v7 보정도 보이지 않�
 접촉 proxy RMS12.49→3.07mm; RGB MAE는 소폭 악화, 독립 검증/실물 grasp 미완료,OPEN/UNVALIDATED.
 보고서/코드 계약/실패/테스트: `outputs/workflow_validation/scene2_v7_contact_application/REPORT.md`.
 아래 중첩guard 때문에 export 못했다는 v6 진단은 이 후속 계약 수정 이전의 기록이다.
-Workflow Source의 기존 identity-Sim 선택은 유지하여 전 단계가 동일 잔차를 쓰는 E2E는 미검증이다.
+이 당시 Workflow Source는 Precision이면 identity-Sim을 골랐다. 현재는 위 2026-10-15 공통 모델
+계약으로 교체했다. 전체 작업 성공/실물 E2E는 계속 미검증이다.
 
 ## 최신 진단 — Scene2 v6 네 꼭짓점 (2026-10-14)
 

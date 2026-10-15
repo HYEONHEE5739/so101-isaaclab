@@ -5,6 +5,43 @@ Capture와 Real/Sim 오른쪽 맨 위 공통 영역에 있다. 보정 파일을 
 Real/Sim에서 Scene과 함께 선택할 수 있다. 다음 Connect에 적용하며 선택은 재시작 후 복원된다.
 자세한 실행 순서는 [BUILDER_WORKSPACE.md](BUILDER_WORKSPACE.md)의 첫 절을 참고한다.
 
+## Workflow 공통 모델 결정 (2026-10-15)
+
+`precision.simulation_configuration`이 Runtime, Isaac/MuJoCo Source, Replay/Annotation/DataGen과
+Sim Eval의 모델을 결정한다. **숫자 관절 좌표가 URDF rad라는 사실과 Sim 기구학 잔차 적용은 별개다.**
+기존 `simulation_joint_frame=urdf`만 보고 새 수집의 Scene 보정을 무조건 끄지 않는다.
+
+| 새 실행 조건 | Simulation Model |
+|---|---|
+| Precision 없음 / 잔차 없음 | 원래 URDF, legacy hardware mapping |
+| Precision 있음 / 잔차 없음 | URDF identity, hardware Precision |
+| Precision 있음 / 같은 role mapping에 연결된 잔차 | precision_bound_residual |
+| Precision / 잔차 binding 불일치·role 근거 부족 | 구성 오류, 자동 합성·무음 제외 없음 |
+| 명시 URDF 원형 검사 | urdf_identity, Scene 잔차 제외 |
+| Precision 없는 과거 Scene 잔차 | legacy_scene_offsets, 역사적 모델 보존 |
+
+Scene2 v8의 Builder mapping 근거는 **Follower**다. Source의 Leader hash가 Follower hash와 같을
+필요는 없다. 승인된 Leader는 수집 좌표를, 승인된 Follower는 잔차 fitting binding을 증명한다.
+role·signed mapping·URDF identity를 검사하고 보정값 자체는 바꾸지 않는다. Offline 파생 단계는
+원본 계약/불변 Builder 근거를 읽으며 현재 활성 보정을 다시 대입하지 않는다.
+
+`simulation_model`에 Workspace identity/content hash, 기본/실행 URDF hash와 USD 경로,
+role별 Precision identity, residual hash/binding/applied, model mode, 좌표계, backend, Scene 구성을
+기록한다. 기존 실행 로그의 Hardware Precision / Simulation Residual / Robot / Compatibility는
+worker가 실제 사용한 같은 결정 결과다. 별도 설정 창은 없다.
+
+Source 계약을 Replay→Annotation→DataGen→Convert→Train/checkpoint→Sim Eval로 상속한다.
+Isaac IK는 이 계약의 URDF를, Physics는 대응 USD를 사용한다. Object Set은 달라도 robot model은
+같아야 한다. Resume는 기존 모델·좌표·수집 mapping을 유지하며 다른 계약의 HDF5 segment 병합을 거절한다.
+과거 URDF-frame 계약은 당시 identity 동작을, 다른 과거 계약은 당시 Scene 모델을 유지한다.
+근거가 없는 항목은 unknown이며 과거 파일을 새 계약으로 덮어쓰지 않는다.
+
+Real Eval은 Activate/첫 목표 전에 완전한 승인 Follower Precision과 공통 URDF 기구학 호환성을
+확인한다. Leader와 Follower hash 동일성은 요구하지 않는다. **Scene 잔차는 Sim geometry에만
+한 번 적용하고 실제 모터 목표에는 더하거나 빼지 않는다.** 기존 strict inverse/encoder/range 검사는
+유지한다. 소프트웨어 호환성 valid는 실물 정확도 인증이 아니며 HARDWARE_NOT_TESTED다.
+실제 실행/실패/한계: `outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`.
+
 ## Scene의 접촉 잔차 보정과 Precision (2026-10-14)
 
 Scene2 v7은 active Precision 계수를 바꾸지 않고, 그 변환 이후의 Sim 모델 FK 잔차만 보정한다.

@@ -57,12 +57,12 @@ def test_source_uses_saved_precision_and_records_model_frame(tmp_path,env,monkey
         def poll(self):
             self.polls+=1
             if self.polls>1:self.pending.add('save')
-    monkeypatch.setattr(precision,'active_precision',lambda role:profile)
+    monkeypatch.setattr(precision,'approved_mappings',lambda workspace:{'leader':mapper.metadata()})
     monkeypatch.setattr(hardware,'Leader',Leader)
     monkeypatch.setattr(worker,'load',lambda path:{'root':ROOT})
     monkeypatch.setattr(demo,'coordinate_contract',lambda w:current_contract(MIMIC_SPACE))
     def environment(request,*args):
-        assert request['options']['_identity_sim'] is True
+        assert request['options']['_collection_mappings']['leader']==mapper.metadata()
         return env
     monkeypatch.setattr(worker,'_environment',environment)
     request={'workspace':'fixture','options':{'port':'fixture','instruction':'pick red','episodes':1,'episode_time_s':2}}

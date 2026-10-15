@@ -96,3 +96,15 @@ def test_paired_target_identity_and_noise_contract():
     assert paired_action_differences([row,blue])[0]['initial_action_difference_rms']==1
     with pytest.raises(ValueError,match='observation'):paired_action_differences([row,{**blue,'seed':8}])
     with pytest.raises(ValueError,match='identities'):paired_action_differences([row,row])
+
+
+def test_resume_detects_canonical_rgb_change_without_changing_statistics(tmp_path):
+    from dataclasses import asdict
+    from soarm101_lab.learning.minivla.data import dataset_identity
+    from soarm101_lab.learning.minivla.train import validate_resume
+    path,_=create_data(tmp_path);stats=fit_statistics(path,tmp_path/'stats.json');m=load_manifest(path)
+    identity=dataset_identity(m);cfg=MiniVLAConfig(steps=3)
+    ck={'architecture_schema':cfg.architecture_schema,'config':asdict(cfg),'statistics':stats,'control_hz':30,'step':2,'dataset_identity':identity}
+    validate_resume(ck,cfg,stats,30,identity)
+    pixels=np.load(tmp_path/'e0/side.npy');pixels[0,0,0,0]=123;np.save(tmp_path/'e0/side.npy',pixels)
+    with pytest.raises(ValueError,match='byte identity'):validate_resume(ck,cfg,stats,30,dataset_identity(load_manifest(path)))
