@@ -8,6 +8,7 @@ from html import escape
 
 # key: (JSON type, suggested/default value, explanation)
 FIELDS = {
+    'validation_dataset':('문자열',None,'선택: 검증된 val Source Partition에서 생성·변환한 Registry dataset ID. MiniVLA가 별도 MP4/Parquet를 직접 읽습니다.'),
     'identity_sim_for_validation':('true/false',False,'명시적 URDF 원형 검증: Scene 관절 잔차만 제외합니다. Hardware Precision은 유지합니다. 파생 단계는 원본 모델 계약을 상속합니다.'),
     'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
     'output': ('문자열', '', '선택. 비우면 고유 run 폴더에 자동 저장합니다. 직접 지정할 때는 아직 존재하지 않는 경로를 사용하세요.'),
@@ -49,7 +50,7 @@ KEYS = {
     'annotate': ['device', 'renderer', 'output'],
     'datagen': ['num_successful_demos', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],
     'convert': ['repo_id', 'include_failed', 'output'],
-    'train': ['architecture', 'model_config', 'source_groups', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
+    'train': ['architecture', 'model_config', 'source_groups', 'validation_dataset', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
     'sim_eval': ['episodes', 'max_steps', 'device', 'renderer', 'output'],
     'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'camera_devices', 'episodes', 'max_steps', 'fps', 'enable_motion', 'device', 'output', 'calibration_dir'],
     'hf_dataset': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
@@ -59,8 +60,8 @@ KEYS = {
 # Only options consumed by each trainer belong in its execution form.
 TRAIN_KEYS = {
     'minivla': {'model_config', 'source_groups', 'steps', 'output'},
-    'act': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups'},
-    'smolvla': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups'},
+    'act': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups','validation_dataset'},
+    'smolvla': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups','validation_dataset'},
 }
 
 

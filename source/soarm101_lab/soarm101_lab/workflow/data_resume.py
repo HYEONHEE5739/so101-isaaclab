@@ -7,6 +7,8 @@ from .artifacts import inspect_artifact
 
 def validate(stage, path, workspace, tasks, source=None, scene_configuration=None, workspace_definition=None):
     item = inspect_artifact(stage, path)
+    if stage=='source' and item.get('source_partition'):
+        raise ValueError('Source Partition is locked; collect new demonstrations in the original unpartitioned Source dataset')
     if item.get('workspace') != workspace or item.get('tasks') != tasks:
         raise ValueError('Resume dataset의 workspace/task가 현재 선택과 다릅니다.')
     if scene_configuration:
@@ -33,6 +35,8 @@ def combine(previous, segment):
     temporary = segment.with_suffix('.merging.hdf5')
     try:
         with h5py.File(previous, 'r') as old, h5py.File(segment, 'r') as new, h5py.File(temporary, 'w') as out:
+            partitions=[json.loads(h['data'].attrs.get('env_args','{}')).get('source_partition') for h in (old,new)]
+            if partitions[0]!=partitions[1]:raise ValueError('Resume Source Partition differs; refusing Train/Validation mixture')
             scenes=[json.loads(h['data'].attrs.get('env_args','{}')).get('scene_configuration') for h in (old,new)]
             if any(scenes) and (not all(scenes) or scenes[0]['active_object_ids']!=scenes[1]['active_object_ids']):
                 raise ValueError('Resume active object set differs or is unknown')
@@ -48,6 +52,8 @@ def combine(previous, segment):
                         continue
                     episode = src['data'][name]
                     src.copy(episode, data, name=f'demo_{count}')
+                    from ..utils.async_video_writer import copy_hdf5_videos
+                    copy_hdf5_videos(episode,data[f'demo_{count}'],segment)
                     total += len(episode['actions'])
                     count += 1
             data.attrs['total'] = total

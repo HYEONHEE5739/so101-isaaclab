@@ -15,6 +15,18 @@ def test_merge_rejects_different_simulation_calibration_before_modifying_output(
     assert [p.read_bytes() for p in paths]==before
 
 
+def test_merge_rejects_source_partition_mixture(tmp_path):
+    import pytest,json
+    paths=[tmp_path/'train.hdf5',tmp_path/'val.hdf5']
+    for path,split in zip(paths,['train','val']):
+        with h5py.File(path,'w') as h:
+            data=h.create_group('data');data.attrs['env_args']=json.dumps({'source_partition':{'split':split}})
+            data.create_group('demo_0').create_dataset('actions',data=np.zeros((3,6)))
+    before=[p.read_bytes() for p in paths]
+    with pytest.raises(ValueError,match='Source Partition'):combine(*paths)
+    assert [p.read_bytes() for p in paths]==before
+
+
 def test_merge_preserves_previous_and_orders_completed_episodes(tmp_path):
     old = tmp_path / 'old.hdf5'
     new = tmp_path / 'new.hdf5'

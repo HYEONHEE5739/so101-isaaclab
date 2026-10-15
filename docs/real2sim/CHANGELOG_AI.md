@@ -1,3 +1,12 @@
+## 2026-10-15 — Source 기반 Train/Validation 및 Mimic 계보
+
+- 기존 Curation에 Source 비율/seed/수동 분할·두 subset Registry 등록. 원본은 보존하고 중복 원본을 묶음.
+- Payload 기반 원본 ID와 Source Partition을 Annotation/Mimic/Curation/Convert로 전달. 정확한 Mimic subtask 원본은 UNKNOWN 유지.
+- Annotation의 실패/건너뛰기 후 재번호는 실제 export 원본 순서로 추적. Partition Source는 별도 annotated artifact로 보존.
+- MiniVLA는 별도 Validation artifact를 기존 Direct Loader의 두 reader로 읽음. 명시 split 우선/Source 교집합 거절/Train-only stats.
+- 실제 Isaac Pool 격리와 Qwen GPU train/validation 검사. 물리 생성 성공이나 실물 정책 검증으로 해석하지 않음.
+- 핵심 코드/검증/사용법: outputs/workflow_validation/source_partition_training/REPORT.md.
+
 ## 2026-10-15 — LeRobot Direct 및 Precision/Sim 모델 계약 통합
 
 - 기존 MiniVLA Episodes에 CPU lazy MP4/숫자 Parquet 경로 추가. 학습 준비 RGB NPY 복제 제거.

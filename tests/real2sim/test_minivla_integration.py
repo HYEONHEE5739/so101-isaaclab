@@ -27,6 +27,7 @@ def test_coordinates_roundtrip_and_checked_saturation():
 
 
 def test_source_uses_saved_precision_and_records_model_frame(tmp_path,env,monkeypatch):
+    monkeypatch.setattr('soarm101_lab.utils.voice.log_say',lambda *a,**k:None)
     from soarm101_lab.workflow import mujoco as worker
     from soarm101_lab.real2sim import hardware, precision
     from soarm101_lab.real2sim.workspaces import demo
@@ -126,6 +127,8 @@ def test_custom_policy_chunk_drives_real_cpu_environment(tmp_path, env, monkeypa
 
 
 def test_source_discard_save_quit_with_fake_leader(tmp_path, env, monkeypatch):
+    spoken=[]
+    monkeypatch.setattr('soarm101_lab.utils.voice.log_say',lambda text,**k:spoken.append(text))
     from soarm101_lab.workflow import mujoco as worker
     from soarm101_lab.real2sim import hardware
     from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER, JOINTS
@@ -152,6 +155,7 @@ def test_source_discard_save_quit_with_fake_leader(tmp_path, env, monkeypatch):
     request = {'options': {'port': 'fixture', 'instruction': 'pick red', 'episodes': 2, 'episode_time_s': 10}}
     report = worker.source(request, tmp_path, lambda *args: None, Bridge())
     assert report['episode_count'] == 1 and closed == [True]
+    assert 'resetting' in spoken and 'save episode 1' in spoken and spoken[-1]=='stop recording'
     manifest = json.loads((tmp_path / 'dataset/manifest.json').read_text())
     assert len(manifest['episodes']) == 1
     assert np.load(tmp_path / 'dataset/episode_0000/action.npy').shape == (1, 6)

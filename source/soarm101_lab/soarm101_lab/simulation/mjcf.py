@@ -170,7 +170,7 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
 
 
 def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002, decimation=10,
-                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None):
+                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, reset=None):
     if (type(width) is not int or type(height) is not int or width < 1 or height < 1
             or type(decimation) is not int or decimation < 1
             or not np.isfinite(timestep) or not 0 < timestep <= .01):
@@ -182,11 +182,11 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
     if identity_sim:
         w = copy.deepcopy(w)
         w['profile'].pop('simulation_joint_offsets_rad', None)
-    if task_definition is not None or active_object_ids is not None or w.get('scene_configuration'):
+    if task_definition is not None or active_object_ids is not None or w.get('scene_configuration') or reset is not None:
         if workspace is None:
             raise ValueError('Task Definition requires a published workspace')
         from ..workflow.tasks import configured
-        w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco')
+        w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco',reset=reset)
     p, task = w['profile'], w['task']
     builder_scene = bool(w.get('manifest', {}).get('builder'))
     review = task.get('mode') == 'geometry_review'

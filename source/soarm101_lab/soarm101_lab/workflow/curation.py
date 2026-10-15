@@ -35,7 +35,7 @@ class EpisodeReader:
     """Open one episode on demand. No RGB series reads; LRU caches at most 8 frames/16MiB."""
     def __init__(self,row):
         self.row=row;self.ref=row['data_ref'];self.path=Path(self.ref['path']);self.canonical=self.path.is_dir()
-        self.cache=OrderedDict();self.cache_bytes=0;self.bytes_read=0
+        self.cache=OrderedDict();self.cache_bytes=0;self.bytes_read=0;self.video_readers=OrderedDict()
         self.frames=row['frames'];self.dt=row['dt'];self.specs=row.get('object_specs',{})
         self.objects=row.get('active_object_ids') or row.get('recorded_object_ids',list(self.specs))
         self.transforms=row['pose_transforms'];self.display_frame=row['display_frame']
@@ -109,7 +109,17 @@ class EpisodeReader:
         if camera:
             spec=self.row['cameras'][camera];key=(camera,index)
             if key not in self.cache:
-                rgb=self.read(spec['path'],index)[...,:3]
+                if spec.get('file') or spec['path'].endswith('.mp4'):
+                    from ..utils.async_video_writer import VideoFrames,external_camera
+                    if camera not in self.video_readers:
+                        self.video_readers[camera]=(VideoFrames(self.path/self.ref['episode']/spec['path'],self.frames,1/self.dt)
+                            if self.canonical else external_camera(self.path,spec,self.frames,1/self.dt))
+                        while len(self.video_readers)>2:
+                            _,old=self.video_readers.popitem(last=False)
+                            if hasattr(old,'close'):old.close()
+                    self.video_readers.move_to_end(camera)
+                    rgb=self.video_readers[camera][index][...,:3]
+                else:rgb=self.read(spec['path'],index)[...,:3]
                 if rgb.dtype!=np.uint8:rgb=np.clip(rgb*(255 if rgb.max(initial=0)<=1.5 else 1),0,255).astype(np.uint8)
                 rgb=np.ascontiguousarray(rgb)
                 self.cache[key]=rgb;self.cache_bytes+=rgb.nbytes
@@ -238,7 +248,7 @@ def analyze(path):
             frames=len(np.load(folder/'raw_action.npy',mmap_mode='r'));telemetry=dict(entry.get('object_telemetry',{}))
             pick=task['pick_object_id'] if task else (composition or {}).get('pick_object_id')
             if not telemetry and (folder/'object_pose.npy').exists() and pick:telemetry[pick]={'file':'object_pose.npy','frame':'workspace','pose_format':'matrix4'}
-            cameras={p.stem:{'path':p.name,'timestamp_key':p.stem+'_timestamp.npy' if (folder/(p.stem+'_timestamp.npy')).exists() else None} for p in folder.glob('*.npy') if p.stem in manifest.get('cameras',['side','wrist'])}
+            cameras={p.stem:{'path':p.name,'timestamp_key':p.stem+'_timestamp.npy' if (folder/(p.stem+'_timestamp.npy')).exists() else None} for p in folder.iterdir() if p.suffix in ('.npy','.mp4') and p.stem in manifest.get('cameras',['side','wrist'])}
             outcome=json.loads((folder/'outcome.json').read_text()) if (folder/'outcome.json').exists() else {}
             annotation=json.loads((folder/'annotation.json').read_text()) if (folder/'annotation.json').exists() else None
             qkey='raw_state.npy' if (folder/'raw_state.npy').exists() else None
@@ -247,7 +257,8 @@ def analyze(path):
                 q_key=qkey,ee_key='eef_pose.npy',ee_frame='workspace',timestamp_key='timestamp.npy',
                 recorded_success=outcome.get('success') if outcome.get('success_known',True) else None,
                 success_source=outcome.get('success_source','unknown'),validation_only=outcome.get('validation_only',False),
-                source_group=entry.get('group_id','UNKNOWN'),cameras=cameras,object_telemetry=telemetry)
+                source_group=entry.get('source_group',entry.get('group_id','UNKNOWN')),cameras=cameras,object_telemetry=telemetry,
+                source_partition=entry.get('source_partition') or prov.get('source_partition'),source_lineage=entry.get('source_lineage'))
             signal_keys={}
         else:
             name=entry
@@ -277,6 +288,8 @@ def analyze(path):
                         telemetry[n]={'unavailable':True,'frame':legacy_frame,'pose_format':'xyz_'+args.get('root_quaternion_order','wxyz')}
                         if initial in g:telemetry[n]['initial_pose']=np.asarray(g[initial]).reshape(-1,7)[0].tolist()
                 cameras={key[:-4]:{'path':policy+'/'+key,'timestamp_key':args.get('observation_timestamp_path')} for key in g[policy] if key.endswith('_cam')}
+                for key,spec in _json(g.attrs.get('external_videos'),{}).items():
+                    cameras[key.removesuffix('_cam')]={**spec,'timestamp_key':args.get('observation_timestamp_path')}
                 if 'obs/camera' in g:
                     for key,value in g['obs/camera'].items():
                         if len(value.shape)==4 and value.shape[-1]>=3:
@@ -290,8 +303,13 @@ def analyze(path):
                     ee_frame=args.get('ee_frame','robot_base'),timestamp_key=args.get('observation_timestamp_path'),
                     recorded_success=bool(g.attrs['success']) if 'success' in g.attrs else None,
                     success_source=g.attrs.get('success_source',args.get('success_source','unknown')),validation_only=args.get('validation_only',False),
-                    source_group=_group_id(path,name,g.attrs,args),cameras=cameras,object_telemetry=telemetry)
+                    source_group=_group_id(path,name,g.attrs,args),cameras=cameras,object_telemetry=telemetry,
+                    source_partition=args.get('source_partition'),source_lineage=_json(g.attrs.get('source_lineage')))
                 row['legacy_pose_alignment']='initial[0] + post_state[:-1]' if any(d.get('post_step') for d in telemetry.values()) else None
+        from .episodes import validate_partition,validate_partition_episode
+        partition=validate_partition(row['source_partition']) if row.get('source_partition') else None
+        if partition:validate_partition_episode(partition,row.get('source_lineage'),args.get('source_partition_input'))
+        row.update(split=partition['split'] if partition else None,lineage_status='Verified Source Partition / exact subtask lineage UNKNOWN' if partition and (row.get('source_lineage') or {}).get('kind')!='source_episode' else 'Verified Source Partition' if partition else 'Not partitioned',leakage_status='checked at training' if partition else 'UNKNOWN')
         if row['frames']<3:raise ValueError('At least three frames required for motion quality metrics')
         ids=(composition or {}).get('active_object_ids',scene.get('dynamic_objects') if canonical else active_ids)
         geometry_ids=ids or list(telemetry)
@@ -342,7 +360,7 @@ def select_distribution(rows,count):
     groups={}
     for row in rows:
         cell=tuple(np.minimum(((np.array(row['xy'])-lo)/span*4).astype(int),3)) if row.get('xy') is not None else ('UNKNOWN','UNKNOWN')
-        key=(row['task_id'],tuple(row.get('active_object_ids') or []),*cell)
+        key=(row.get('split'),row['task_id'],tuple(row.get('active_object_ids') or []),*cell)
         groups.setdefault(key,[]).append(row)
     keys=sorted(groups,key=repr);quotas={k:count*len(groups[k])/len(rows) for k in keys};amounts={k:int(quotas[k]) for k in keys}
     for k in sorted(keys,key=lambda k:(-(quotas[k]-amounts[k]),repr(k)))[:count-sum(amounts.values())]:amounts[k]+=1
@@ -356,11 +374,24 @@ def select_distribution(rows,count):
     return chosen
 
 
-def export_subset(source, destination, names):
+def export_subset(source, destination, names, *, partition=None, source_records=None):
     import h5py, os, uuid
     from ..so101_dataset_contract import read_contract, write_contract
     from .artifacts import fingerprint
     source=Path(source); destination=Path(destination)
+    from .episodes import validate_partition,validate_partition_episode,source_catalog
+    if partition:validate_partition(partition)
+    if source_records is None:
+        source_records,inherited=source_catalog(source,allow_unknown=True)
+        if inherited and source_records:
+            ids=sorted({source_records[n]['source_id'] for n in names})
+            if ids!=inherited['source_ids']:
+                from ..real2sim.precision import fingerprint as contract_hash
+                payload={k:v for k,v in inherited.items() if k!='sha256'}
+                payload.update(source_ids=ids,parent_partition_sha256=inherited['sha256'])
+                partition=validate_partition({**payload,'sha256':contract_hash(payload)})
+    if partition:
+        for name in names:validate_partition_episode(partition,source_records.get(name))
     if destination.exists(): raise ValueError('기존 파일은 덮어쓰지 않습니다.')
     if not names or len(set(names))!=len(names): raise ValueError('선택 목록이 비었거나 중복입니다.')
     if source.is_dir():
@@ -374,10 +405,17 @@ def export_subset(source, destination, names):
             folder = (source / entries[name]['path']).resolve()
             if not folder.is_relative_to(source.resolve()): raise ValueError('Episode outside dataset')
             shutil.copytree(folder, destination / entries[name]['path'])
-        atomic(destination / 'manifest.json', {**manifest, 'episodes': [entries[n] for n in names]})
+        selected=[]
+        for name in names:
+            entry=dict(entries[name])
+            if source_records.get(name):entry['source_lineage']=source_records[name]
+            if partition:entry.update(split=partition['split'],source_partition=partition)
+            selected.append(entry)
+        atomic(destination / 'manifest.json', {**manifest, 'episodes': selected})
         provenance = json.loads((source / 'project_provenance.json').read_text())
         scenes=[entries[n].get('scene_configuration') or provenance.get('scene_configuration') for n in names]
         scenes=list({s['sha256']:s for s in scenes if s}.values())
+        if partition:provenance['source_partition']=partition
         atomic(destination / 'project_provenance.json', {**provenance, 'scene_configurations':scenes, 'curation': {
             'source': str(source.resolve()), 'source_sha256': fingerprint(source), 'selected_episodes': names}})
         return destination
@@ -390,10 +428,17 @@ def export_subset(source, destination, names):
             for k,v in src['data'].attrs.items():data.attrs[k]=v
             total=0
             args=_json(src['data'].attrs.get('env_args'),{})
+            if partition:
+                args['source_partition']=partition
+                data.attrs['env_args']=json.dumps(args)
             for i,name in enumerate(names):
                 src.copy(src['data'][name],data,name=f'demo_{i}')
+                from ..utils.async_video_writer import copy_hdf5_videos
+                copy_hdf5_videos(src['data'][name],data[f'demo_{i}'],destination)
                 data[f'demo_{i}'].attrs['curation_source_episode']=name
                 data[f'demo_{i}'].attrs['source_group']=_group_id(source,name,src['data'][name].attrs,args)
+                if source_records.get(name):data[f'demo_{i}'].attrs['source_lineage']=json.dumps(source_records[name])
+                if partition:data[f'demo_{i}'].attrs['split']=partition['split']
                 total+=len(data[f'demo_{i}/actions'])
             data.attrs['total']=total
             data.attrs['curation']=json.dumps({'source':str(source.resolve()),'source_sha256':fingerprint(source),

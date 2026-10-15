@@ -186,7 +186,11 @@ def add_observation(episode, obs, env=None):
         to_cpu(obs["policy"]["ee_state"][0]),
     )
 
-    for camera_name in (name for name in obs["policy"] if name.endswith("_cam")):
+    stream_rgb=env is not None and hasattr(env,'_workflow_video_parent')
+    if stream_rgb:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import stream_observation_rgb
+        stream_observation_rgb(episode,{k:v[0] for k,v in obs['policy'].items()},env._workflow_video_parent,env.step_dt**-1)
+    for camera_name in ([] if stream_rgb else (name for name in obs["policy"] if name.endswith("_cam"))):
         if camera_name not in obs["policy"]:
             continue
 
@@ -243,6 +247,8 @@ def save_episode(writer, episode, episode_id):
 
 
 def main():
+    from pathlib import Path
+    if Path(args_cli.dataset_file).exists():raise FileExistsError('Choose a new dataset output; original data is preserved')
     import torch
 
     from isaaclab.envs import ManagerBasedEnv
@@ -273,7 +279,8 @@ def main():
         from soarm101_lab.real2sim.workspaces.package import load as load_workspace
         from soarm101_lab.workflow.tasks import configured
         from soarm101_lab.real2sim.precision import approved_mappings,simulation_configuration
-        workspace=configured(load_workspace(args_cli.workspace))
+        from soarm101_lab.real2sim.workspaces.reset import source_workspace
+        workspace=source_workspace(configured(load_workspace(args_cli.workspace)),args_cli.resume_data)
         mappings=approved_mappings(workspace)
         resume_coordinates=None
         if args_cli.resume_data:
@@ -297,7 +304,7 @@ def main():
         from soarm101_lab.real2sim.workspaces.environment import make_config
         from soarm101_lab.real2sim.workspaces.package import load as load_workspace
         from soarm101_lab.workflow.tasks import configured
-        workspace = configured(load_workspace(args_cli.workspace))
+        workspace = source_workspace(configured(load_workspace(args_cli.workspace)),args_cli.resume_data)
         env_cfg = make_config(workspace, args_cli.device, args_cli.num_envs,
                               simulation=simulation)
         workspace = env_cfg.workflow_workspace
@@ -344,7 +351,9 @@ def main():
     if args_cli.workspace and args_cli.resume_data:coordinates=resume_coordinates
     # Persist before recording, including interrupted runs. Never mix mapping revisions.
     write_contract(args_cli.dataset_file, coordinates)
-    writer = HDF5DatasetFileHandler()
+    from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import VideoHDF5DatasetFileHandler
+    writer = VideoHDF5DatasetFileHandler()
+    env._workflow_video_parent=Path(args_cli.dataset_file).resolve().parent
     writer.create(
         args_cli.dataset_file,
         env_name=args_cli.mimic_task,
@@ -503,6 +512,7 @@ def main():
                         episode_random_state,
                     )
 
+                    if getattr(episode,'_rgb_video',None):episode._rgb_video.abort()
                     episode = EpisodeData()
                     add_initial_state(
                         episode,
@@ -535,6 +545,7 @@ def main():
                         episode_random_state,
                     )
 
+                    if getattr(episode,'_rgb_video',None):episode._rgb_video.abort()
                     episode = EpisodeData()
                     add_initial_state(
                         episode,
@@ -601,6 +612,7 @@ def main():
                         episode_random_state,
                     )
 
+                    if getattr(episode,'_rgb_video',None):episode._rgb_video.abort()
                     episode = EpisodeData()
                     add_initial_state(
                         episode,
@@ -640,6 +652,7 @@ def main():
                         episode_random_state,
                     )
 
+                    if getattr(episode,'_rgb_video',None):episode._rgb_video.abort()
                     episode = EpisodeData()
                     add_initial_state(
                         episode,
@@ -670,6 +683,8 @@ def main():
             "✅ Closing HDF5 recorder...",
             flush=True,
         )
+
+        if getattr(episode,'_rgb_video',None):episode._rgb_video.abort()
 
         # Current EpisodeData is not written here:
         # Q/exception means unfinished demo is discarded.

@@ -3,6 +3,17 @@ import copy
 import numpy as np
 
 
+def source_workspace(workspace, resume=None):
+    """New collection uses continuous XY; resumed collection keeps its recorded policy."""
+    from ...workflow.tasks import configured, recorded_scene
+    if resume:
+        from ...workflow.artifacts import inspect_artifact
+        reset = recorded_scene(inspect_artifact('source',resume),workspace)['reset']
+    else:
+        reset = {**workspace['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.}
+    return configured(workspace,reset=reset)
+
+
 def source_seed(requested=None):
     """Fresh Source run by default; explicit seeds preserve reproducibility."""
     if requested is None:

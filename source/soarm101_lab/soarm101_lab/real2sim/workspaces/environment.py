@@ -126,7 +126,9 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from ...tasks.manager_based.soarm101_lab.base_pick_place_teleop_env_cfg import ActionsCfg, ObservationsCfg
     from ..profile import pose, render_k
     from ...workflow.tasks import configured
-    w=configured(workspace if isinstance(workspace,dict) else load(workspace), task_definition or (workspace.get('task_definition') if isinstance(workspace,dict) else None), active_object_ids, backend='isaac');p=w['profile'];task=w['task'];root=w['root']
+    recorded_model=simulation or (coordinates or {}).get('simulation_model') or {}
+    recorded_reset=(recorded_model.get('scene_configuration') or {}).get('reset')
+    w=configured(workspace if isinstance(workspace,dict) else load(workspace), task_definition or (workspace.get('task_definition') if isinstance(workspace,dict) else None), active_object_ids, backend='isaac',reset=recorded_reset);p=w['profile'];task=w['task'];root=w['root']
     from ..precision import simulation_configuration,calibration_status
     simulation=simulation_configuration(w,coordinates={'simulation_model':simulation} if simulation else coordinates,
         identity=identity_sim,backend='isaac',scene_configuration=w['scene_configuration'])

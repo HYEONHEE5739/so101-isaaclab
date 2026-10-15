@@ -22,11 +22,21 @@ DEFAULTS = {'profile': 'outputs/real2sim', 'workspace': 'outputs/real2sim/enviro
 def fingerprint(path):
     p = Path(path)
     files = [p] if p.is_file() else sorted(f for f in p.rglob('*') if f.is_file() and '.cache' not in f.parts)
+    if p.is_file() and p.suffix in ('.hdf5','.h5'):
+        import h5py
+        from ..utils.async_video_writer import external_video_path
+        with h5py.File(p,'r') as h:
+            videos=[]
+            if 'data' in h:
+                for name,g in h['data'].items():
+                    if name.startswith('demo_'):
+                        videos.extend(external_video_path(p,spec) for spec in json.loads(g.attrs.get('external_videos','{}')).values())
+        files += sorted(set(videos))
     if not files:
         raise ValueError('Empty artifact')
     digest = hashlib.sha256()
     for f in files:
-        digest.update(str(f.relative_to(p) if p.is_dir() else f.name).encode())
+        digest.update(str(f.relative_to(p) if p.is_dir() else f.name if f==p else f.relative_to(p.parent)).encode())
         with f.open('rb') as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b''):
                 digest.update(block)
@@ -69,6 +79,11 @@ def inspect_artifact(kind, path):
             if unique and any(d is None for d in definitions):
                 raise ValueError('Some episodes have no task definition')
             result.update(workspace=args.get('workspace'), episode_count=len(episodes), env_args=args, tasks=list(unique.values()))
+            if args.get('source_partition'):
+                from .episodes import validate_partition,validate_partition_episode
+                partition=validate_partition(args['source_partition'])
+                for g in episodes:validate_partition_episode(partition,json.loads(g.attrs.get('source_lineage','null')),args.get('source_partition_input'))
+                result.update(source_partition=partition,lineage_status='verified_partition',source_count=len(partition['source_ids']))
         coordinates = read_contract(p)
     elif kind in ('dataset', 'policy'):
         marker = p / ('meta/info.json' if kind == 'dataset' else 'config.json')
@@ -236,7 +251,9 @@ class Registry:
     def promote_annotation(self, source, completed, extra=None):
         """Validate first, replace source transactionally, retain lineage as superseded records."""
         from ..so101_dataset_contract import sidecar
-        self.verify(source)
+        current = self.verify(source)
+        if current.get('source_partition') or current.get('provenance', {}).get('source_partition'):
+            raise ValueError('Source Partition is immutable; register annotation as a separate artifact')
         completed, destination = Path(completed).resolve(), Path(source['path']).resolve()
         if completed == destination or source['type'] != 'source':
             raise ValueError('Annotation replacement requires a distinct completed source result')

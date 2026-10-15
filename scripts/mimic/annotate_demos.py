@@ -427,6 +427,8 @@ def annotate_episode_in_manual_mode(
 # ============================================================
 
 def main():
+    from pathlib import Path
+    if Path(args_cli.output_file).exists():raise FileExistsError('Choose a new dataset output; original data is preserved')
     from soarm101_lab.so101_dataset_contract import inherit_contract, MIMIC_SPACE
     inherit_contract(args_cli.input_file, args_cli.output_file, MIMIC_SPACE)
     if not os.path.exists(args_cli.input_file):
@@ -478,6 +480,8 @@ def main():
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
         workspace, source_args = validate_input(args_cli.input_file, args_cli.workspace)
+        from soarm101_lab.workflow.artifacts import fingerprint
+        source_input_sha256 = fingerprint(args_cli.input_file)
         env_cfg = make_mimic_config(workspace, args_cli.device, annotation=True,
                                    coordinates=source_args.get('so101_coordinates'))
         env_name = env_cfg.env_name
@@ -505,6 +509,9 @@ def main():
 
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
+    if args_cli.workspace:
+        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import VideoHDF5DatasetFileHandler
+        env_cfg.recorders.dataset_file_handler_class_type=VideoHDF5DatasetFileHandler
 
     if args_cli.workspace:
         from soarm101_lab.tasks.manager_based.soarm101_lab.so101_mimic_env import SO101PickPlaceMimicEnv
@@ -569,6 +576,7 @@ def main():
     exported_episode_count = 0
     processed_episode_count = 0
     successful_task_count = 0
+    exported_source_names = []
 
     try:
         with torch.inference_mode():
@@ -606,6 +614,7 @@ def main():
                     env.recorder_manager.export_episodes()
 
                     exported_episode_count += 1
+                    exported_source_names.append(episode_name)
                     successful_task_count += 1
 
                     if bridge:
@@ -628,10 +637,13 @@ def main():
     print(f"Output    : {args_cli.output_file}")
     print("=" * 70)
 
+    from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import close_video_recorders
+    close_video_recorders(env)
     env.close()
     if args_cli.workspace and exported_episode_count:
         from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace)
+        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace,
+                          expected_source_sha256=source_input_sha256, annotation_sources=exported_source_names)
 
     if not exported_episode_count:
         raise RuntimeError('Annotation exported 0 episodes: see task/subtask failure above; no annotated artifact was created')

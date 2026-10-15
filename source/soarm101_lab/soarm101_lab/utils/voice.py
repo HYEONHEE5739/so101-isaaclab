@@ -10,10 +10,13 @@ def say(text: str, blocking: bool = False) -> None:
     else:
         raise RuntimeError("Unsupported operating system")
 
-    if blocking:
-        subprocess.run(command, check=False)
-    else:
-        subprocess.Popen(command)
+    try:
+        if blocking:
+            subprocess.run(command, check=False)
+        else:
+            subprocess.Popen(command)
+    except OSError as exc:
+        print(f'Voice unavailable: {exc}', flush=True)
 
 
 def log_say(text: str, blocking: bool = False) -> None:

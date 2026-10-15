@@ -1,5 +1,49 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — Dataset RGB MP4 Streaming (2026-10-15)
+
+새 MuJoCo Source/DataGen의 EpisodeWriter는 숫자만 RAM에 남기고 기존 AsyncVideoWriter로 H264/CRF18,
+카메라별8frame queue에 RGB를 전송한다. 완료 영상 frame count 확인 후 manifest를 마지막에 publish한다.
+VideoFrames는 PyAV exact PTS/index와 최대2decoder, Canonical/MiniVLA/Curation에 연결했다.
+Isaac Source 및 Workspace Annotation/Mimic DataGen은 EpisodeData private writer→기존 HDF5 handler subclass,
+숫자만 HDF5/외부 MP4 refs는 episode attribute. upstream Reader/Pool은 numeric/datagen_info만 사용한다.
+Subset/Resume는 refs와 영상 복사, fingerprint/source payload는 외부영상 bytes 포함. 기존 입력은 변환하지 않는다.
+외부영상 Annotation은 원본 Source 교체 대신 별도 artifact 등록. 과거 NPY/내부 HDF5 읽기 유지.
+MuJoCo Convert는 Canonical RGB를 복제하지 않고 numeric+readonly refs adapter→기존 LeRobot framewise API.
+새 Convert artifact는 LeRobot 자체, 기존 nested Canonical artifact는 계속 읽는다. 임의 MP4 복사 없음.
+SO101_VIDEO_CRF로 새 기록 품질 지정. 숫자 precision/보정/모델H40/6D/partition/stats/기존checkpoint 유지.
+구현/용량/RAM/실제 엔진·변환/실패와 한계는 outputs/workflow_validation/rgb_video_storage/REPORT.md.
+실제 장치/torque/새 정책 학습 없음. dependency 변경/자동 commit/push 없음. 이전 dirty 작업 보존.
+
+## 최신 — Source 연속 XY 배치 / MuJoCo 음성 (2026-10-15)
+
+새 Source는 reset.source_workspace가 runtime 복사본에 uniform XY/yaw0을 적용한다. 두 엔진 공통
+WorkspaceRandomizer의 물체 크기·margin·separation 검사를 재사용한다. immutable task.json은 그대로다.
+scene_configuration.reset에 실제 정책을 기록하고 Source Resume/Replay/Annotation/DataGen은 기록값을 상속한다.
+configured의 original_reset은 원본 Task 정의 hash를 유지하기 위한 실행 정보다. 원본 또는 uniform/yaw0 정책만 허용한다.
+MuJoCo Source에 기존 utils.voice.log_say의 시작/저장/리셋/종료 알림을 연결했다. 음성 실행 실패는 로그로 남긴다.
+최근 사용자 Source render_context는 NVIDIA RTX4060, software=false였다. CPU 물리와 EGL GPU 렌더는 별개다.
+현재 실행 중 worker를 자동 재시작하지 않았다. 새 세션부터 적용, 과거 Source 이어 수집은 당시 정책 유지.
+검증/코드/사용법: outputs/workflow_validation/source_uniform_voice/REPORT.md.
+
+## 최신 — Source Partition / Mimic / 별도 Validation 입력 (2026-10-15)
+
+기존 workflow.episodes의 source_split/export_source_splits와 Curation UI에서 80/20·seed·수동 소속을
+계획/새 subset 저장/Registry 등록한다. 원본 ID는 bounded payload hash와 기록 Dataset/episode,
+group 별칭으로 추적한다. 복사·재번호·파일 간 편입 후에도 중복 원본은 다른 split으로 나눌 수 없다.
+Mimic validate_input은 실제 Source Pool을 검사, preserve_metadata는 검증된 Partition 입력 증거와
+exact_source_ids=null을 기록한다. subtask 원본을 하나로 가정하지 않는다. Source 파일 교체/혼합 Resume 금지.
+Annotation은 실제 export 성공 순서의 원본 이름을 전달하므로 건너뛰기/재번호 후에도 Source ID를 유지한다.
+Curation/Convert가 split·계보·Task/Scene/보정/Review를 보존한다. Train의 MiniVLA Validation Dataset
+선택은 기존 Direct Episodes의 storage.sources/source_index로 두 원본을 읽고 NPY/RGB를 복제하지 않는다.
+명시 Partition은 자동 split보다 우선하고 원본 교집합/증거 부족은 Qwen 로드 전에 거절한다.
+기존 Legacy group 자동 분리·Canonical·ACT/SmolVLA·모델/보정 계산·장치 정책 유지, dependency 변경 없음.
+요약/핵심 코드/실제 검증 범위: outputs/workflow_validation/source_partition_training/REPORT.md.
+사용법: docs/real2sim/MINIVLA_INTEGRATION.md, 계약: docs/minivla/DATA_CONTRACT.md, DATA_FLOW.md.
+실제 Isaac Pool/selection/HDF5 기록기와 Workflow Train subprocess/Policy Registry, GPU train/validation을
+synthetic 자료로 검사했다. 물리 DataGen 성공/실물 평가 아님.
+기존 AGENTS.md 변경과 로컬 로그 보존. 자동 commit/push 없음.
+
 ## 최신 — MiniVLA LeRobot Direct / 공통 Sim 모델 계약 (2026-10-15)
 
 docs/minivla/DATA_CONTRACT.md, VALIDATION.md와 docs/real2sim/PRECISION_CALIBRATION.md,

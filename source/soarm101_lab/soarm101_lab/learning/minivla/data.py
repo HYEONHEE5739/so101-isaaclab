@@ -1,4 +1,4 @@
-"""Canonical NPY or direct LeRobot Parquet/video episodes; never infer motor units."""
+"""Canonical numeric NPY with NPY/MP4 RGB or direct LeRobot Parquet/video episodes; never infer motor units."""
 import argparse
 import hashlib
 import json
@@ -12,6 +12,10 @@ from ...so101_joint_mapping import JOINTS as MODEL_JOINTS, POLICY_UNITS
 
 JOINTS = list(MODEL_JOINTS)
 UNITS = list(POLICY_UNITS)
+
+def lerobot_storages(manifest):
+    storage=manifest.get('storage',{})
+    return storage.get('sources',[storage]) if storage else []
 
 def load_manifest(path):
     path = Path(path)
@@ -34,12 +38,16 @@ def load_manifest(path):
         groups[group] = e['split']
         if not e['instruction'].strip(): raise ValueError('Empty instruction')
         if m.get('storage',{}).get('format') == 'lerobot':
-            e['_storage']=m['storage']
+            e['_storage']=lerobot_storages(m)[e.get('source_index',0)]
         else:e['_path'] = str(path.parent / e['path'])
     if m.get('storage'):
         if m['storage'].get('format')!='lerobot':raise ValueError('Unknown episode storage format')
         from ...workflow.artifacts import fingerprint
-        if fingerprint(m['storage']['root'])!=m['storage']['sha256']:raise ValueError('LeRobot dataset bytes changed')
+        for storage in lerobot_storages(m):
+            if fingerprint(storage['root'])!=storage['sha256']:raise ValueError('LeRobot dataset bytes changed')
+    if any(e.get('source_partition') for e in m['episodes']):
+        from ...workflow.episodes import split_episodes
+        split_episodes(m['episodes'],{e['id']:e['split'] for e in m['episodes']},require_validation=False)
     return m
 
 def lerobot_reader(storage):
@@ -100,7 +108,8 @@ def episode_arrays(e, cameras, hz, reader=None):
         raise ValueError('Action must follow its observation within one control period')
     if '_storage' in e:return arrays # Numeric Parquet only: statistics never decode RGB.
     for camera in cameras:
-        a = np.load(p / f'{camera}.npy', mmap_mode='r', allow_pickle=False)
+        from ...utils.async_video_writer import VideoFrames
+        a = VideoFrames(p / f'{camera}.mp4',t,hz) if (p / f'{camera}.mp4').exists() else np.load(p / f'{camera}.npy', mmap_mode='r', allow_pickle=False)
         if a.ndim != 4 or a.shape[0] != t or a.shape[-1] != 3 or a.dtype != np.uint8:
             raise ValueError('Camera: uint8 [T,H,W,3] required')
         cts = np.load(p / f'{camera}_timestamp.npy', allow_pickle=False)
@@ -141,12 +150,12 @@ def dataset_identity(m):
 
 def fit_statistics(manifest, output, cameras=('side',)):
     m = load_manifest(manifest)
-    reader=lerobot_reader(m['storage']) if m.get('storage') else None
+    readers=[lerobot_reader(s) for s in lerobot_storages(m)]
     moments = {k: [0, np.zeros(6), np.zeros(6)] for k in ('state', 'action')}
     train = [e for e in m['episodes'] if e['split']=='train']
     if not train: raise ValueError('No training episodes')
     for e in train:
-        arrays = episode_arrays(e, cameras, m['control_hz'],reader)
+        arrays = episode_arrays(e, cameras, m['control_hz'],readers[e.get('source_index',0)] if readers else None)
         for key, (n, mean, m2) in moments.items():
             a = arrays[key].astype(np.float64); count=len(a); delta=a.mean(0)-mean
             total=n+count
@@ -179,22 +188,23 @@ class Episodes(Dataset):
         self.pre = RobotPreprocessor(stats)
         self.episodes = [e for e in self.manifest['episodes'] if e['split']==split]
         if not self.episodes: raise ValueError(f'No episodes in split {split}')
-        self.reader=lerobot_reader(self.manifest['storage']) if self.manifest.get('storage') else None
-        if self.reader is not None and not set(cfg.cameras).issubset(self.manifest['storage']['camera_keys']):
+        self.readers=[lerobot_reader(s) for s in lerobot_storages(self.manifest)]
+        self.reader=self.readers[0] if self.readers else None
+        if any(not set(cfg.cameras).issubset(s['camera_keys']) for s in lerobot_storages(self.manifest)):
             raise ValueError('Configured cameras are absent from the LeRobot dataset')
         self.decoders=OrderedDict();self.frame_cache=OrderedDict();self.cache_bytes=0
-        self.arrays = [episode_arrays(e, cfg.cameras, self.manifest['control_hz'],self.reader) for e in self.episodes]
+        self.arrays = [episode_arrays(e, cfg.cameras, self.manifest['control_hz'],self.readers[e.get('source_index',0)] if self.readers else None) for e in self.episodes]
         self.index = [(i,t) for i,a in enumerate(self.arrays) for t in range(len(a['state']))]
         self.weights = torch.tensor([1/len(self.arrays[i]['state']) for i,t in self.index], dtype=torch.double)
     def __len__(self): return len(self.index)
     def images(self,i,t):
         if self.reader is None:return [np.array(self.arrays[i][c][t]) for c in self.cfg.cameras]
         from torchcodec.decoders import VideoDecoder
-        storage=self.manifest['storage'];entry=self.episodes[i];ep=entry['dataset_episode_index']
-        info=self.reader.meta.episodes[ep];images=[]
+        entry=self.episodes[i];storage=entry['_storage'];ep=entry['dataset_episode_index'];reader=self.readers[entry.get('source_index',0)]
+        info=reader.meta.episodes[ep];images=[]
         for camera in self.cfg.cameras:
             key=storage['camera_keys'][camera]
-            path=str(Path(storage['root'])/self.reader.meta.get_video_file_path(ep,key))
+            path=str(Path(storage['root'])/reader.meta.get_video_file_path(ep,key))
             stamp=float(info[f'videos/{key}/from_timestamp'])+float(self.arrays[i]['timestamp'][t])
             cache_key=(path,stamp)
             if cache_key not in self.frame_cache:

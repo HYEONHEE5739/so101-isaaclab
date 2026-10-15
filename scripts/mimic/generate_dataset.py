@@ -97,6 +97,8 @@ from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders imp
     PreStepPolicyObservationsCpuRecorder, PostStepJointTargetsRecorder
 )
 def main():
+    from pathlib import Path
+    if Path(args_cli.output_file).exists():raise FileExistsError('Choose a new dataset output; original data is preserved')
     from soarm101_lab.so101_dataset_contract import inherit_contract, MIMIC_SPACE
     inherit_contract(args_cli.input_file, args_cli.output_file, MIMIC_SPACE)
     num_envs = args_cli.num_envs
@@ -120,6 +122,8 @@ def main():
         seed = datagen_seed(workspace['task']['reset']['seed'], args_cli.generation_seed)
         generation_provenance = dict(generation_seed=seed, workspace_reset_seed=workspace['task']['reset']['seed'],
                                      seed_mode='automatic' if args_cli.generation_seed is None else 'explicit')
+        from soarm101_lab.workflow.artifacts import fingerprint
+        generation_provenance['source_input_sha256']=fingerprint(args_cli.input_file)
         atomic(Path(args_cli.output_file).with_suffix('.generation.json'), generation_provenance)
         print(f'[WORKFLOW] Datagen seed={seed} (workspace seed={workspace["task"]["reset"]["seed"]})', flush=True)
         env_cfg = make_mimic_config(workspace, args_cli.device, num_envs, randomization_seed=seed,
@@ -152,6 +156,9 @@ def main():
     )
 
     # add new recorder term
+    from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import VideoHDF5DatasetFileHandler
+    env_cfg.recorders.dataset_file_handler_class_type=VideoHDF5DatasetFileHandler
+
     env_cfg.recorders.record_post_step_joint_targets = RecorderTermCfg(
         class_type=PostStepJointTargetsRecorder
     )
@@ -264,10 +271,13 @@ def main():
                     planner.plan_visualizer = None
             motion_planners.clear()
 
+    from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import close_video_recorders
+    close_video_recorders(env)
     env.close()  # close/flush recorder before opening the completed dataset
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace, generated=True)
+        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace, generated=True,
+                          expected_source_sha256=generation_provenance['source_input_sha256'])
         import h5py
         import json
         with h5py.File(args_cli.output_file, 'a') as dataset:

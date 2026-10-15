@@ -1,5 +1,16 @@
 # MiniVLA 검증 — 2026-10-15
 
+## Source Partition / 별도 LeRobot Validation
+
+현재 구현 요약·핵심 코드·재현은 `outputs/workflow_validation/source_partition_training/REPORT.md` 참조.
+Source 30→24/6, 원본 복사/재번호·중복 계보·명시 split 보존, Train-only 통계와 두 LeRobot root의
+Direct RGB/chunk/mask, 기존 경로 회귀를 검사했다. 실제 RTX4060 Isaac/Mimic Pool은 24/6으로
+격리됐고 실제 HDF5 exporter의 Annotation 건너뛰기·재번호 후 원본 연결도 확인했다.
+기존 Convert→Workflow Train subprocess→Policy Registry를 실제 실행했으며 Qwen/Flow-DiT 2step에서
+Validation 중 가중치/gradient 불변, optimizer training 2step만 반영, Best Loss 선택을 확인했다.
+입력은 Synthetic Fixture다. 실제 성공 Annotation/물리 DataGen 80/20·새 정책의 작업 성공률·실물은 미검증이다.
+원본 Calibration/Workspace/Dataset을 변경하지 않았으며 모델 구조·Loss·기존 Early Stopping도 그대로다.
+
 ## LeRobot Direct / Precision·Sim 모델 통합
 
 최신 실행 근거는 `outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`다.

@@ -220,35 +220,14 @@ with h5py.File(input_file, "r") as h5:
     # Cameras
     # --------------------------------------------------------
 
-    camera_paths = {}
-
-    obs_group = first["obs/policy"] if exists(first, "obs/policy") else first["obs"]
-    for camera_name in sorted(k for k in obs_group if k.endswith("_cam")):
-        candidates = [
-            f"obs/policy/{camera_name}",
-            f"obs/{camera_name}",
-        ]
-
-        path = next(
-            (candidate for candidate in candidates if exists(first, candidate)),
-            None,
-        )
-
-        if path is None:
-            continue
-
-        image0 = image_to_uint8(get_node(first, path)[0])
-
-        if image0.shape[-1] == 4:
-            image0 = image0[..., :3]
-
-        camera_paths[camera_name] = path
-
-        features[f"observation.images.{camera_name}"] = {
-            "dtype": "video",
-            "shape": tuple(image0.shape),
-            "names": ["height", "width", "channel"],
-        }
+    from soarm101_lab.utils.async_video_writer import hdf5_cameras, external_camera
+    camera_paths = hdf5_cameras(first)
+    for camera_name,spec in camera_paths.items():
+        images=external_camera(input_file,spec,len(first_states),args.fps) if spec.get('file') else get_node(first,spec['path'])
+        image0=image_to_uint8(images[0])[...,:3]
+        if hasattr(images,'close'):images.close()
+        features[f"observation.images.{camera_name}"]={
+            'dtype':'video','shape':tuple(image0.shape),'names':['height','width','channel']}
 
     print("=" * 70)
     print("CONVERSION CONFIG")
@@ -323,21 +302,26 @@ with h5py.File(input_file, "r") as h5:
             )
 
         length = min(len(states), len(actions))
+        timestamp_key=source_env_args.get('observation_timestamp_path')
+        if timestamp_key and exists(demo,timestamp_key):
+            stamps=np.asarray(get_node(demo,timestamp_key),dtype=np.float64).reshape(-1)
+            if (len(stamps)!=length or not np.isfinite(stamps).all()
+                    or (length>1 and not np.allclose(np.diff(stamps),1/args.fps,rtol=0,atol=.2/args.fps))):
+                raise ValueError('Observation/RGB timestamps differ from declared FPS')
+
 
         # ----------------------------------------------------
         # Cameras for this demo
         # ----------------------------------------------------
 
         camera_arrays = {}
-
-        for camera_name, path in camera_paths.items():
-            if not exists(demo, path):
-                raise KeyError(
-                    f"{demo_name} is missing camera path: {path}"
-                )
-
-            camera_arrays[camera_name] = np.asarray(get_node(demo, path))
-            length = min(length, len(camera_arrays[camera_name]))
+        specs=hdf5_cameras(demo)
+        if set(specs)!=set(camera_paths):raise ValueError('Episode camera set differs')
+        if len(states)!=len(actions):raise ValueError('State/action frame count mismatch')
+        for camera_name,spec in specs.items():
+            images=external_camera(input_file,spec,length,args.fps) if spec.get('file') else get_node(demo,spec['path'])
+            if len(images)!=length:raise ValueError('RGB/numeric frame count mismatch')
+            camera_arrays[camera_name]=images
 
         # ----------------------------------------------------
         # Frames
@@ -362,6 +346,8 @@ with h5py.File(input_file, "r") as h5:
 
         print(f"[WORKFLOW] Episode {episode_index}/{total_episodes} 영상 인코딩 / 저장 중", flush=True)
         dataset.save_episode()
+        for images in camera_arrays.values():
+            if hasattr(images,"close"):images.close()
         completed = episode_index
         bar = "#" * (completed * 20 // total_episodes)
         bar = bar.ljust(20, "-")
@@ -389,6 +375,7 @@ with h5py.File(input_file,"r") as source_h5:
         for i,name in enumerate(demo_names)}
     from soarm101_lab.workflow.curation import _group_id
     source_groups={str(i):_group_id(input_file,name,source_h5['data'][name].attrs,source_args) for i,name in enumerate(demo_names)}
+    episode_lineage={str(i):json.loads(source_h5['data'][name].attrs.get('source_lineage','null')) for i,name in enumerate(demo_names)}
     episode_review={str(i):{'recorded_success':bool(source_h5['data'][name].attrs['success']) if 'success' in source_h5['data'][name].attrs else None,
         'success_source':source_h5['data'][name].attrs.get('success_source',source_args.get('success_source','unknown')),
         'annotation':json.loads(source_h5['data'][name].attrs.get('annotation','null')),
@@ -401,6 +388,8 @@ with h5py.File(input_file,"r") as source_h5:
             review['pose_reference']={'source_dataset':str(input_file),'episode':name,'object_telemetry':review['object_telemetry']}
 from soarm101_lab.so101_joint_mapping import RobotCoordinates
 provenance = {"scene_configuration":source_args.get('scene_configuration'),
+              "source_partition":source_args.get('source_partition'),"source_partition_input":source_args.get('source_partition_input'),
+              "episode_source_lineage":episode_lineage,
               "canonical_coordinates":source_args.get('canonical_coordinates') or RobotCoordinates().metadata(),
               "source_groups":source_groups,"episode_review":episode_review,
               "scene_configurations":list({s['sha256']:s for s in episode_scenes.values() if s}.values()),

@@ -1,5 +1,57 @@
 # SO-101 Real2Sim Data Flow
 
+## 새 RGB 저장 계약 (2026-10-15)
+
+새 MuJoCo Source/DataGen은 숫자 NPY와 `side.mp4`/`wrist.mp4`를 저장한다. `EpisodeWriter.append`
+→ 기존 `AsyncVideoWriter`의 bounded queue(카메라별 8 frame) → H264 CRF18. 프레임 드롭 없이
+backpressure를 사용하므로 느린 CPU에서는 append가 기다릴 수 있다. 해상도/FPS/카메라 수는 기존 실행 설정 그대로다.
+`SO101_VIDEO_CRF` 환경변수(0~51, 낮을수록 고품질)로 새 수집 품질을 바꿀 수 있다.
+
+Isaac Source 및 Workspace Annotation, Mimic DataGen은 기존 `EpisodeData`에 숫자만 쌓는다.
+RGB는 스트리밍하고 `VideoHDF5DatasetFileHandler`가 확정한 뒤 HDF5 episode의 `external_videos`
+JSON attribute에 상대경로·shape·FPS·frame 수·codec을 기록한다. 영상은 `<dataset>.videos/<고유폴더>/`
+안에 있으며 HDF5와 함께 이동한다. UUID는 subset/Resume 재번호 충돌을 방지한다. 관측 시각은 기존 `obs/timestamp`다.
+설치된 Isaac Reader는 숫자 dataset을 재귀적으로 읽고 video attribute를 무시한다. Mimic Pool은
+`obs/datagen_info`와 actions를 사용하므로 Source RGB 텐서가 없어도 된다. upstream 코드를 수정하지 않는다.
+비 Workspace legacy Annotation의 기본 HDF5 recorder는 기존 형식을 유지한다.
+
+Canonical `VideoFrames`는 PTS로 요청 frame을 검증하고 RGB uint8 HWC 하나만 반환한다.
+열린 decoder는 최대2개이며 Curation의 8frame/16MiB LRU와 background seek는 그대로다.
+기존 RGB NPY/내부 HDF5도 읽는다. 숫자 timestamp 검사는 유지하고 MP4 frame 번호를 대응시킨다.
+MP4 영상의 PTS는 episode-relative CFR이며 실제 장치 노출 timestamp의 새 측정값이 아니다.
+
+새 Episode는 숨긴 staging에서 인코딩한 뒤 frame 수를 검사하고 numeric/manifest를 확정한다.
+정상 Stop/취소/예외는 미완성 영상을 폐기한다. 강제 SIGKILL은 staging을 남길 수 있지만 정식 Episode에 등록되지 않는다.
+Resume/subset은 이전 데이터와 영상을 덮어쓰지 않고 필요한 영상만 새 결과에 복사한다.
+외부 영상 Annotation은 Source 교체 대신 별도 annotated artifact로 등록하여 참조 경로를 보존한다.
+artifact/source payload hash는 외부 MP4 bytes까지 포함한다. 기존 내부 HDF5/NPY identity는 유지한다.
+
+MuJoCo Convert는 Source를 read-only로 선택하고 숫자+영상참조만 작은 임시 HDF5에 전달한다.
+기존 Converter는 HDF5/NPY/MP4를 frame 단위로 읽어 표준 LeRobot API에 전달한다.
+새 결과는 LeRobot MP4/Parquet 자체로 등록하며 Canonical RGB 복사본을 만들지 않는다.
+원본 MP4를 무조건 복사하지 않고 기존 LeRobot codec/metadata 계약으로 재인코딩한다.
+기존 LeRobot Direct/MiniVLA H40/6D/Source Partition/Train-only 통계/Resume 계약은 그대로다.
+검증과 용량 비교: `outputs/workflow_validation/rgb_video_storage/REPORT.md`.
+
+## Source Partition → Mimic → MiniVLA (2026-10-15)
+
+`source_split()`은 원본 읽기만 하고, `export_source_splits()`는 기존 `export_subset()`으로 두 새
+Source를 만든다. HDF5 env_args / Canonical provenance의 `source_partition`, episode의
+`source_lineage`가 payload ID와 원본 Dataset/episode를 보존한다. source_split.json은 전체 계획이다.
+동일 payload 또는 알려진 group 별칭은 함께 배정하며 seed로 재현한다.
+
+Annotation은 성공적으로 export한 원본 이름의 순서를 전달해 실패·건너뛰기 후 재번호도 추적한다.
+이 매핑이 없거나 출력 개수와 다르면 Partition 계보 저장을 거절한다. Mimic DataGen은 `validate_input()`에서 실제 입력 Partition을
+검사하고 기존 `generation.py`가 그 한 파일만 Pool에 로드한다. 완료 후 `preserve_metadata()`가
+입력 hash/실제 Source 집합을 기록하고 정확한 subtask 원본은 UNKNOWN으로 남긴다.
+분할된 Source는 Annotation 성공 뒤에도 원본 경로를 교체하지 않는다. 다른 Partition의 Resume 병합은 거절한다.
+
+Curation은 split을 유지하며 Source subset은 Pool을 좁히고 생성 subset은 원래 입력 Pool을 보존한다.
+기존 Converter가 partition/input evidence/episode lineage/Review와 좌표 계약을 LeRobot provenance로
+전달한다. 별도 Train/Val Registry artifact는 MiniVLA manifest에서 두 root를 참조하고 각각 lazy decode한다.
+`split_episodes()`가 원본 ID 교집합을 검사하고, Train-only 통계 및 기존 Validation Loss/Best 선택으로
+이어진다. 알려지지 않은 계보를 새 증거로 재라벨하지 않는다. 실제 모터/성공 rollout은 별도 검증이다.
+
 ## Direct 학습과 Calibration 계약 (2026-10-15)
 
 Isaac은 HDF5 Source→Annotation→DataGen→Curation→기존 LeRobot Convert를 유지한다.

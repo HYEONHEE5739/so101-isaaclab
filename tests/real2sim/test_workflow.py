@@ -27,6 +27,20 @@ def test_hardware_roundtrip_and_gripper():
         assert real_action(real_observation(native))['gripper.pos'] == pytest.approx(percent, abs=1e-5)
 
 
+def test_source_uniform_reset_resume_and_isaac_dataset_binding(published,tmp_path):
+    from test_source_partitions import source_fixture
+    from soarm101_lab.real2sim.workspaces.reset import source_workspace
+    from soarm101_lab.real2sim.workspaces.demo import verify_dataset
+    from soarm101_lab.workflow.tasks import configured
+    original=load(published[3]);new=source_workspace(configured(original))
+    for name,w in [('old',configured(original)),('new',new)]:
+        path=tmp_path/(name+'.hdf5');source_fixture(path,4,w)
+        bound,_=verify_dataset(path,published[3])
+        resumed=source_workspace(original,path)
+        assert bound['task']['reset']==w['task']['reset']==resumed['task']['reset']
+    assert original['task']['reset']['mode']=='four_anchors' and new['task']['reset']['mode']=='uniform'
+
+
 def test_contract_semantics_and_mapping_rejection(published):
     c = coordinate_contract(load(published[3]))
     assert describe(c)['id'] == 'MODEL_JOINT_RAD_V1'
@@ -287,6 +301,57 @@ def test_annotation_replaces_source_only_after_validation(published, tmp_path, m
         registry.verify(result)
         assert not result_path.exists()
     assert not list(tmp_path.glob('.*annotation_backup*'))
+
+
+@pytest.mark.parametrize('canonical', [False, True])
+def test_partition_source_annotation_cannot_replace_original(published, tmp_path, canonical):
+    from test_source_partitions import source_fixture
+    from soarm101_lab.workflow.episodes import export_source_splits
+    from soarm101_lab.workflow.artifacts import fingerprint
+    source_path=tmp_path/'source.hdf5';source_fixture(source_path,4,load(published[3]))
+    plan=export_source_splits(source_path,tmp_path/'split')
+    path=Path(plan['outputs']['train'])
+    if canonical:
+        path=tmp_path/'canonical';folder=path/'episode';folder.mkdir(parents=True)
+        for name in ('state','action'):np.save(folder/(name+'.npy'),np.zeros((3,6),np.float32))
+        (folder/'outcome.json').write_text('{}')
+        (path/'manifest.json').write_text(json.dumps({'episodes':[{'id':'episode','path':'episode'}]}))
+        (path/'project_provenance.json').write_text(json.dumps({'workspace':metadata(load(published[3])),
+            'coordinates':coordinate_contract(load(published[3])),'source_partition':plan['partitions']['train']}))
+    registry=Registry(tmp_path/'registry');source=registry.register('source',path)
+    before=fingerprint(path)
+    with pytest.raises(ValueError,match='Source Partition is immutable'):
+        registry.promote_annotation(source,tmp_path/'annotation_not_opened.hdf5')
+    assert fingerprint(path)==before and registry.get(source['id'])['status']=='SUCCEEDED'
+
+
+def test_annotation_skips_and_reorders_keep_actual_source_identity(published,tmp_path,monkeypatch):
+    import h5py,sys
+    from test_source_partitions import source_fixture
+    from soarm101_lab.workflow.episodes import export_source_splits,source_catalog
+    from soarm101_lab.workflow.curation import export_subset
+    from soarm101_lab.workflow.artifacts import fingerprint
+    from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
+    # Metadata adapter fixture only; no simulated grasp/annotation success is claimed.
+    monkeypatch.setitem(sys.modules,'soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders',
+        SimpleNamespace(telemetry_metadata=lambda names:{'object_telemetry':{},'observation_timestamp_path':'obs/timestamp'}))
+    original=tmp_path/'source.hdf5';source_fixture(original,4,load(published[3]))
+    source=Path(export_source_splits(original,tmp_path/'split')['outputs']['train'])
+    records,_=source_catalog(source);chosen=['demo_2','demo_0']
+    output=tmp_path/'partial.hdf5';export_subset(source,output,chosen)
+    with h5py.File(output,'a') as h:
+        for g in h['data'].values():
+            for key in ('source_lineage','source_group','split'):del g.attrs[key]
+    before=fingerprint(source);untouched=fingerprint(output)
+    with pytest.raises(ValueError,match='export order/count'):
+        preserve_metadata(source,output,published[3])
+    assert fingerprint(output)==untouched
+    preserve_metadata(source,output,published[3],expected_source_sha256=before,annotation_sources=chosen)
+    after,_=source_catalog(output)
+    assert after=={f'demo_{i}':records[name] for i,name in enumerate(chosen)}
+    assert fingerprint(source)==before
+    with h5py.File(output) as h:
+        assert [h['data'][f'demo_{i}'].attrs['annotation_source_episode'] for i in range(2)]==chosen
 
 
 def test_workspace_live_profile_updates_static_and_dynamic_layout(published, monkeypatch):

@@ -54,7 +54,8 @@ class MujocoBackend(SimBackend):
         self.width, self.height = width, height
         if simulation_configuration is not None:identity_sim=simulation_configuration['identity_sim']
         self.scene_path, self.workspace, self.metadata = build_scene(
-            output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids)
+            output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
+            reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'))
         if identity_sim: self.metadata['simulation_joint_frame'] = 'urdf'
         if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
         self.model = mujoco.MjModel.from_xml_path(str(self.scene_path))

@@ -112,6 +112,23 @@ class Operations:
         else:
             self.registry.verify(artifact)
         opts = dict(options)
+        if stage=='train' and opts.get('validation_dataset'):
+            if opts.get('architecture')!='minivla' or artifact['type']!='dataset' or artifact.get('format')=='so101.canonical/1':
+                raise ValueError('Separate Validation artifact requires MiniVLA LeRobot inputs; select the converted MP4/Parquet datasets')
+            validation=self.registry.get(opts['validation_dataset'])
+            if validation['type']!='dataset':raise ValueError('Validation input must be a converted dataset artifact')
+            if dry:inspect_artifact(validation['type'],validation['path'])
+            else:self.registry.verify(validation)
+            from .episodes import split_episodes
+            evidence=[]
+            for role,record in (('train',artifact),('val',validation)):
+                provenance=record.get('provenance',{});partition=provenance.get('source_partition')
+                if not partition or partition.get('split')!=role:raise ValueError('Select verified train and val Source Partition datasets')
+                evidence.append({'id':role,'group_id':provenance.get('source_groups',{}).get('0','UNKNOWN'),
+                    'source_partition':partition,'source_lineage':provenance.get('episode_source_lineage',{}).get('0'),
+                    'source_partition_input':provenance.get('source_partition_input')})
+            split_episodes(evidence)
+            opts['validation_artifact']=validation
         if artifact.get('status') == 'SUPERSEDED':
             raise ValueError('Select the annotated artifact; this source has been replaced')
         backend = opts.setdefault('backend', 'isaac')
@@ -158,6 +175,12 @@ class Operations:
             raise ValueError('Derived stages must inherit input artifact tasks; do not relabel demonstrations')
         if w:
             definitions = [validate(t, w) for t in definitions]
+            if stage == 'source':
+                from ..real2sim.workspaces.reset import source_workspace
+                w = source_workspace(w,opts.get('resume_data'))
+            elif stage in ('replay','annotate','datagen'):
+                from .tasks import configured,recorded_scene
+                w = configured(w,reset=recorded_scene(artifact,w)['reset'])
             if stage in ('source','sim_eval','real_eval','replay','annotate','datagen'):
                 from .tasks import configured
                 for definition in definitions:
@@ -347,7 +370,14 @@ class Operations:
                     notify(f"HDF5 무손실 압축: {saving['before_bytes']/2**20:.1f} → {saving['after_bytes']/2**20:.1f} MiB")
             # Validate artifact content even when an Isaac shutdown masks a process failure.
             completed_state = {**state, 'status': 'STOPPED' if resumable_stop else 'SUCCEEDED'}
-            replace_annotation = stage == 'annotate' and artifact['type'] == 'source'
+            partitioned=artifact.get('source_partition') or artifact.get('provenance',{}).get('source_partition')
+            replace_annotation = stage == 'annotate' and artifact['type'] == 'source' and not partitioned
+            if replace_annotation and target.suffix in ('.hdf5','.h5'):
+                import h5py
+                with h5py.File(target,'r') as h:
+                    if any(g.attrs.get('external_videos') for n,g in h['data'].items() if n.startswith('demo_')):
+                        replace_annotation=False
+                        notify('외부 영상 Annotation · Source 원본 보존 · 별도 annotated 데이터로 진행')
             if replace_annotation and inspect_artifact('annotated', target)['episode_count'] != artifact['episode_count']:
                 notify('일부 episode만 Annotation 통과 · source 원본 보존 · 통과한 별도 annotated 데이터로 진행')
                 replace_annotation = False
@@ -359,7 +389,9 @@ class Operations:
                     atomic(report_path, report)
                 target = Path(result['path'])
             else:
-                result = self.registry.register(plan['type'], target, parents=[artifact['id']], extra=completed_state)
+                parents=[artifact['id']]
+                if plan['options'].get('validation_artifact'):parents.append(plan['options']['validation_artifact']['id'])
+                result = self.registry.register(plan['type'], target, parents=parents, extra=completed_state)
             state.update(status='STOPPED' if resumable_stop else 'SUCCEEDED', artifact=result['id'])
             notify('완료: ' + str(target))
             return result
@@ -447,6 +479,12 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
             if t['pick_object_id'] == w['task']['pick'] and t['target_object_id'] == w['task']['place']]
     if stage == 'sim_eval' and opts.get('task_scope') == 'all': definitions = [t for t in catalog(w) if t['pick_object_id'] in opts.get('active_object_ids',w['task']['dynamic'])]
     definitions = [validate(t, w) for t in definitions]
+    if stage == 'source':
+        from ..real2sim.workspaces.reset import source_workspace
+        w = source_workspace(w,opts.get('resume_data'))
+    elif stage in ('replay','annotate','datagen'):
+        from .tasks import configured,recorded_scene
+        w = configured(w,reset=recorded_scene(artifact,w)['reset'])
     if stage in ('source','sim_eval','replay','annotate','datagen'):
         from .tasks import configured
         for definition in definitions:configured(w,definition,opts['active_object_ids'], 'mujoco')

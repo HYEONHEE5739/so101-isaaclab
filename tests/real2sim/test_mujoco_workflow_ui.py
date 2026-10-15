@@ -133,6 +133,17 @@ def test_model_specific_options_are_isolated_and_preserved(panel):
     assert panel.stage_options()['steps'] == 12345
 
 
+def test_minivla_separate_validation_selection_does_not_affect_other_trainers(panel):
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    panel.validation_input.addItem('Verified Val Source 6','fixture_validation_dataset')
+    panel.validation_input.setCurrentIndex(1)
+    assert panel.stage_options()['validation_dataset']=='fixture_validation_dataset'
+    assert 'validation_dataset' not in panel.options.editors
+    panel.architecture.setCurrentIndex(panel.architecture.findData('act'))
+    assert 'validation_dataset' not in panel.stage_options()
+
+
 def test_minivla_custom_json_overrides_head_preset_and_drops_foreign_options(panel):
     from soarm101_lab.learning.minivla.config import MODEL_ROOT
     panel.stage.setCurrentIndex(panel.stage.findData('train'))

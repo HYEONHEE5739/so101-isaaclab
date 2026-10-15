@@ -13,6 +13,10 @@ MiniVLA 모델 package는 기존 `soarm101_lab.learning.minivla` 하나다.
 
 1. Workspace Pipeline에서 Workspace/Task/backend와 기존 엔진별 Python을 선택한다.
 2. Source를 사용자 조작으로 기록한다. 새 Scene의 측정/관절 좌표 계약과30Hz를 유지한다.
+   새 Source는 작업영역 전체의 연속 XY에서 회전 없이 배치한다. 물체 크기·가장자리 여유·물체 간 간격을
+   고려하며 서로 겹치면 다시 뽑는다. 과거 Source 이어 수집은 당시 배치 정책을 유지한다.
+   MuJoCo도 기존 음성 알림을 사용한다. `egl`은 GPU 렌더 경로이고 `software-egl`은 소프트웨어 렌더다.
+   MuJoCo 물리 계산은 CPU다. 실제 렌더 장치는 기록의 `scene.render_context`로 확인한다.
 3. Replay로 영상/목표를 확인한다. Annotation으로 grasp/place 경계를 생성·검토한다.
 4. Datagen/Curation에서 성공한 Source의 변형과 source group을 보존한다.
 5. Convert에서 기존 joint-radian/LeRobot 데이터로 변환한다. RGB 원본과 calibration은 보존한다.
@@ -61,6 +65,35 @@ Replay/Annotation/DataGen/Sim Eval은 기록된 모델을 상속한다. 원형 �
 
 ## Data Curation에서 동작 검수
 
+### Source 기반 Train / Validation 분리
+
+1. Source 수집 후 Data Curation에서 **원본 Source**를 연다. `Source Train` 기본 80%, `Seed` 기본 0으로
+   **Source 분할 미리보기**를 누른다. 목록의 train/val과 실제 개수를 확인하고 필요하면 선택 Source의
+   소속을 바꾼다. 같은 원본·동일 내용의 복제 episode는 서로 다른 split으로 나눌 수 없다.
+2. **Train / Validation 저장**으로 새 폴더를 만든다. train.hdf5 / val.hdf5(또는 Canonical 폴더)와
+   source_split.json을 생성하고 기존 Registry에 두 Source를 등록한다. 원본은 유지한다.
+   30개의 독립 Source이면 24/6이다. 중복 group을 묶어야 하면 실제 비율이 달라질 수 있다.
+3. 두 Source를 각각 선택해 기존 Annotation→DataGen을 실행한다. 예: Train `num_successful_demos=80`,
+   Val `20`. 이 값과 generation_seed는 기존 설정이다. Source split seed는 이 생성 seed와 별개다.
+   Partition Source의 Annotation 결과는 별도 artifact이며 원본 Source 파일을 교체하지 않는다.
+4. 각 생성 결과를 Curation에서 검토·선별한다. 저장된 split은 잠기고, 생성 episode 수와 원래 Source
+   Pool 크기를 구분해 표시한다. Mimic의 정확한 subtask 원본은 UNKNOWN이어도 실제 입력 Source Pool이
+   검증되면 Partition 계보를 유지한다. UNKNOWN 문자열을 임의 group 이름으로 바꿔 인정하지 않는다.
+5. Train/Val을 각각 기존 Convert로 LeRobot artifact로 만든다. 예: repo_id `local/scene2-train`,
+   `local/scene2-val`. MiniVLA Train에서 주 입력은 Train, **Validation Dataset (MiniVLA)**에는 Val을 고른다.
+   같은 Source를 공유하면 학습 전 오류다. 데이터셋 MP4를 합치거나 NPY로 다시 저장하지 않는다.
+6. 로그의 `Source lineage verified`, Source 수/episode 수, `leakage NONE`과 training/validation loss를
+   확인한다. 정규화는 Train만, Best Checkpoint는 기존 Validation Loss로 선택한다. 별도 Validation 선택이
+   없고 명시 Partition도 없는 과거 자료는 기존 Source Group 자동 분리를 그대로 사용한다.
+
+Python에서는 기존 `workflow.episodes.source_split()` / `export_source_splits()`로 같은 분할을 쓸 수 있다.
+동일한 내용의 Source는 파일 복사·재번호·다른 파일 편입 뒤에도 payload ID로 식별한다. 알려진 group
+별칭도 함께 검사한다. Curation에서 Source를 줄이면 허용 Pool만 축소하고 split은 유지한다.
+원본이 불명확한 과거 생성 데이터에는 새 Partition 증거를 추측해 붙이지 않는다.
+
+실제 검증 범위·핵심 코드·사용자가 확인할 것:
+`outputs/workflow_validation/source_partition_training/REPORT.md`.
+
 1. 기존 Workspace Pipeline의 **Data Curation**을 열고 Source/Datagen HDF5 또는 canonical 폴더를 선택한다.
 2. Episode를 선택한다. URDF 로봇, EE/Target/Distractor 경로, 관절 목표 그래프와 RGB를 같은 frame으로 본다.
    `3D / XY / XZ / YZ`, 마우스 회전·휠 확대, Side/Wrist 선택, slider seek, 0.25×/0.5×/1×/2×를 쓴다.
@@ -79,3 +112,13 @@ Replay/Annotation/DataGen/Sim Eval은 기록된 모델을 상속한다. 원형 �
 [DATA_CONTRACT.md](../minivla/DATA_CONTRACT.md)를 참조한다. 새 수집부터 모든 active pose가 기록된다.
 저장된 Workspace를 찾을 수 없으면 geometry/등록 근거가 부족하다는 표시를 확인한다.
 실행 검증과 제한: `outputs/workflow_validation/curation_object_playback/REPORT.md`.
+
+## 새 Source 영상 저장
+
+UI를 재시작하고 기존과 같은 Source Demo 수집을 시작한다. MuJoCo는 Episode 폴더의 `side.mp4`,
+`wrist.mp4`와 기존 숫자 NPY를 저장한다. Isaac은 HDF5와 같은 위치의 `.videos` 폴더를 함께 보존한다.
+Curation/Replay/Annotation/DataGen/Convert는 저장 형식을 자동으로 읽는다. 기존 Dataset을 변경하지 않는다.
+새 MuJoCo Convert 결과는 LeRobot Dataset 자체이며 RGB를 복제한 Canonical 폴더를 추가하지 않는다.
+품질을 바꾸려면 UI 실행 환경의 `SO101_VIDEO_CRF`를 지정한다(기본18). 해상도/FPS는 바꾸지 않는다.
+새 외부영상 Annotation은 원본 Source를 유지하는 별도 artifact다. `.videos`만 삭제하면 해당 영상은 읽을 수 없다.
+자세한 구현/측정: `outputs/workflow_validation/rgb_video_storage/REPORT.md`.

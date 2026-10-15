@@ -12,7 +12,7 @@ TASK_ENV = 'SO101_TASK_SELECTION'
 def catalog(workspace):
     task = workspace['task']
     if task.get('mode') == 'geometry_review': return []
-    reset_hash = hashlib.sha256(json.dumps(task['reset'], sort_keys=True).encode()).hexdigest()
+    reset_hash = hashlib.sha256(json.dumps(workspace.get('original_reset',task['reset']), sort_keys=True).encode()).hexdigest()
     if task.get('tasks'):
         return [dict(schema='so101.task-definition/1', task_id=t['id'], pick_object_id=t['pick'],
                      target_object_id=t['place'], language_instruction=t['instruction'],
@@ -84,7 +84,7 @@ def workspace_key(workspace):
     return {'profile_sha256': hashlib.sha256(json.dumps(workspace['profile'],sort_keys=True).encode()).hexdigest()}
 
 
-def configured(workspace, definition=None, active_object_ids=None, backend=None):
+def configured(workspace, definition=None, active_object_ids=None, backend=None, reset=None):
     review = workspace['task'].get('mode') == 'geometry_review'
     definition = definition or workspace.get('task_definition')
     definition = validate(definition, workspace) if definition is not None else (None if review else selected(workspace))
@@ -94,6 +94,14 @@ def configured(workspace, definition=None, active_object_ids=None, backend=None)
     if definition is not None and definition['pick_object_id'] not in active:
         raise ValueError('Pick target is not in active object set: '+definition['pick_object_id'])
     w = copy.deepcopy(workspace)
+    original = copy.deepcopy(workspace.get('original_reset',workspace['task']['reset']))
+    reset = reset or workspace.get('scene_configuration',{}).get('reset')
+    if reset is not None:
+        uniform = {**original,'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.}
+        if reset != original and reset != uniform:
+            raise ValueError('Unsupported runtime reset policy')
+        w['original_reset'] = original
+        w['task']['reset'] = copy.deepcopy(reset)
     w['all_dynamic_object_ids'] = object_ids(workspace)
     excluded = set(w['all_dynamic_object_ids']) - set(active)
     w['excluded_object_ids'] = sorted(excluded)
@@ -138,7 +146,7 @@ def recorded_scene(artifact, workspace, required=True):
         payload = {k:v for k,v in scene.items() if k != 'sha256'}
         digest = hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         if scene.get('sha256') != digest:raise ValueError('Recorded scene configuration hash mismatch')
-        bound=configured(workspace,scene.get('task_definition'),ids,scene.get('backend'))['scene_configuration']
+        bound=configured(workspace,scene.get('task_definition'),ids,scene.get('backend'),reset=scene.get('reset'))['scene_configuration']
         for key in ('pick_object_id','place_target_id','reset'):
             if scene.get(key)!=bound[key]:raise ValueError('Recorded scene semantic mismatch: '+key)
         return copy.deepcopy(scene)

@@ -117,6 +117,9 @@ class WorkflowPanel(QWidget):
         self.architecture.addItem('MiniVLA · Qwen3-VL + Flow-DiT', 'minivla')
         primary_form.addRow('학습 모델', self.architecture)
         self.architecture.currentIndexChanged.connect(self.change_model)
+        self.validation_input=QComboBox();self.validation_input.addItem('기존 자동 분리 / 단일 dataset',None)
+        primary_form.addRow('Validation Dataset (MiniVLA)',self.validation_input)
+        self.validation_input.currentIndexChanged.connect(self.update_ready)
 
         self.resume_training = QCheckBox('이어서 학습')
         self.resume_training.setToolTip('모델·optimizer·scheduler·step 복원. 저장 경로를 비우면 기존 학습 폴더에 계속 저장합니다.')
@@ -338,6 +341,9 @@ class WorkflowPanel(QWidget):
         self.configure_stage()
         self.primary.setVisible(stage in ('source', 'annotate', 'train', 'datagen', 'sim_eval'))
         primary_form = self.primary.layout()
+        validation_visible=stage=='train' and self.architecture.currentData()=='minivla'
+        self.validation_input.setVisible(validation_visible)
+        primary_form.labelForField(self.validation_input).setVisible(validation_visible)
         for widget, visible in ((self.port, stage == 'source'), (self.episodes, stage == 'source'), (self.episode_time, stage == 'source'), (self.reset_time, stage == 'source'), (self.annotation_mode, stage == 'annotate'), (self.architecture, stage == 'train'), (self.resume_training, stage == 'train'), (self.resume_path, stage == 'train'), (self.resume_browse, stage == 'train'), (self.resume_data, stage in ('source', 'datagen')), (self.resume_data_browse, stage in ('source', 'datagen')), (self.eval_seed_mode, stage == 'sim_eval'), (self.eval_seed, stage == 'sim_eval')):
             widget.setVisible(visible); primary_form.labelForField(widget).setVisible(visible)
         from .option_help import help_html
@@ -350,19 +356,27 @@ class WorkflowPanel(QWidget):
         allowed = STAGES[self.stage.currentData()][0]
         try: workspace = metadata(load(self.workspace.text())) if self.workspace.text() else None
         except Exception: workspace = None
+        validation_id=self.validation_input.currentData();self.validation_input.blockSignals(True);self.validation_input.clear();self.validation_input.addItem('기존 자동 분리 / 단일 dataset',None)
         for a in self.registry.all():
             if a.get('status', 'SUCCEEDED') != 'SUCCEEDED' or not Path(a['path']).exists():
                 continue
+            partition=a.get('provenance',{}).get('source_partition') or a.get('source_partition')
+            if a['type']=='dataset' and partition and partition['split']=='val' and (not workspace or a.get('workspace')==workspace):
+                self.validation_input.addItem(f'Val Source {len(partition["source_ids"])} · {Path(a["path"]).name}',a['id'])
             engine_match = a.get('backend', 'isaac') == self.backend.currentData() if hasattr(self, 'backend') else True
             if a['type'] in allowed and (a['type'] == 'workspace' or engine_match or self.stage.currentData() in ('train', 'sim_eval', 'hf_dataset', 'hf_policy')) and (a['type'] == 'workspace' or not workspace or not a.get('workspace') or a['workspace'] == workspace):
                 path = Path(a['path'])
                 tasks = ','.join(t['task_id'] for t in a.get('tasks', []))
                 created = time.strftime('%m/%d %H:%M', time.localtime(a['created_at']))
                 label = f"{created} · {a.get('backend', 'isaac')} · {tasks or a['type']} · {path.parent.name}/{path.name}"
+                if partition:
+                    info=a.get('format');count=a.get('episode_count',info.get('total_episodes','?') if isinstance(info,dict) else '?')
+                    label+=f' · {partition["split"]} Source {len(partition["source_ids"])} / episodes {count}'
                 self.inputs.addItem(label, a['id'])
                 self.inputs.setItemData(self.inputs.count() - 1, a['path'], Qt.ItemDataRole.ToolTipRole)
         index = self.inputs.findData(selected)
         self.inputs.setCurrentIndex(index if index >= 0 else self.inputs.count() - 1)
+        vi=self.validation_input.findData(validation_id);self.validation_input.setCurrentIndex(max(0,vi));self.validation_input.blockSignals(False)
         self.inputs.blockSignals(False); self.sync_tasks(); self.update_ready()
 
     def select_workspace(self, path):
@@ -575,6 +589,7 @@ class WorkflowPanel(QWidget):
             opts = {k: v for k, v in opts.items() if k in TRAIN_KEYS[self.architecture.currentData()]
                     or k in ('backend', 'python', 'mode')}
             opts['architecture'] = self.architecture.currentData()
+            if opts['architecture']=='minivla' and self.validation_input.currentData():opts['validation_dataset']=self.validation_input.currentData()
             if opts['architecture'] == 'minivla' and not opts.get('model_config'):
                 from ..learning.minivla.config import MODEL_ROOT
                 opts['model_config'] = str(MODEL_ROOT / 'configs/default.json')
@@ -648,6 +663,9 @@ class WorkflowPanel(QWidget):
         if self.options_context:
             self.saved_stage_options[self.options_context] = json.loads(self.options.toPlainText())
         self.reset_options(restore_saved=True)
+        if hasattr(self,'validation_input'):
+            visible=self.architecture.currentData()=='minivla'
+            self.validation_input.setVisible(visible);self.primary.layout().labelForField(self.validation_input).setVisible(visible)
         self.update_ready()
 
     def change_section(self):

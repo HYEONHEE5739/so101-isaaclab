@@ -17,7 +17,7 @@ def verify_dataset(path, workspace):
     scene = recorded_scene(artifact,w)
     definitions = from_artifact(artifact,w)
     definition = scene.get('task_definition') or (definitions[0] if len(definitions)==1 else None)
-    w = configured(w,definition,scene['active_object_ids'],backend='isaac')
+    w = configured(w,definition,scene['active_object_ids'],backend='isaac',reset=scene['reset'])
     return w,args
 
 

@@ -38,6 +38,43 @@ def definition(w,pick='cube_red'):
     return next(t for t in catalog(w) if t['pick_object_id']==pick)
 
 
+def test_source_uniform_xy_preserves_original_and_recorded_policy(workspace,tmp_path):
+    from soarm101_lab.real2sim.workspaces.reset import source_workspace
+    from soarm101_lab.real2sim.precision import simulation_configuration
+    from soarm101_lab.simulation.mujoco_backend import MujocoBackend
+    original=copy.deepcopy(workspace)
+    run=source_workspace(configured(workspace,definition(workspace)))
+    assert workspace==original and run['task']['reset']['mode']=='uniform'
+    assert run['task']['reset']['yaw_rad']==[0.,0.]
+    assert configured(run)['scene_configuration']==run['scene_configuration']
+    assert recorded_scene({'scene_configuration':run['scene_configuration']},workspace)==run['scene_configuration']
+    old=configured(workspace)['scene_configuration']
+    assert recorded_scene({'scene_configuration':old},workspace)['reset']==original['task']['reset']
+    randomizer=WorkspaceRandomizer(run,seed=41);points=[]
+    support=run['profile']['objects'][run['task']['reset']['support_object']]
+    center=np.array(support['T_workspace'])[:2,3];half=np.array(support['dimensions_m'])[:2]/2
+    for _ in range(500):
+        sample=randomizer.sample()['cube_positions'];names=list(sample)
+        for i,name in enumerate(names):
+            xy=np.array(sample[name][:2]);size=np.array(run['profile']['objects'][name]['dimensions_m'])[:2]
+            assert np.all(abs(xy-center)+size/2+run['task']['reset']['margin_m']<=half+1e-10)
+            points.append(xy-center)
+            for other in names[:i]:
+                other_size=np.array(run['profile']['objects'][other]['dimensions_m'])[:2]
+                assert np.any(abs(xy-np.array(sample[other][:2]))>(size+other_size)/2+run['task']['reset']['separation_m'])
+    assert np.any(np.linalg.norm(points,axis=1)<.01) # The center gap of four-anchor sampling is populated.
+    simulation=simulation_configuration(run,backend='mujoco',scene_configuration=run['scene_configuration'])
+    with MujocoBackend(tmp_path/'uniform_model',workspace['root'],render_backend='none',task_definition=run['task_definition'],
+                       simulation_configuration=simulation) as backend:
+        assert backend.randomizer.sample()['sampling']['mode']=='uniform'
+        assert backend.metadata['scene_configuration']['reset']==run['task']['reset']
+        backend.reset(seed=41)
+        assert np.isfinite(backend.data.qpos).all()
+        for name in run['task']['dynamic']:
+            pose=backend.get_state()['object_poses'][name]
+            np.testing.assert_allclose(np.array(pose)[:3,:3],np.eye(3),atol=1e-7)
+
+
 @pytest.mark.parametrize('ids',[['cube_red'],['cube_red','cube_blue'],['cube_red','cube_green','cube_blue'],['cube_green','cube_red']])
 def test_runtime_filters_without_mutating_workspace(workspace,ids):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend

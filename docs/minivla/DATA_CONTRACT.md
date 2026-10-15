@@ -1,6 +1,6 @@
 # 데이터 규격
 
-기존 데이터의 축 순서와 단위를 자동 추측하지 않는다. 기존 `Episodes`가 Canonical NPY와
+기존 데이터의 축 순서와 단위를 자동 추측하지 않는다. 기존 `Episodes`가 숫자 Canonical NPY + RGB NPY/MP4와
 LeRobot Parquet/MP4를 모두 읽는다. 새 LeRobot 학습은 작은 manifest/statistics만 생성하며
 `canonical_source`나 전체 RGB NPY 복사본을 만들지 않는다. Canonical 입력도 계속 지원한다.
 
@@ -14,7 +14,7 @@ LeRobot Parquet/MP4를 모두 읽는다. 새 LeRobot 학습은 작은 manifest/s
 
 숫자 Parquet만 episode별로 읽어 기존 RobotCoordinates로 5rad+gripper fraction을 구성한다.
 통계는 train split만 사용하고 RGB를 디코딩하지 않는다. 명시적인 Source Group이 없거나
-UNKNOWN 계보이면 split 전에 거절한다. 변형 episode를 별도 독립 group으로 만들지 않는다.
+검증된 Source Partition도 없는 UNKNOWN 계보이면 split 전에 거절한다. 변형 episode를 별도 독립 group으로 만들지 않는다.
 MP4는 CPU torchcodec exact seek, FFmpeg thread 1, decoder 최대 2개, RGB 최대 8frame/16MiB
 LRU다. 기본 학습 프로세스에 DataLoader worker를 추가하지 않는다. 모델을 띄우기 전에
 camera 존재/숫자 shape·단위·시각을 확인하고, decode 실패·누락·PTS 불일치는 episode/frame과 함께
@@ -31,6 +31,27 @@ Batch 형식과 H40 padding/mask는 아래와 동일하다. chunk는 episode를 
 검증 결과: [VALIDATION.md](VALIDATION.md), 상세 근거:
 `outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`.
 
+## 명시 Source Partition / 별도 Validation artifact
+
+새 Source 분할은 기존 `episodes.source_split`/Curation subset export를 쓴다. `source_partition`은
+원본 Dataset identity·episode payload ID·group 별칭·전체 분할 계획·선택 Pool·split·seed를 보존한다.
+복사/재번호 후에도 원본 ID를 유지하고, 같은 원본이나 group이 train/val에 겹치면 거절한다.
+이미 지정된 partition split은 자동 `split_episodes`가 다시 배정하지 않는다.
+
+Isaac Mimic은 subtask를 재조합하므로 정확한 episode별 원본을 하나로 지정하지 않는다.
+`source_lineage.kind=partition`, `exact_source_ids=null`과 검증된 `source_partition_input`을 함께 남긴다.
+이 증거는 실제 입력 Source 파일과 그 안의 원본 집합을 검사한 뒤 생성한다. 출처를 모르는 과거
+UNKNOWN group에 이름만 바꿔 붙이는 방식은 허용하지 않는다. 원래 group 값은 `source_group`에 보존하고
+학습 분리용 group은 검증된 partition identity를 쓴다. 물리적 성공 증거와 계보 증거는 별개다.
+
+별도 LeRobot Train/Val을 선택하면 manifest의 `storage.sources`가 각 원본 MP4/Parquet를 참조하고,
+episode의 `source_index`가 해당 reader를 지정한다. 기존 단일 `storage.root`와 Canonical 입력도 지원한다.
+camera/주파수/gripper endpoints/Workspace/보정 모델 계약을 확인하며 Task·Scene·Review는 episode에 유지한다.
+통계는 Train만 읽고 검증 시 가중치를 갱신하지 않는다. Val-only Canonical 변환의 statistics.json은
+`not_fitted` 표시일 뿐이며, 최종 Train/Val 결합 학습 준비에서 Train 통계를 계산한다.
+Resume는 두 입력 원본의 byte identity를 모두 확인한다. 모델 구조/H40/6D/Best/Early Stopping은 유지한다.
+사용법: [MINIVLA_INTEGRATION.md](../real2sim/MINIVLA_INTEGRATION.md#source-기반-train--validation-분리).
+
 ## Scene 구성 metadata
 
 Workspace 물체 수는 RGB/state/action tensor 모양을 바꾸지 않는다. 실행별 composition과
@@ -45,7 +66,7 @@ float32 xyz+wxyz를 관측 시각/좌표계와 함께 보존하며 모델의 sta
 형식과 frame 변환은 [DATA_FLOW.md](../real2sim/DATA_FLOW.md#curation-object-telemetry-2026-10-15)를 따른다.
 Converter의 episode별 `episode_review`는 annotation/성공 근거/pose reference를 보존하고,
 MiniVLA manifest와 checkpoint provenance에도 전달한다. 이 정보는 학습 입력 tensor가 아니다.
-원본 group 계보가 불명확한 생성 자료는 공통 UNKNOWN group으로 묶는다. 독립 source가 부족하면
+원본 group 계보가 불명확하고 검증된 Source Partition도 없는 생성 자료는 공통 UNKNOWN group으로 묶는다. 독립 source가 부족하면
 validation split을 만들 수 없으며, frame/생성 episode 단위로 독립성을 꾸며내지 않는다.
 
 ## 하나의 sample
@@ -76,7 +97,8 @@ data/
     action.npy              float32 [T,6]
     timestamp.npy           float64 [T] seconds
     action_timestamp.npy    float64 [T] seconds
-    side.npy                uint8 [T,H,W,3]
+    side.mp4                새 수집: H264 RGB 영상, 원본 해상도/FPS
+    side.npy                과거 형식: uint8 [T,H,W,3] (둘 중 하나)
     side_timestamp.npy      float64 [T]
     grounding.npy           optional float32 [T,2,2]
     grounding_mask.npy      optional bool [T,2]
@@ -130,3 +152,5 @@ qpos[t+1]를 command라고 재명명하지 않는다. leader 명령과 follower 
 brightness/contrast만 .9~1.1. 과도한 조명 변형은 색 grounding을 망칠 수 있다.
 max_instruction_tokens=96, max_tokens=512는 초과 시 예외. 임의 truncate로 image tokens를 자르지 않는다.
 2 cameras를 쓰면 카메라 순서와 config, 데이터, MuJoCo mapping을 함께 변경하고 VRAM을 재측정한다.
+
+새 RGB 저장/외부 HDF5 영상 참조의 상세 계약은 [DATA_FLOW.md](../real2sim/DATA_FLOW.md#새-rgb-저장-계약-2026-10-15)를 따른다. Canonical MP4도 숫자 배열·시각·frame 수를 먼저 확인한 뒤 요청 frame만 읽는다. 기존 NPY checkpoint의 dataset byte identity 계산은 유지한다.

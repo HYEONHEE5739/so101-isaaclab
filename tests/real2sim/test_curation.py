@@ -279,8 +279,10 @@ def test_export_registry_convert_review_and_immutable_input(tmp_path,motion_work
     import subprocess
     monkeypatch.setattr(subprocess,'run',converter)
     output=tmp_path/'convert';output.mkdir();result=episodes.convert_dataset(curated,output,{'workspace':str(motion_workspace['root']),'repo_id':'local/review'})
-    manifest=json.loads((Path(result['dataset'])/'manifest.json').read_text())
-    assert manifest['episodes'][0]['object_telemetry']==writer.manifest['episodes'][0]['object_telemetry']
+    manifest=json.loads((Path(result['dataset'])/'workflow_provenance.json').read_text())
+    assert not (output/'conversion_input.hdf5').exists()
+    assert not list(output.rglob('*.npy'))
+    assert manifest['canonical_episodes'][0]['object_telemetry']==writer.manifest['episodes'][0]['object_telemetry']
     assert fingerprint(writer.root)==before
     assert package.load(motion_workspace['root'])['manifest']==motion_workspace['manifest']
 
