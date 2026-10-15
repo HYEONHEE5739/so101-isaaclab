@@ -1,4 +1,33 @@
-# Red-only → Blue Zero-shot 평가
+# Scene 구성과 목표 일반화 평가
+
+Workspace Pipeline의 `Scene objects`와 Task를 각각 선택한다. 사용법과 물체 등록은
+[BUILDER_WORKSPACE.md](../real2sim/BUILDER_WORKSPACE.md)를 참조한다.
+
+| 실험 | 학습 Active / Target | 평가 Active / Target | 의미 |
+|---|---|---|---|
+| A | Red / Red | Red / Red | 기본 동작 |
+| B | Red·Blue·Green / Red | 동일 3개 / 각 색 | 같은 장면에서 새 목표 명령 |
+| C | Red / Red | Red·Blue·Green / Blue 또는 Green | 구성과 목표를 함께 변경 |
+
+B와 C를 같은 언어 일반화 실험으로 해석하지 않는다. C의 실패는 distractor 증가와 목표 변경이
+결합된 결과다. 원본 Workspace/로봇/카메라/Action 계약 검사는 유지한다. Object Set만 다르면
+허용하며 `training_active_object_sets`, `evaluation_active_object_ids`,
+`scene_composition_distribution_shift`를 결과에 기록한다. 학습 구성 근거가 없으면 null이다.
+
+각 episode는 active count/IDs, target/distractors, selected ID 또는 UNKNOWN,
+target_selection_accuracy, wrong_object_approach, 모든 물체의 현재/최소 TCP 거리·접근 여부,
+grasp/transport/place/full_task_success를 기록한다. 물체 1개일 때 선택 정확도·오접근은 null(N/A)이며
+자동 성공으로 계산하지 않는다. 선택 ID는 grasp 전 40mm 내 첫 최근접 물체라는 **기하 proxy**다.
+실제 의미 인식의 정답 라벨이 아니다. UNKNOWN도 정답으로 세지 않는다. Grasp는 기존 StableGrasp,
+transport는 grasp 이후 40mm 이동, place는 선택한 Task의 기존 내부 포함·정지 조건을 사용한다.
+Full success는 세 조건 모두 필요하다. 기존 success_rate는 place 조건이며 별도로 해석한다.
+MiniVLA 실제 replan의 `inference_latency_s`와 매 select_action의 `action_call_latency_s`를 구분한다.
+실제 추론 시점을 알 수 없는 정책은 inference 값 null로 남기고 action call 시간을 제공한다.
+
+Scene 구성은 모델의 새로운 입력 차원이 아니다. Qwen3-VL-2B/256×256 letterbox/
+4-block Flow-DiT/H40/6D 및 checkpoint schema는 그대로다. 성공률은 독립 rollout으로 검증해야 한다.
+
+## Red-only → Blue Zero-shot 평가
 
 학습은 UI에서 Red Task의 Source/Datagen만 선택한다. Blue는 같은 RGB의 distractor로
 남길 수 있지만 Blue-target episode를 train/val에 넣지 않는다. generated variants는

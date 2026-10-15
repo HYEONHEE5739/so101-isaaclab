@@ -278,8 +278,17 @@ def apply_builder_visuals(scene, robot, workspace):
         if body.get('name', '').removeprefix('robot_') not in replaced_links: continue
         for geom in body.findall('geom'):
             if '_visual_' in geom.get('name', ''): body.remove(geom)
+    excluded = set(workspace.get('excluded_object_ids', []))
+    for identity in excluded:
+        if identity not in source_bodies:
+            raise ValueError('Builder object is not independently removable: '+identity)
+    while True:
+        dependent = {n for n,o in objects.items() if o.get('parent_object') in excluded}
+        if dependent <= excluded: break
+        excluded |= dependent
     added = []
     for identity, obj in objects.items():
+        if identity in excluded: continue
         if obj['role'] == 'reference_robot':
             body = robot.find(f".//body[@name='robot_{obj['link']}']")
             local = transform(obj['link_local_pose'])

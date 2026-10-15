@@ -29,12 +29,14 @@ try:
     out=Path(args.report).resolve().parent if args.report else ROOT/'outputs/workflow/runs'/('workspace_'+w['manifest']['workspace_id'])
     out.mkdir(parents=True,exist_ok=True)
     dataset=Path(args.dataset) if args.dataset else out/'smoke.hdf5'
-    if args.command=='replay':verify_dataset(dataset,args.workspace);require_joint_replay(dataset)
+    if args.command=='replay':
+        w,_=verify_dataset(dataset,args.workspace);require_joint_replay(dataset)
     from soarm101_lab.tasks.manager_based.soarm101_lab import SO101TeleopEnvCfg
     legacy_before=SO101TeleopEnvCfg().scene.to_dict()
     from soarm101_lab.real2sim.precision import uses_urdf_frame
     from soarm101_lab.so101_dataset_contract import read_contract
-    cfg=make_config(args.workspace,args.device,identity_sim=uses_urdf_frame(read_contract(dataset)) if args.command=='replay' else False)
+    cfg=make_config(w,args.device,identity_sim=uses_urdf_frame(read_contract(dataset)) if args.command=='replay' else False)
+    w=cfg.workflow_workspace
     assert SO101TeleopEnvCfg().scene.to_dict()==legacy_before, 'Legacy scene mutated'
     from soarm101_lab.workflow.presentation import attach
     env=ManagerBasedEnv(cfg=cfg);attach(env);obs,_=env.reset()
@@ -57,7 +59,8 @@ try:
         writer=HDF5DatasetFileHandler();writer.create(str(dataset),env_name='SO101-Workspace-Source-v1')
         writer.add_env_args({'workspace':metadata(w),'workspace_path':str(w['root']),'so101_coordinates':coordinates,
             'grasp_object':w['task']['pick'],'place_bin':w['task']['place'],'control_dt':env.step_dt,
-            'validation_only':True,'root_quaternion_order':'wxyz'})
+            'validation_only':True,'root_quaternion_order':'wxyz',
+            'scene_configuration':cfg.workflow_workspace['scene_configuration']})
         episode.success=False;episode.pre_export();writer.write_episode(episode);writer.flush();writer.close()
         print('SMOKE_RECORDED',dataset,flush=True)
     if args.command in ('smoke','replay'):

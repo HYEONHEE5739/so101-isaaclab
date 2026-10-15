@@ -1,5 +1,39 @@
 # Builder export를 기존 Real/Sim과 Workflow에서 사용
 
+## Workflow에서 사용할 물체 선택 (2026-10-15)
+
+Workspace Pipeline의 기존 TaskSelector에서 `Scene objects`를 체크한다. 기본은 전체 선택이며
+`Active Objects: n / total`로 수를 표시한다. Source와 Sim Eval에서 바꿀 수 있고 실행 중에는 잠긴다.
+이 설정은 Workflow 실행에 적용된다. 원본 Workspace나 Live Real/Sim의 영구 Scene을 편집하지 않는다.
+
+1. Workspace와 backend를 고른다. 예: `scene2_builder/v8`.
+2. Red만 체크하고 Red→Cup Task를 선택하면 물체 1개 실험이다.
+3. Red/Blue 또는 Red/Green을 체크하면 2개, 모두 체크하면 3개 실험이다.
+4. Pick은 체크된 물체의 명시적 Task 중에서 고른다. 선택 해제로 기존 Task가 빠지면 경고가 나오며
+   사용자가 다른 Preset을 선택해야 한다. 문구만 바꿔 Target Identity를 추측하지 않는다.
+5. Source 수집 → Replay → Annotation → DataGen → Convert → Train을 기존대로 실행한다.
+   Replay/Annotation/DataGen의 체크박스는 잠기며 입력 자료의 물체 구성을 보여준다.
+6. Sim Eval에서는 학습과 다른 물체 조합과 목표도 명시적으로 선택할 수 있다.
+   결과의 `scene_composition_distribution_shift`로 구성 차이를 확인한다.
+
+컵/작업대/로봇/카메라는 선택 목록에서 제외하고 유지한다. 체크를 끈 조작 물체는 시각적 Hide가
+아니라 body/collision/joint/state/reset에서 빠진다. MuJoCo Full Workspace 배경도 유지한다.
+빈 선택·중복·알 수 없는 ID·비활성 Pick·Four Anchors에서 5개 이상 선택은 실행 전에 거절한다.
+Workspace별 선택은 기존 Registry `ui.json.object_selections`에 원본 identity를 key로 저장한다.
+다른 Workspace에 이전 ID를 무조건 복사하지 않는다. 파생 단계 열람은 Source의 선택을 덮어쓰지 않는다.
+
+새 Builder 물체는 canonical manipulable 역할 및 Workflow dynamic으로 등록하고 dimensions,
+collision, mass를 제공한 새 export를 import하면 표시된다. Display Name이 있으면 사용하고
+내부 ID와 분리한다. 해당 물체를 distractor로 포함할 때 새 Task는 필요 없으나 Pick으로 쓰려면
+Builder의 명시적 `scene.workflow.tasks`가 있어야 한다. 결합 mesh에서 객체를 독립 제거할 근거가
+없으면 실행을 거절한다. Published 파일이나 기존 Export를 수정하여 목록을 바꾸지 않는다.
+
+공통 구성은 `workflow.tasks.configured()`의 실행 복사본과 기존 Request의
+`options.active_object_ids` / `scene_configuration`으로 전달한다. 데이터 저장 위치와 과거 데이터
+복원 규칙은 [DATA_FLOW.md](DATA_FLOW.md), 학습/평가 실험 구분은
+[MiniVLA 평가](../minivla/EVALUATION.md)를 참조한다.
+검증 근거: `outputs/workflow_validation/active_scene_objects/REPORT.md`.
+
 ## Real/Sim에서 바로 Scene 선택 (2026-10-14)
 
 이제 **Real / Sim 탭 → 오른쪽 맨 위 `Scene / 관절 보정 · 다음 Connect`**에서

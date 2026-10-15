@@ -98,7 +98,7 @@ class WorkflowPanel(QWidget):
             b = QPushButton(title); b.clicked.connect(lambda _, f=fn: self.guard(f)); row.addWidget(b, index // 2, index % 2); self.browse_buttons.append(b)
         from .task_ui import TaskSelector
         self.task_selector = TaskSelector(); layout.addWidget(self.task_selector)
-        self.task_selector.changed.connect(self.update_ready)
+        self.task_selector.changed.connect(self.objects_changed)
         self.task_selector.layout().setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         advanced = QToolButton(); advanced.setText('실행 설정 접기 / 펼치기'); advanced.setCheckable(True)
         layout.addWidget(advanced)
@@ -266,6 +266,7 @@ class WorkflowPanel(QWidget):
         self.backend_pythons = {'isaac': self.python.text(), 'mujoco': default_python()}
         saved_path = self.registry.root / 'ui.json'
         saved = json.loads(saved_path.read_text()) if saved_path.exists() else {}
+        self.object_selections = saved.get('object_selections', {})
         self.backend_pythons.update(saved.get('backend_pythons', {}))
         self.backend.setCurrentIndex(max(0, self.backend.findData(saved.get('backend', 'isaac'))))
         self.previous_backend = self.backend.currentData()
@@ -287,7 +288,8 @@ class WorkflowPanel(QWidget):
         self.backend_pythons[self.backend.currentData()] = self.python.text()
         atomic(self.registry.root / 'ui.json', {
             'workspace': self.workspace.text(), 'python': self.python.text(), 'mode': self.mode.currentData(),
-            'backend': self.backend.currentData(), 'backend_pythons': self.backend_pythons})
+            'backend': self.backend.currentData(), 'backend_pythons': self.backend_pythons,
+            'object_selections': getattr(self,'object_selections',{})})
 
     def guard(self, fn):
         try: fn()
@@ -533,13 +535,28 @@ class WorkflowPanel(QWidget):
             self.scene_cameras = tuple(w['profile']['cameras'])
             self.configure_stage()
             artifact = self.registry.get(self.inputs.currentData()) if self.inputs.currentData() else {}
-            self.task_selector.configure(w, self.stage.currentData(), from_artifact(artifact, w))
+            from .tasks import workspace_key, recorded_scene
+            key = json.dumps(workspace_key(w),sort_keys=True)
+            selected = getattr(self,'object_selections',{}).get(key)
+            if self.stage.currentData() in ('replay','annotate','datagen'):
+                scene = recorded_scene(artifact,w,required=False)
+                if scene:selected = scene['active_object_ids']
+            self.task_selector.configure(w, self.stage.currentData(), from_artifact(artifact, w), selected)
             builder = w.get('manifest', {}).get('builder')
             if builder:
                 self.task_selector.summary.setText(self.task_selector.summary.text() +
                     f"\nBuilder scene: {builder['status']} · 물성: 시뮬레이션 임시값 (실측 아님)")
         except (ValueError, OSError, TypeError, KeyError):
             self.task_selector.summary.setText('유효한 workspace와 입력 artifact를 선택하세요.')
+        self.update_ready()
+
+    def objects_changed(self):
+        selector = self.task_selector
+        if not selector.loading and selector.workspace is not None and hasattr(self,'object_selections') and selector.stage in ('source','sim_eval'):
+            key = json.dumps(selector.workspace_identity,sort_keys=True)
+            self.object_selections[key] = [selector.objects.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(selector.objects.count()) if selector.objects.item(i).checkState()==Qt.CheckState.Checked]
+            self.save_backend_settings()
         self.update_ready()
 
     def stage_options(self):
@@ -568,6 +585,8 @@ class WorkflowPanel(QWidget):
                 opts['resume_checkpoint'] = self.resume_path.text().strip()
         if stage == 'annotate':
             opts['auto'] = self.annotation_mode.currentIndex() == 0
+        if stage in ('source','sim_eval','replay','annotate','datagen') and self.task_selector.workspace is not None:
+            opts['active_object_ids'] = self.task_selector.object_selection()
         if stage in ('source', 'sim_eval', 'real_eval'):
             opts['tasks'] = self.task_selector.selection(evaluation=stage != 'source')
         return opts

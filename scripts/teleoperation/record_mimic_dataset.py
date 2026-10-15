@@ -220,7 +220,8 @@ def save_episode(writer, episode, episode_id):
     writer.write_episode(episode)
     if hasattr(writer, 'workflow_task_definition'):
         from soarm101_lab.workflow.tasks import stamp_group
-        stamp_group(writer._hdf5_data_group[f'demo_{episode_id}'], writer.workflow_task_definition)
+        stamp_group(writer._hdf5_data_group[f'demo_{episode_id}'], writer.workflow_task_definition,
+                    json.loads(writer._hdf5_data_group.attrs['env_args']).get('scene_configuration'))
     writer.flush()
 
     print(
@@ -263,8 +264,9 @@ def main():
         from soarm101_lab.real2sim.workspaces.package import load as load_workspace
         from soarm101_lab.workflow.tasks import configured
         workspace = configured(load_workspace(args_cli.workspace))
-        env_cfg = make_config(args_cli.workspace, args_cli.device, args_cli.num_envs,
+        env_cfg = make_config(workspace, args_cli.device, args_cli.num_envs,
                               identity_sim=bool(getattr(controller, 'precision_mapper', None)))
+        workspace = env_cfg.workflow_workspace
         from soarm101_lab.real2sim.workspaces.reset import source_seed
         env_cfg.events.reset_episode.params['randomization_seed'] = source_seed(args_cli.source_seed)
         print('SOURCE_RANDOMIZATION_SEED', env_cfg.events.reset_episode.params['randomization_seed'], flush=True)
@@ -329,7 +331,7 @@ def main():
         from soarm101_lab.representation import describe
         writer.add_env_args({'representation': describe(coordinates), 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
                              'root_quaternion_order': 'xyzw' if DATASET_FORMAT_VERSION >= 1 else 'wxyz',
-                             'task_definitions': [workspace['task_definition']]})
+                             'task_definitions': [workspace['task_definition']], 'scene_configuration':workspace['scene_configuration']})
         writer.workflow_task_definition = workspace['task_definition']
 
     episode_count = 0

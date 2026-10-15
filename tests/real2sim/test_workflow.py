@@ -133,6 +133,7 @@ def test_source_artifact_contract_and_readiness(published, tmp_path):
         data.attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': coordinate_contract(w),
                                                      'grasp_object': 'cube_red', 'place_bin': 'cup_a'})
         episode = data.create_group('demo_0')
+        for name in w['task']['dynamic']:episode.create_group('initial_state/rigid_object/'+name)
         episode.create_dataset('actions', data=np.zeros((2, 7)))
         episode.create_dataset('joint_targets', data=np.zeros((2, 6)))
         episode.create_dataset('obs/policy/joint_pos', data=np.zeros((2, 6)))

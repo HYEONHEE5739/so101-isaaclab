@@ -4,6 +4,15 @@
 본 형식으로 변환하거나 명시적 HDF5 recipe를 사용해야 한다. LeRobot parquet/video를 직접
 읽는 loader는 현재 포함하지 않는다. decoded RGB/상태/명령을 이 형식으로 내보내면 된다.
 
+## Scene 구성 metadata
+
+Workspace 물체 수는 RGB/state/action tensor 모양을 바꾸지 않는다. 실행별 composition과
+Task는 canonical manifest의 각 episode에 `scene_configuration`, `task_definition`으로 보존한다.
+HDF5/LeRobot와 checkpoint provenance의 저장 위치·legacy 복원·혼합 데이터 계약은
+[DATA_FLOW.md](../real2sim/DATA_FLOW.md#실행별-scene-구성-2026-10-15)를 참조한다.
+혼합 조합의 학습에서도 source group 단위 split을 유지한다. 현재 Workflow의 LeRobot→canonical
+adapter는 기존 decoder를 통해 RGB/state/action을 이 규격으로 내보낸다.
+
 ## 하나의 sample
 
 | 항목 | shape/dtype | 의미 |

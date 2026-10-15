@@ -144,7 +144,10 @@ def train(artifact, options, output):
     write_contract(checkpoint, coordinates)
     atomic(checkpoint / 'workflow_provenance.json', {'workspace': artifact.get('workspace'),
            'source_dataset_artifact': artifact, 'backend': options.get('backend', artifact.get('backend', 'isaac')), 'training': config, 'representation': describe(coordinates),
-           'task_definitions': artifact.get('tasks') or options.get('tasks', [])})
+           'task_definitions': artifact.get('tasks') or options.get('tasks', []),
+           'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
+           'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
+           'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{})})
 
 
 def import_checkpoint(path, registry):
@@ -182,6 +185,9 @@ def import_checkpoint(path, registry):
     atomic(model / 'workflow_provenance.json', {
         'workspace': artifact.get('workspace'), 'source_dataset_artifact': artifact,
         'training': config, 'task_definitions': artifact.get('tasks', []),
+        'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
+        'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
+        'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{}),
         'checkpoint_import': True})
     return registry.register('policy', model, parents=[artifact['id']])
 
@@ -210,12 +216,13 @@ class MiniVLAJointPolicy:
         import numpy as np
         import torch
         q = batch['observation.state'].detach().cpu().numpy().reshape(6)
+        self.last_inference_metrics = None
         if not self.remaining:
             images = []
             for camera in self.policy.cfg.cameras:
                 value = batch['observation.images.' + camera + '_cam'].detach().cpu().numpy()
                 images.append(np.clip(value.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8))
-            chunk, _ = self.policy.predict(images, self.coordinates.to_policy(q, measured=True), batch['task'])
+            chunk, self.last_inference_metrics = self.policy.predict(images, self.coordinates.to_policy(q, measured=True), batch['task'])
             chunk = np.asarray(chunk)
             if chunk.shape != (self.policy.cfg.horizon, 6) or not np.isfinite(chunk).all():
                 raise ValueError('MiniVLA must output a finite [H,6] action chunk')

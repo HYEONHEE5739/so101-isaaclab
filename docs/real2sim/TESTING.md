@@ -59,6 +59,14 @@ MuJoCo는 import 후 GL 모드를 바꿀 수 없으므로 Builder rendering 검�
 Renderer/engine guard를 테스트 때문에 우회하지 않는다. 최신 분리 suite 결과 및 실행 목록은
 `outputs/workflow_validation/unified_joint_control/SIMPLIFICATION_REPORT.md`를 따른다.
 
+## Active Object Set 검사 (2026-10-15)
+
+`test_active_objects.py`는 imported Builder fixture의 실제 MuJoCo body/geom/joint/state/step,
+1/2/3개·비연속 조합·새 Dynamic ID, reset/overlap/seed, 기록 상속·Resume·mixed curation을 검사한다.
+기존 Task/UI/Source/Precision/두 엔진 회귀와 함께 실행한다. 상세 실행 로그/테스트 분리 목록,
+실제 Isaac GPU 렌더·20-frame HDF5 Replay·HDF5/LeRobot 변환 및 초기 실패 기록은
+`outputs/workflow_validation/active_scene_objects/REPORT.md` 참조. 모델 학습·물리 grasp 성공과 구분한다.
+
 ## 3. Joint 변경 시 최소 검증
 
 - known degree → expected rad

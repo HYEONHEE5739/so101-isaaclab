@@ -81,7 +81,9 @@ def test_demo_metadata_rejects_wrong_workspace(published,tmp_path):
     import h5py
     from soarm101_lab.real2sim.workspaces.demo import verify_dataset,coordinate_contract
     path=published[3];w=package.load(path);meta=package.metadata(w);demo=tmp_path/'demo.hdf5'
-    with h5py.File(demo,'w') as h:h.create_group('data').attrs['env_args']=json.dumps({'workspace':meta})
+    with h5py.File(demo,'w') as h:
+        data=h.create_group('data');data.attrs['env_args']=json.dumps({'workspace':meta})
+        for name in w['task']['dynamic']:data.create_group('demo_0/initial_state/rigid_object/'+name)
     assert verify_dataset(demo,path)[0]['manifest']['workspace_id']=='workspace_test'
     with h5py.File(demo,'a') as h:
         meta['version']=999;h['data'].attrs['env_args']=json.dumps({'workspace':meta})

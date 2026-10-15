@@ -31,6 +31,7 @@ def make_source(tmp_path, w, definitions):
         data = h.create_group('data'); data.attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': coordinate_contract(w)})
         for i, definition in enumerate(definitions):
             e = data.create_group('demo_' + str(i))
+            for name in w['task']['dynamic']:e.create_group('initial_state/rigid_object/'+name)
             e.create_dataset('actions', data=np.zeros((2, 7)))
             e.create_dataset('joint_targets', data=np.zeros((2, 6)))
             e.create_dataset('obs/policy/joint_pos', data=np.zeros((2, 6)))

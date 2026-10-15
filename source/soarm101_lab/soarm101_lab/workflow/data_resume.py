@@ -5,10 +5,17 @@ from pathlib import Path
 from .artifacts import inspect_artifact
 
 
-def validate(stage, path, workspace, tasks, source=None):
+def validate(stage, path, workspace, tasks, source=None, scene_configuration=None, workspace_definition=None):
     item = inspect_artifact(stage, path)
     if item.get('workspace') != workspace or item.get('tasks') != tasks:
         raise ValueError('Resume dataset의 workspace/task가 현재 선택과 다릅니다.')
+    if scene_configuration:
+        if workspace_definition:
+            from .tasks import recorded_scene
+            record = recorded_scene({**item,'path':str(path)},workspace_definition)
+        else:
+            record = item.get('env_args',{}).get('scene_configuration') or item.get('provenance',{}).get('scene_configuration')
+        if not record or record['active_object_ids']!=scene_configuration['active_object_ids']:raise ValueError('Resume active object set differs')
     if stage == 'datagen' and source:
         previous = item.get('env_args', {}).get('source_dataset')
         if not previous or Path(previous).resolve() != Path(source).resolve():
@@ -23,6 +30,9 @@ def combine(previous, segment):
     temporary = segment.with_suffix('.merging.hdf5')
     try:
         with h5py.File(previous, 'r') as old, h5py.File(segment, 'r') as new, h5py.File(temporary, 'w') as out:
+            scenes=[json.loads(h['data'].attrs.get('env_args','{}')).get('scene_configuration') for h in (old,new)]
+            if any(scenes) and (not all(scenes) or scenes[0]['active_object_ids']!=scenes[1]['active_object_ids']):
+                raise ValueError('Resume active object set differs or is unknown')
             for key, value in new.attrs.items():
                 out.attrs[key] = value
             data = out.create_group('data')

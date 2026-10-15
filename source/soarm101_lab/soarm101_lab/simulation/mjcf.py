@@ -67,8 +67,8 @@ def load_inputs(workspace=None):
         w = copy.deepcopy(workspace)
         validate_profile(w['profile'])
         w.setdefault('task', default_task(w['profile']))
-        urdf = Path(w.pop('urdf', ROOT / 'assets/SO101/urdf/so101_isaaclab.urdf'))
-        return w, urdf, {'source': 'real2sim_profile', 'profile_sha256': digest(w['profile'])}
+        urdf = Path(w.pop('urdf', Path(w['root'])/'assets/SO101/urdf/so101_isaaclab.urdf' if w.get('manifest') else ROOT/'assets/SO101/urdf/so101_isaaclab.urdf'))
+        return w, urdf, metadata(w) if w.get('manifest',{}).get('content_sha256') else {'source': 'real2sim_profile', 'profile_sha256': digest(w['profile'])}
     if workspace:
         w = load(workspace)
         return w, w['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf', metadata(w)
@@ -170,7 +170,7 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
 
 
 def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002, decimation=10,
-                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False):
+                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None):
     if (type(width) is not int or type(height) is not int or width < 1 or height < 1
             or type(decimation) is not int or decimation < 1
             or not np.isfinite(timestep) or not 0 < timestep <= .01):
@@ -182,11 +182,11 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
     if identity_sim:
         w = copy.deepcopy(w)
         w['profile'].pop('simulation_joint_offsets_rad', None)
-    if task_definition is not None:
+    if task_definition is not None or active_object_ids is not None or w.get('scene_configuration'):
         if workspace is None:
             raise ValueError('Task Definition requires a published workspace')
         from ..workflow.tasks import configured
-        w = configured(w, task_definition)
+        w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco')
     p, task = w['profile'], w['task']
     builder_scene = bool(w.get('manifest', {}).get('builder'))
     review = task.get('mode') == 'geometry_review'
@@ -309,6 +309,7 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
         'decimation': decimation, 'camera': {**copy.deepcopy(camera), 'resolution': [width, height], 'K': k.tolist()},
         'task': copy.deepcopy(task), 'scene_subset': [pick, target, 'table', support, 'SO101'],
         'task_definition': copy.deepcopy(w.get('task_definition')),
+        'scene_configuration': copy.deepcopy(w.get('scene_configuration')),
         'full_workspace': full_workspace,
         'physics_profile': physics_profile,
         'dynamic_objects': list(reduced['task']['dynamic']),

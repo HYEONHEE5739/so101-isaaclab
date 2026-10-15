@@ -1,5 +1,19 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — Workflow Active Object Set (2026-10-15)
+
+`docs/real2sim/BUILDER_WORKSPACE.md` 맨 위와 `DATA_FLOW.md`, `docs/minivla/EVALUATION.md` 우선.
+TaskSelector에서 dynamic 체크/Workspace별 기존 ui.json 저장. 기본 전체, Source/SimEval만 변경.
+기존 tasks.configured가 runtime 복사본을 필터링하고 원본 identity+active+Task+reset+backend hash.
+MuJoCo profile/roles/Builder overlay 및 Isaac Spawn/Reset에서 비선택 객체 완전 제외.
+Source→Replay/Annotation/DataGen은 저장 구성을 상속하고 Resume mismatch 거절.
+Canonical/HDF5/LeRobot episode별 Task·구성 보존, 혼합 구성 학습 허용. 파생 시 동종 subset 선택.
+과거 명시적 dynamic/state 근거만 복원; UNKNOWN을 3개로 추측하지 않는다.
+SimEval은 다른 구성 허용/분포변경 기록, 단일 객체 선택 정확도 N/A, 모든 distractor 거리 추적.
+MiniVLA architecture/Calibration/원본 Workspace/Builder export 불변, 새 production 파일 없음.
+실제 두 엔진/새 Builder object/변환 및 회귀 결과·초기 실패: outputs/workflow_validation/active_scene_objects/REPORT.md.
+실제 하드웨어나 학습된 새 정책의 pick/place 성능 검증으로 해석하지 않는다.
+
 ## 최신 — MiniVLA Flow-DiT 교체 (2026-10-15)
 
 `docs/minivla/DESIGN.md`, `README.md`, `VALIDATION.md` 및

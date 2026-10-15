@@ -120,6 +120,9 @@ class Operations:
         opts.setdefault('python', default_python())
         if stage in ('source', 'replay', 'annotate', 'datagen') and artifact.get('backend', backend) != backend:
             raise ValueError('Artifact simulation backend differs from selected backend')
+        if stage in ('source','replay','annotate','datagen','sim_eval','real_eval'):
+            from .tasks import bind_scene_options
+            opts = bind_scene_options(stage, artifact, load(artifact['path'] if stage=='source' else workspace), opts)
         canonical = artifact.get('format') in ('so101.canonical/1', 'so101.minivla-policy/1')
         if (backend == 'mujoco' and stage in ('source', 'replay', 'annotate', 'datagen', 'convert', 'sim_eval')) or (canonical and stage in ('train', 'convert')):
             if stage == 'datagen':
@@ -147,7 +150,7 @@ class Operations:
         definitions = from_artifact(artifact, w)
         if stage in ('source', 'sim_eval', 'real_eval'):
             if opts.get('task_scope') == 'all' and stage != 'source':
-                definitions = catalog(w)
+                definitions = [t for t in catalog(w) if t['pick_object_id'] in opts.get('active_object_ids',w['task']['dynamic'])]
             else:
                 definitions = opts['tasks'] if 'tasks' in opts else definitions or [t for t in catalog(w)
                     if t['pick_object_id'] == w['task']['pick'] and t['target_object_id'] == w['task']['place']]
@@ -155,6 +158,11 @@ class Operations:
             raise ValueError('Derived stages must inherit input artifact tasks; do not relabel demonstrations')
         if w:
             definitions = [validate(t, w) for t in definitions]
+            if stage in ('source','sim_eval','real_eval','replay','annotate','datagen'):
+                from .tasks import configured
+                for definition in definitions:
+                    configured(w,definition,opts['active_object_ids'],backend)
+                if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],backend)['scene_configuration']
         if stage in ('source', 'annotate', 'datagen') and len(definitions) != 1:
             raise ValueError('Select one explicit task; annotation/datagen input must be task-homogeneous')
         if stage in ('convert', 'train') and not definitions:
@@ -176,7 +184,7 @@ class Operations:
         if stage in ('source', 'datagen') and opts.get('resume_data'):
             from .data_resume import validate as validate_resume
             count = validate_resume(stage, opts['resume_data'], metadata(w), definitions,
-                                    path if stage == 'datagen' else None)
+                                    path if stage == 'datagen' else None, opts.get('scene_configuration'), w)
             key = 'episodes' if stage == 'source' else 'num_successful_demos'
             target_count = int(opts.get(key, 1))
             if target_count <= count:
@@ -283,7 +291,8 @@ class Operations:
             env['SO101_WORKFLOW_SESSION'] = str(self.session)
             env.pop('SO101_TASK_SELECTION', None)
             if plan['options'].get('tasks'):
-                atomic(run_dir / 'tasks.json', {'tasks': plan['options']['tasks']})
+                atomic(run_dir / 'tasks.json', {'tasks': plan['options']['tasks'],
+                    'active_object_ids': plan['options'].get('active_object_ids')})
                 env['SO101_TASK_SELECTION'] = str(run_dir / 'tasks.json')
             env.pop('HEADLESS', None)
             if plan['options']['headless']:
@@ -410,7 +419,8 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
     w = load(workspace)
     if artifact.get('workspace') != metadata(w):
         raise ValueError('Input workspace identity differs from selected workspace')
-    opts = dict(options)
+    from .tasks import bind_scene_options
+    opts = bind_scene_options(stage,artifact,w,options)
     if stage == 'train' and opts.get('resume_checkpoint'):
         from .policy import resume_output
         # Non-MiniVLA training of canonical data delegates to its LeRobot child.
@@ -433,8 +443,12 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
     if stage in ('source', 'sim_eval'):
         definitions = opts.get('tasks') or definitions or [t for t in catalog(w)
             if t['pick_object_id'] == w['task']['pick'] and t['target_object_id'] == w['task']['place']]
-    if stage == 'sim_eval' and opts.get('task_scope') == 'all': definitions = catalog(w)
+    if stage == 'sim_eval' and opts.get('task_scope') == 'all': definitions = [t for t in catalog(w) if t['pick_object_id'] in opts.get('active_object_ids',w['task']['dynamic'])]
     definitions = [validate(t, w) for t in definitions]
+    if stage in ('source','sim_eval','replay','annotate','datagen'):
+        from .tasks import configured
+        for definition in definitions:configured(w,definition,opts['active_object_ids'], 'mujoco')
+        if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],'mujoco')['scene_configuration']
     if not definitions or (stage in ('source', 'annotate', 'datagen') and len(definitions) != 1):
         raise ValueError('Source/Annotation/Datagen require one task')
     opts.update(tasks=definitions, task_definition=definitions[0], instruction=definitions[0]['language_instruction'])

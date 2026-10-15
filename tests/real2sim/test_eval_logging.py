@@ -29,7 +29,11 @@ def test_real_policy_execution_uses_simple_urdf_path_without_real_devices(tmp_pa
         def nearest(self):return {'read_end':{'monotonic_ns':time.monotonic_ns()},'rgb':np.zeros((8,8,3),np.uint8)}
         def close(self):closed.append('camera')
     root=Path(__file__).resolve().parents[2]
-    w={'root':root,'profile':{'cameras':{'front':{'resolution':[8,8]}}},'task':{'observation_cameras':['front']}}
+    from soarm101_lab.simulation.mjcf import load_inputs
+    profile=json.loads((root/'tests/real2sim/fixtures/scene_profile.json').read_text())
+    w,_,_=load_inputs({'profile':profile});w['root']=root
+    w['profile']['cameras']={'front':{'resolution':[8,8]}};w['task']['observation_cameras']=['front']
+    definition=tasks.catalog(w)[0]
     action=torch.tensor([2.5,0,0,0,0,.5])
     policy=SimpleNamespace(reset=lambda:None,select_action=lambda batch:action)
     monkeypatch.setattr(evaluation,'load',lambda *args:w)
@@ -47,7 +51,7 @@ def test_real_policy_execution_uses_simple_urdf_path_without_real_devices(tmp_pa
     request={'stage':'real_eval','workspace':'fixture','output':str(output),
         'input':{'id':'fixture','type':'policy','path':'fixture'},'options':{'enable_motion':True,'device':'cpu',
         'port':'/fake','follower_id':'fixture','camera_devices':{'front':'/fake/front'},'max_steps':1,
-        'tasks':[{'task_id':'fixture','language_instruction':'fixture'}]}}
+        'tasks':[definition]}}
     evaluation.evaluate(request)
     result=json.loads(output.read_text())
     assert len(goals)==1 and set(closed)=={'follower','camera'}

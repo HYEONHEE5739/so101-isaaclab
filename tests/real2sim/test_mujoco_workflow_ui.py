@@ -47,6 +47,31 @@ def test_backend_changes_only_execution_engine(panel):
         assert panel.stage_options()['backend'] == backend
 
 
+def test_object_selection_persisted_per_workspace_and_not_overwritten_by_replay(panel,monkeypatch):
+    import copy
+    from PyQt6.QtCore import Qt
+    from soarm101_lab.workflow.tasks import workspace_key
+    from soarm101_lab.workflow import ui
+    w=ui.load(panel.workspace.text())
+    selector=panel.task_selector
+    selector.configure(w,'source',active_object_ids=['cube_red'])
+    first=json.dumps(workspace_key(w),sort_keys=True)
+    assert panel.object_selections[first]==['cube_red']
+    selector.configure(w,'replay',selector.selection(),w['task']['dynamic'])
+    assert panel.object_selections[first]==['cube_red']
+    other=copy.deepcopy(w);other['profile']['objects']['cube_red']['display_name']='New workspace red'
+    selector.configure(other,'source')
+    second=json.dumps(workspace_key(other),sort_keys=True)
+    assert len(panel.object_selections[second])==3 and len(panel.object_selections[first])==1
+    monkeypatch.setattr(ui,'load',lambda *args:w)
+    panel.sync_tasks()
+    assert selector.object_selection()==['cube_red']
+    saved=json.loads((panel.registry.root/'ui.json').read_text())
+    assert saved['object_selections'][first]==['cube_red']
+    selector.objects.item(0).setCheckState(Qt.CheckState.Unchecked)
+    assert not panel.run.isEnabled() and 'least one' in panel.status.text()
+
+
 @pytest.mark.parametrize('stage', ['annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'])
 def test_stage_controls_do_not_change_with_backend(panel, stage):
     panel.stage.setCurrentIndex(panel.stage.findData(stage))

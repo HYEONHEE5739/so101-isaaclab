@@ -122,7 +122,7 @@ def main():
                                      seed_mode='automatic' if args_cli.generation_seed is None else 'explicit')
         atomic(Path(args_cli.output_file).with_suffix('.generation.json'), generation_provenance)
         print(f'[WORKFLOW] Datagen seed={seed} (workspace seed={workspace["task"]["reset"]["seed"]})', flush=True)
-        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, num_envs, randomization_seed=seed,
+        env_cfg = make_mimic_config(workspace, args_cli.device, num_envs, randomization_seed=seed,
                                    coordinates=source_args.get('so101_coordinates'))
         env_name = env_cfg.env_name
         success_term = env_cfg.terminations.success

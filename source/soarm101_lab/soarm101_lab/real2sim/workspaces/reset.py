@@ -39,6 +39,7 @@ class WorkspaceRandomizer:
             raise ValueError('Four-anchor sampling supports up to four objects')
         for index, name in enumerate(t['dynamic']):
             size=np.array(p['objects'][name]['dimensions_m']);limit=half[:2]-size[:2]/2-r['margin_m']
+            if np.any(limit <= 0): raise ValueError('Object does not fit reset support: '+name)
             for _ in range(1000):
                 if mode == 'four_anchors':
                     anchor = anchors[anchor_order[index]] * half[:2] * .5
@@ -71,6 +72,8 @@ def reset_workspace(env,env_ids,workspace,random_state=None,randomization_seed=N
         random_state=env._workspace_randomizer.sample()
     if not isinstance(random_state,dict) or random_state.get('frame')!='workspace':
         raise ValueError('Expected workspace-local reset state; legacy world reset state is not compatible')
+    if set(random_state['cube_positions']) != set(workspace['task']['dynamic']):
+        raise ValueError('Reset state object set differs from active scene')
     world=np.array(workspace['profile']['workspace']['T_world']);_,quat=pose(world)
     for name,xyz in random_state['cube_positions'].items():
         obj=env.scene[name];point=world[:3,:3]@np.array(xyz)+world[:3,3]

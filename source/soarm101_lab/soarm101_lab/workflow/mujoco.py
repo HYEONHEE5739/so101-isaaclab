@@ -40,7 +40,8 @@ def _environment(request, output, coordinates=None, hz=None):
                               task_definition=options.get('task_definition'),
                               full_workspace=options.get('full_workspace', True),
                               viewer=options.get('mode') == 'developer', physics_profile=physics_profile,
-                              identity_sim=options.get('_identity_sim', False) or uses_urdf_frame(recorded_contract))
+                              identity_sim=options.get('_identity_sim', False) or uses_urdf_frame(recorded_contract),
+                              active_object_ids=options.get('active_object_ids'))
 
 
 def _provenance(dataset):
@@ -226,7 +227,10 @@ def replay(request, output, publish, bridge):
     entry = next(e for e in manifest['episodes'] if e['id'] == name)
     arrays = episode_arrays(entry, manifest.get('cameras',['side']), manifest['control_hz'])
     scene = provenance['scene']
-    request = {**request, 'options': {**request['options'], 'task_definition': scene.get('task_definition'),
+    from .tasks import recorded_scene
+    inherited = recorded_scene({'provenance':provenance,'scene_configuration':entry.get('scene_configuration')},load(request['workspace']))
+    request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids']}}
+    request = {**request, 'options': {**request['options'], 'task_definition': entry.get('task_definition') or inherited.get('task_definition') or scene.get('task_definition'),
                                     'physics_profile': scene.get('physics_profile', 'legacy_urdf'),
                                     'full_workspace': scene.get('full_workspace', False),
                                     'width': scene['camera']['resolution'][0], 'height': scene['camera']['resolution'][1]}}
@@ -344,6 +348,7 @@ def train_from_lerobot(artifact, options, output):
     provenance = artifact.get('provenance', {})
     generated = bool(provenance.get('generation_method') or provenance.get('source_env_args', {}).get('generation')) or 'datagen' in str(provenance.get('source_dataset', '')).lower()
     source_groups = options.get('source_groups') or provenance.get('source_groups', {})
+    source_tasks = {str(e['episode_index']):e.get('task_definition') for e in provenance.get('episodes',[])}
     if generated and not source_groups:
         raise ValueError('MiniVLA split requires source_groups for generated LeRobot episodes')
     by_episode = {}
@@ -367,14 +372,20 @@ def train_from_lerobot(artifact, options, output):
             np.save(folder/(camera+'.npy'),frames);np.save(folder/(camera+'_timestamp.npy'),times)
         for key in ('timestamp','action_timestamp'):np.save(folder/(key+'.npy'),times)
         atomic(folder / 'outcome.json', {'success': False, 'success_known': False, 'validation_only': False})
+        scene_configuration=provenance.get('episode_scene_configurations',{}).get(str(index),provenance.get('scene_configuration'))
         manifest['episodes'].append({'id': name, 'path': name, 'split': 'train', 'instruction': rows[0]['task'],
-            'group_id': source_groups.get(str(index), name)})
+            'group_id': source_groups.get(str(index), name),
+            'task_definition':source_tasks.get(str(index)) or (scene_configuration or {}).get('task_definition'),
+            'scene_configuration':scene_configuration})
     atomic(source / 'manifest.json', manifest)
     atomic(source / 'project_provenance.json', {'schema': 'so101.minivla-dataset/1',
         'workspace': artifact['workspace'], 'backend': artifact.get('backend', 'isaac'),
         'coordinates': coords.metadata(), 'task_definitions': artifact.get('tasks', []),
         'coordinate_contract': artifact['coordinates'],
-        'source_dataset': str(root), 'source_sha256': fingerprint(root), 'outcomes': 'unknown; preserving selected training data'})
+        'source_dataset': str(root), 'source_sha256': fingerprint(root),
+        'scene_configuration':provenance.get('scene_configuration'),
+        'scene_configurations':provenance.get('scene_configurations',[]),
+        'episode_scene_configurations':provenance.get('episode_scene_configurations',{}), 'outcomes': 'unknown; preserving selected training data'})
     prepared = output / 'dataset'
     prepare_dataset(source, prepared, include_failed=True)
     workspace = options['workspace']
@@ -396,6 +407,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
     policy = (policy_factory or MiniVLA)(checkpoint)
     rows = []
     options = request['options']
+    from .tasks import object_metrics,evaluation_distribution
     if int(options.get('episodes', 1)) < 1 or int(options.get('max_steps', 300)) < 1:
         raise ValueError('Positive rollout episodes/max_steps required')
     with _environment(request, output, provenance['coordinates'], policy.control_hz) as env:
@@ -409,11 +421,14 @@ def rollout(request, output, publish, bridge, policy_factory=None):
             guard.reset()
             tracker = grasp_tracker(env)
             remaining, trace = [], []
+            metric_state = {};active=env.backend.workspace['task']['dynamic'];pick=env.backend.metadata['pick']
+            initial_positions={n:env.backend.get_object_pose(n)[:3,3].copy() for n in active}
             for step in range(int(options.get('max_steps', 300))):
                 if bridge:
                     bridge.before_step()
                 observed = env.observe()
-                if not remaining:
+                replanning=not remaining
+                if replanning:
                     time_before = env.backend.data.time
                     model_images = [observed['camera_images'][n] for n in policy.cfg.cameras] if 'camera_images' in observed else observed['images']
                     chunk, metrics = policy.predict(model_images, observed['state'], options['instruction'])
@@ -426,15 +441,19 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                 action = guard.apply(remaining.pop(0), observed['state'])
                 result = env.step(action)
                 trace.append({'timestamp_s': result['timestamp_s'], 'model_joint_rad': result['joint_pos'].tolist(),
-                              'canonical_action': action.tolist(), 'success': result['success'], 'policy_metrics': metrics})
+                              'canonical_action': action.tolist(), 'success': result['success'], 'policy_metrics': metrics, 'replan':replanning})
                 signals = subtask_signals(env, tracker, step)
+                measured = object_metrics(active,pick,{n:env.backend.get_object_pose(n)[:3,3] for n in active},
+                    env.backend.get_eef_pose()[:3,3],metric_state,signals['grasp'],signals['place'],initial_positions)
+                trace[-1]['object_metrics']=measured
                 publish(observed['images'][0], {'episode_index': episode + 1, 'episode_total': int(options.get('episodes', 1)),
                         'steps': step + 1, 'task_id': options.get('task_definition', {}).get('task_id', ''),
                         'task_signals': signals, 'success': result['success']})
                 if result['success']:
                     break
             row = {'episode': episode, 'steps': len(trace), 'success': bool(trace[-1]['success']),
-                   'limit_violations': guard.violations, 'rate_limited': guard.rate_limited}
+                   'limit_violations': guard.violations, 'rate_limited': guard.rate_limited,**measured,
+                   'inference_latency_s':[r['policy_metrics'].get('latency_s') for r in trace if r.get('replan')]}
             rows.append(row)
             if bridge:
                 bridge.details.update(episode_outcome='성공' if row['success'] else '실패',
@@ -443,7 +462,9 @@ def rollout(request, output, publish, bridge, policy_factory=None):
             atomic(output / f'episode_{episode:04d}.json', {'summary': row, 'trace': trace})
         return {'passed': True, 'episodes': rows, 'success_rate': sum(r['success'] for r in rows) / len(rows),
                 'scope': 'synchronous simulated rollout; passed means execution validation, not task success',
-                'coordinates': env.coordinates.metadata(), 'scene': env.backend.metadata}
+                'coordinates': env.coordinates.metadata(), 'scene': env.backend.metadata,
+                'scene_configuration':env.backend.metadata.get('scene_configuration'),
+                **evaluation_distribution({'provenance':provenance},env.backend.workspace,env.backend.workspace['task']['dynamic'])}
 
 
 def rollout_lerobot(request, output, publish, bridge):
@@ -451,6 +472,7 @@ def rollout_lerobot(request, output, publish, bridge):
     from .policy import load_policy, observation
     from ..real2sim.workspaces.demo import coordinate_contract
     from ..learning.minivla.policy import ActionGuard
+    from .tasks import object_metrics,evaluation_distribution
     options = request['options']; w = load(request['workspace'])
     device = options.get('device', 'cuda:0')
     policy, pre, post = load_policy(request['checkpoint'], coordinate_contract(w), device)
@@ -460,28 +482,38 @@ def rollout_lerobot(request, output, publish, bridge):
         guard = ActionGuard(env.backend.limits[:, 0], env.backend.limits[:, 1], [2.] * 6, env.hz)
         for episode in range(int(options.get('episodes', 1))):
             env.reset(options.get('seed', 0) + episode); policy.reset(); guard.reset(); tracker = grasp_tracker(env)
-            trace = []
+            trace = [];metric_state={};latencies=[];inference_latencies=[];active=env.backend.workspace['task']['dynamic'];pick=env.backend.metadata['pick']
+            initial_positions={n:env.backend.get_object_pose(n)[:3,3].copy() for n in active}
             for i in range(int(options.get('max_steps', 300))):
                 if bridge: bridge.before_step()
                 state = env.backend.get_state(); side = env.backend.get_rgb()
                 images = {n:env.backend.get_rgb(n) for n in w['task'].get('observation_cameras',list(w['profile']['cameras']))}
                 batch = observation(state['joint_pos'], None, None, options['instruction'], device, images=images)
+                begin=time.perf_counter()
                 with torch.inference_mode():
                     action = post(policy.select_action(pre(batch))).detach().cpu().numpy().reshape(6)
+                latencies.append(time.perf_counter()-begin)
+                inference=getattr(policy,'last_inference_metrics',None)
+                if inference and inference.get('latency_s') is not None:inference_latencies.append(inference['latency_s'])
                 action = guard.apply(action, state['joint_pos'])
                 env.backend.step(action)
                 signals = subtask_signals(env, tracker, i)
-                trace.append({'action': action.tolist(), 'success': signals['place']})
+                measured=object_metrics(active,pick,{n:env.backend.get_object_pose(n)[:3,3] for n in active},
+                    env.backend.get_eef_pose()[:3,3],metric_state,signals['grasp'],signals['place'],initial_positions)
+                trace.append({'action': action.tolist(), 'success': signals['place'],'object_metrics':measured})
                 emit(side, {'steps': i + 1, 'episode_index': episode + 1, 'episode_total': int(options.get('episodes', 1)),
                     'task_id': options.get('task_definition', {}).get('task_id', ''), 'task_signals': signals})
                 if signals['place']: break
-            rows.append({'episode': episode, 'steps': len(trace), 'success': trace[-1]['success']})
+            rows.append({'episode': episode, 'steps': len(trace), 'success': trace[-1]['success'],**measured,
+                         'inference_latency_s':inference_latencies or None,'action_call_latency_s':latencies})
             if bridge:
                 bridge.details.update(episode_outcome='성공' if rows[-1]['success'] else '실패',
                     outcome_reason='컵 안 정지 조건 충족' if rows[-1]['success'] else '최대 step 도달 · 컵 안 정지 조건 미충족')
                 bridge.status()
             atomic(output / f'episode_{episode:04d}.json', {'summary': rows[-1], 'trace': trace})
-    return {'passed': True, 'episodes': rows, 'success_rate': sum(r['success'] for r in rows) / len(rows)}
+    return {'passed': True, 'episodes': rows, 'success_rate': sum(r['success'] for r in rows) / len(rows),
+            'scene_configuration':env.backend.metadata.get('scene_configuration'),
+            **evaluation_distribution({'path':str(request['checkpoint'])},w,active)}
 
 
 def execute(request):

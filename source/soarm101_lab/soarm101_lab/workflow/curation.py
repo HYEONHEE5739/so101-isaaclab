@@ -77,6 +77,7 @@ def analyze_canonical(path):
     dt = 1 / float(manifest['control_hz'])
     rows = []
     for entry in manifest['episodes']:
+        task=entry.get('task_definition') or definition
         folder = path / entry['path']
         ee = np.load(folder / 'eef_pose.npy', allow_pickle=False)[:, :3, 3]
         obj = np.load(folder / 'object_pose.npy', mmap_mode='r', allow_pickle=False)
@@ -85,7 +86,7 @@ def analyze_canonical(path):
             raise ValueError(f'{entry["id"]}: 길이 또는 비정상 trajectory 값')
         speed = np.linalg.norm(np.diff(ee, axis=0), axis=1) / dt
         acc = np.diff(q, n=2, axis=0) / dt**2
-        rows.append(dict(name=entry['id'], task_id=definition['task_id'], xy=obj[0, :2, 3].tolist(),
+        rows.append(dict(name=entry['id'], task_id=task['task_id'], xy=obj[0, :2, 3].tolist(),
             duration=len(q)*dt, frames=len(q), command_stop_fraction=float(np.mean(np.max(np.abs(np.diff(q, axis=0)), axis=1)/dt < np.deg2rad(1))),
             stop_fraction=float(np.mean(speed < .002)), jitter=float(np.sqrt(np.mean(acc[:, :5]**2))),
             gripper_jitter=float(np.sqrt(np.mean(acc[:, 5]**2))), ee=ee.tolist(), actions=q.tolist(), dt=dt, flags=[],
@@ -131,7 +132,9 @@ def export_subset(source, destination, names):
             shutil.copytree(folder, destination / entries[name]['path'])
         atomic(destination / 'manifest.json', {**manifest, 'episodes': [entries[n] for n in names]})
         provenance = json.loads((source / 'project_provenance.json').read_text())
-        atomic(destination / 'project_provenance.json', {**provenance, 'curation': {
+        scenes=[entries[n].get('scene_configuration') or provenance.get('scene_configuration') for n in names]
+        scenes=list({s['sha256']:s for s in scenes if s}.values())
+        atomic(destination / 'project_provenance.json', {**provenance, 'scene_configurations':scenes, 'curation': {
             'source': str(source.resolve()), 'source_sha256': fingerprint(source), 'selected_episodes': names}})
         return destination
     destination.parent.mkdir(parents=True,exist_ok=True)

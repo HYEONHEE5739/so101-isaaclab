@@ -12,6 +12,12 @@ def verify_dataset(path, workspace):
     if args.get('so101_coordinates') is not None:
         from ...representation import require_compatible
         require_compatible(args['so101_coordinates'], coordinate_contract(w))
+    from ...workflow.tasks import recorded_scene, configured, from_artifact
+    artifact = {'path':str(path),'env_args':args,'workspace':args.get('workspace'),'backend':'isaac'}
+    scene = recorded_scene(artifact,w)
+    definitions = from_artifact(artifact,w)
+    definition = scene.get('task_definition') or (definitions[0] if len(definitions)==1 else None)
+    w = configured(w,definition,scene['active_object_ids'],backend='isaac')
     return w,args
 
 

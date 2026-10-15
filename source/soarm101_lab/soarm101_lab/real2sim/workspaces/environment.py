@@ -113,7 +113,7 @@ def task_success_details(env, workspace):
         speed_limit=task['success']['max_speed_m_s'], wall_tolerance=WALL_TOLERANCE_M)
 
 
-def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False):
+def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None):
     if num_envs!=1:raise ValueError('Workspace Phase 1 supports num_envs=1')
     from isaaclab.utils import configclass
     from isaaclab.envs import ManagerBasedEnvCfg
@@ -126,7 +126,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from ...tasks.manager_based.soarm101_lab.base_pick_place_teleop_env_cfg import ActionsCfg, ObservationsCfg
     from ..profile import pose, render_k
     from ...workflow.tasks import configured
-    w=configured(load(workspace), task_definition);p=w['profile'];task=w['task'];root=w['root']
+    w=configured(workspace if isinstance(workspace,dict) else load(workspace), task_definition or (workspace.get('task_definition') if isinstance(workspace,dict) else None), active_object_ids, backend='isaac');p=w['profile'];task=w['task'];root=w['root']
     class RuntimeCamera(Camera):
         def _update_poses(self, env_ids):
             # USD Xform reads remain at the authored pose with Fabric enabled.

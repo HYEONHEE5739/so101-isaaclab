@@ -1,3 +1,13 @@
+## 2026-10-15 — Workspace 선택형 조작 물체 / Workflow 전달
+
+- 기존 TaskSelector에 Scene objects 체크박스/count/Workspace별 선택 저장. Task 충돌은 명시적으로 처리.
+- 기존 tasks.configured의 실행 복사본으로 두 엔진에서 비선택 visual/body/collision/joint/state/reset 제거.
+- 기존 Request/Provenance의 active IDs와 Scene hash, Source 상속·Resume 검사, episode별 변환·학습 보존.
+- SimEval composition shift 및 전체 distractor/선택·grasp·transport·place metrics. 단일 물체 선택 정확도 N/A.
+- Scene/Calibration/MiniVLA architecture 원본 보존. 새 controller/launcher/schema 파일 없음.
+- 사용법: BUILDER_WORKSPACE.md / DATA_FLOW.md / ../minivla/EVALUATION.md.
+- 실제 검증/한계/초기 실패: outputs/workflow_validation/active_scene_objects/REPORT.md.
+
 ## 2026-10-13 — Teleop 목표 포화 처리
 
 - URDF/Sim과 Follower 정수 encoder 명령 범위 교집합으로 기존 Teleop clip 확장.

@@ -170,7 +170,7 @@ with h5py.File(input_file, "r") as h5:
     demos = h5["data"]
 
     demo_names = sorted(
-        demos.keys(),
+        (name for name in demos if name.startswith('demo_')),
         key=lambda name: int(name.split("_")[-1]),
     )
 
@@ -384,7 +384,13 @@ from soarm101_lab.representation import describe
 converted_coordinates = read_contract(dataset_root)
 with h5py.File(input_file, "r") as source_h5:
     source_args = json.loads(source_h5["data"].attrs.get("env_args", "{}"))
-provenance = {"workspace": source_args.get("workspace"), "source_dataset": str(input_file),
+with h5py.File(input_file,"r") as source_h5:
+    episode_scenes = {str(i):json.loads(source_h5['data'][name].attrs.get('scene_configuration','null')) or source_args.get('scene_configuration')
+        for i,name in enumerate(demo_names)}
+provenance = {"scene_configuration":source_args.get('scene_configuration'),
+              "scene_configurations":list({s['sha256']:s for s in episode_scenes.values() if s}.values()),
+              "episode_scene_configurations":episode_scenes,
+              "workspace": source_args.get("workspace"), "source_dataset": str(input_file),
               "source_env_args": source_args, "action_source": first_action_source,
               "episodes": task_episodes, "task_definitions": list({json.dumps(e["task_definition"], sort_keys=True): e["task_definition"] for e in task_episodes if e["task_definition"]}.values())}
 if converted_coordinates.get("provenance_status") != "legacy_unknown":

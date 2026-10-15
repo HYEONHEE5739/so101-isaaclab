@@ -27,10 +27,16 @@ class EpisodeWriter:
         self.provenance = {'schema': 'so101.minivla-dataset/1', 'backend': 'mujoco',
                            'workspace': env.backend.metadata['source'],
                            'scene': copy.deepcopy(env.backend.metadata), 'coordinates': env.coordinates.metadata(),
-                           'instruction': instruction, 'source_group_prefix': uuid.uuid4().hex}
-        from .tasks import selected
+                           'instruction': instruction, 'source_group_prefix': uuid.uuid4().hex,
+                           'scene_configuration':copy.deepcopy(env.backend.metadata.get('scene_configuration'))}
+        from .tasks import selected, configured
         if not self.provenance['scene'].get('task_definition'):
             self.provenance['scene']['task_definition'] = selected(env.backend.workspace)
+        if not self.provenance['scene_configuration']:
+            scene = configured(env.backend.workspace, self.provenance['scene']['task_definition'],
+                               env.backend.metadata['dynamic_objects'], backend='mujoco')['scene_configuration']
+            self.provenance['scene_configuration'] = scene
+            self.provenance['scene']['scene_configuration'] = copy.deepcopy(scene)
         self.instruction = instruction
         self.flush_manifest()
 
@@ -38,6 +44,11 @@ class EpisodeWriter:
         source = Path(source).resolve()
         manifest = json.loads((source / 'manifest.json').read_text())
         provenance = json.loads((source / 'project_provenance.json').read_text())
+        from .tasks import recorded_scene
+        old = recorded_scene({'provenance':provenance},self.env.backend.workspace)
+        current = self.provenance.get('scene_configuration')
+        if current and old['active_object_ids'] != current['active_object_ids']:
+            raise ValueError('Resume active object set differs')
         if (provenance['workspace'] != self.provenance['workspace'] or
                 provenance['scene']['model_sha256'] != self.provenance['scene']['model_sha256'] or
                 manifest['units'] != self.manifest['units'] or manifest['control_hz'] != self.env.hz or
@@ -95,6 +106,8 @@ class EpisodeWriter:
         atomic(folder / 'outcome.json', {'success': bool(success), 'validation_only': validation_only,
                                        'coordinates': self.env.coordinates.metadata()})
         entry = {'id': name, 'path': name, 'split': 'train', 'instruction': self.instruction,
+            'scene_configuration':copy.deepcopy(self.provenance.get('scene_configuration')),
+            'task_definition':copy.deepcopy(self.provenance['scene'].get('task_definition')),
                  'group_id': self.provenance['source_group_prefix'] + '/' + name}
         self.manifest['episodes'].append(entry)
         self.flush_manifest()
@@ -152,7 +165,9 @@ def prepare_dataset(source, output, splits=None, include_failed=False, require_v
         shutil.copytree(original['_path'], output / entry['path'])
     cleaned = {**manifest, 'episodes': entries}
     atomic(output / 'manifest.json', cleaned)
-    atomic(output / 'project_provenance.json', {**provenance, 'prepared_from': str(source.resolve()),
+    scenes = [e.get('scene_configuration') or provenance.get('scene_configuration') for e in entries]
+    scenes = list({s['sha256']:s for s in scenes if s}.values())
+    atomic(output / 'project_provenance.json', {**provenance, 'scene_configurations':scenes, 'prepared_from': str(source.resolve()),
                                                'include_failed': include_failed})
     fit_statistics(output / 'manifest.json', output / 'statistics.json', manifest.get('cameras',['side']))
     return {'dataset': str(output), 'episodes': len(entries), 'groups': grouped}
@@ -197,12 +212,15 @@ def convert_dataset(source, output, options):
     contract = {**contract, 'action_space': JOINT_SPACE}
     intermediate = output / 'conversion_input.hdf5'
     definition = provenance['scene']['task_definition']
+    definitions = list({e.get('task_definition',definition)['task_id']:e.get('task_definition',definition) for e in manifest['episodes']}.values())
     with h5py.File(intermediate, 'w') as h:
         data = h.create_group('data')
-        data.attrs['env_args'] = json.dumps({'workspace': provenance['workspace'], 'task_definitions': [definition]})
+        data.attrs['env_args'] = json.dumps({'workspace': provenance['workspace'], 'task_definitions': definitions,
+            'scene_configuration':provenance.get('scene_configuration')})
         for i, entry in enumerate(manifest['episodes']):
             folder = dataset / entry['path']; group = data.create_group(f'demo_{i}')
-            group.attrs['task_definition'] = json.dumps(definition)
+            group.attrs['task_definition'] = json.dumps(entry.get('task_definition') or definition)
+            group.attrs['scene_configuration'] = json.dumps(entry.get('scene_configuration') or provenance.get('scene_configuration'))
             actions = np.load(folder / 'raw_action.npy', allow_pickle=False)
             group.create_dataset('actions', data=actions)
             group.create_dataset('joint_targets', data=actions)
@@ -218,9 +236,12 @@ def convert_dataset(source, output, options):
         '--fps', str(round(manifest['control_hz'])), '--action_source', 'joint_targets'], check=True)
     converted_provenance = dataset / 'lerobot/workflow_provenance.json'
     atomic(converted_provenance, {**json.loads(converted_provenance.read_text()), 'workspace': provenance['workspace'],
-        'task_definitions': [definition], 'backend': 'mujoco', 'source': str(Path(source).resolve()),
+        'task_definitions': definitions, 'backend': 'mujoco', 'source': str(Path(source).resolve()),
         'source_groups': {str(i): e['group_id'] for i, e in enumerate(manifest['episodes'])},
-        'generation_method': provenance.get('generation_method')})
+        'generation_method': provenance.get('generation_method'),
+        'scene_configuration':provenance.get('scene_configuration'),
+        'scene_configurations':provenance.get('scene_configurations',[]),
+        'episode_scene_configurations':{str(i):e.get('scene_configuration') or provenance.get('scene_configuration') for i,e in enumerate(manifest['episodes'])}})
     # Conversion adapter is temporary, never a registered artifact.
     intermediate.unlink()
     from ..so101_dataset_contract import sidecar
@@ -256,6 +277,10 @@ def annotate(request, output, publish, bridge, environment_factory, preview):
     destination = output / 'dataset'; destination.mkdir()
     accepted, rejected = [], []
     scene = provenance['scene']
+    from .tasks import recorded_scene
+    if request.get('workspace'):
+        inherited = recorded_scene({'provenance':provenance},load(request['workspace']))
+        request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids']}}
     request = {**request, 'options': {**request['options'], 'task_definition': scene.get('task_definition'),
         'physics_profile': scene.get('physics_profile', 'legacy_urdf'),
         'full_workspace': scene.get('full_workspace', False),
@@ -311,6 +336,13 @@ def datagen(request, output, publish, bridge, environment_factory, preview):
     source = Path(request['input']); provenance = json.loads((source / 'project_provenance.json').read_text())
     if request.get('workspace') and provenance['workspace'] != metadata(load(request['workspace'])):
         raise ValueError('Dataset workspace identity differs')
+    from .tasks import recorded_scene
+    inherited = recorded_scene({'provenance':provenance},load(request['workspace']))
+    request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids'],
+        'task_definition':inherited['task_definition'], 'physics_profile':provenance['scene'].get('physics_profile','legacy_urdf'),
+        'full_workspace':provenance['scene'].get('full_workspace',False),
+        'width':provenance['scene']['camera']['resolution'][0], 'height':provenance['scene']['camera']['resolution'][1],
+        'instruction':inherited['task_definition']['language_instruction']}}
     manifest = load_manifest(source / 'manifest.json')
     options = request['options']
     count = int(options.get('num_successful_demos', 10))

@@ -477,8 +477,8 @@ def main():
 
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
-        _, source_args = validate_input(args_cli.input_file, args_cli.workspace)
-        env_cfg = make_mimic_config(args_cli.workspace, args_cli.device, annotation=True,
+        workspace, source_args = validate_input(args_cli.input_file, args_cli.workspace)
+        env_cfg = make_mimic_config(workspace, args_cli.device, annotation=True,
                                    coordinates=source_args.get('so101_coordinates'))
         env_name = env_cfg.env_name
     else:

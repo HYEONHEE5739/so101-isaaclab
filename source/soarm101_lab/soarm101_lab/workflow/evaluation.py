@@ -63,8 +63,9 @@ def evaluate(request):
             from huggingface_hub import snapshot_download
             path = snapshot_download(repo_id=remote['repo_id'], revision=remote['commit'])
         policy, pre, post = load_policy(path, coordinate_contract(w), device)
-        from .tasks import catalog, selected, validate, configured
-        definitions = catalog(w) if opts.get('task_scope') == 'all' else opts.get('tasks') or [selected(w)]
+        from .tasks import catalog, selected, validate, configured, active_objects, object_metrics, evaluation_distribution
+        active = active_objects(w,opts.get('active_object_ids'))
+        definitions = [t for t in catalog(w) if t['pick_object_id'] in active] if opts.get('task_scope') == 'all' else opts.get('tasks') or [selected(w)]
         definitions = [validate(t, w) for t in definitions]
         if not definitions or len({t['task_id'] for t in definitions}) != len(definitions):
             raise ValueError('Select distinct evaluation tasks')
@@ -77,7 +78,7 @@ def evaluate(request):
             from ..so101_dataset_contract import read_contract
             from ..real2sim.precision import uses_urdf_frame
             cfg = make_config(w['root'], device, task_definition=definitions[0],
-                              identity_sim=uses_urdf_frame(read_contract(path)))
+                              identity_sim=uses_urdf_frame(read_contract(path)), active_object_ids=active)
             cfg.seed = used_seed
             cfg.events.reset_episode.params['randomization_seed'] = used_seed
             print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
@@ -88,26 +89,50 @@ def evaluate(request):
                 for definition, ep in [(d, e) for d in definitions for e in range(int(opts.get('episodes', 1)))]:
                     task = definition['language_instruction']
                     print(f"[WORKFLOW] Sim 평가 시작 · {definition['task_id']} · Episode {ep + 1}/{int(opts.get('episodes', 1))}", flush=True)
-                    env._workflow_task_workspace = configured(w, definition)
+                    env._workflow_task_workspace = configured(w, definition,active,'isaac')
                     if bridge:
                         bridge.details.update(task_id=definition['task_id'], language_instruction=task, episode_index=ep + 1, episode_total=int(opts.get('episodes', 1)), episode_outcome='진행 중', outcome_reason='')
                     for field in ('_grasp_completed', '_gripper_opened_once'):
                         if hasattr(env, field): getattr(env, field).zero_()
                     obs, _ = env.reset(); policy.reset(); success = False
+                    metric_state={};initial_positions={n:env.scene[n].data.root_pos_w[0].cpu().numpy().copy() for n in active}
+                    robot=env.scene['robot'];tool=robot.body_names.index('tool0');pick=definition['pick_object_id']
+                    contacts={link:env.sim.physics_sim_view.create_rigid_contact_view(
+                        '/World/envs/env_0/Robot/'+link,['/World/envs/env_0/'+pick]) for link in ('gripper','jaw')}
+                    from ..real2sim.workspaces.grasp import StableGrasp
+                    grasp_tracker=StableGrasp(env.step_dt,w['profile']['objects'][pick]['dimensions_m'])
+                    from scipy.spatial.transform import Rotation
+                    metric_trace=[];latencies=[];inference_latencies=[]
                     for step in range(int(opts.get('max_steps', 300))):
                         p = obs['policy']
                         batch = observation(p['joint_pos'][0], None, None, task, device,
                                             images={k[:-4]:v[0] for k,v in p.items() if k.endswith('_cam')})
+                        begin=time.perf_counter()
                         with torch.inference_mode():
                             action = post(policy.select_action(pre(batch))).reshape(1, 6)
+                        latencies.append(time.perf_counter()-begin)
+                        inference=getattr(policy,'last_inference_metrics',None)
+                        if inference and inference.get('latency_s') is not None:inference_latencies.append(inference['latency_s'])
                         if not torch.isfinite(action).all():
                             raise ValueError('Nonfinite policy action')
                         obs, _ = env.step(action.to(env.device))
                         result, details = task_success_details(env, w)
                         success = bool(result[0])
+                        positions={n:env.scene[n].data.root_pos_w[0].cpu().numpy() for n in active}
+                        tcp=robot.data.body_link_pos_w[0,tool].cpu().numpy()
+                        tipquat=robot.data.body_link_quat_w[0,tool].cpu().numpy()[[1,2,3,0]]
+                        objquat=env.scene[pick].data.root_quat_w[0].cpu().numpy()[[1,2,3,0]]
+                        rot=Rotation.from_quat(tipquat).as_matrix()
+                        relative=rot.T@(positions[pick]-tcp)
+                        relative_quat=(Rotation.from_quat(tipquat).inv()*Rotation.from_quat(objquat)).as_quat()
+                        touching=[bool(torch.linalg.vector_norm(v.get_contact_force_matrix(env.physics_dt)).item()>.01) for v in contacts.values()]
+                        grasp=grasp_tracker.update(step,relative,relative_quat,tcp,positions[pick],*touching)
+                        metric_trace.append(object_metrics(active,pick,positions,tcp,metric_state,grasp,success,initial_positions))
                         if success:
                             break
-                    rows.append(episode_result(definition, ep, step + 1, success, details))
+                    rows.append({**episode_result(definition, ep, step + 1, success, details),**metric_trace[-1],
+                        'inference_latency_s':inference_latencies or None,'action_call_latency_s':latencies,
+                        'object_metric_trace':metric_trace})
                     log_evaluation(rows, definition['task_id'])
                     from ..real2sim.workspaces.diagnostics import report_place
                     report_place(env, w)
@@ -193,7 +218,9 @@ def evaluate(request):
                 wins = sum(r['success'] for r in subset)
                 print(f"[WORKFLOW] 평가 완료 · {definition['task_id']} · 성공 {wins}/{len(subset)} · 성공률 {100*wins/len(subset):.1f}%", flush=True)
         atomic(request['output'], {'status': 'SUCCEEDED', 'mode': stage, 'workspace': metadata(w),
-               'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
+               'scene_configuration':configured(w,definitions[0],active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'],
+               'scene_configurations':[configured(w,d,active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'] for d in definitions],
+               **evaluation_distribution(artifact,w,active), 'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
                'hardware_mapping': follower.metadata.get('precision_mapping') if stage == 'real_eval' else None,
                'metrics_per_task': evaluation_metrics(definitions, rows, stage == 'sim_eval'), 'episodes' if stage == 'sim_eval' else 'steps': rows,
                'task_success': 'simulation geometric condition' if stage == 'sim_eval' else 'unmeasured; human review required'})

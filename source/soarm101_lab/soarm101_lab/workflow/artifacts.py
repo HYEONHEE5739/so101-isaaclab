@@ -110,6 +110,7 @@ def inspect_canonical(kind, path):
     result = {'format': 'so101.canonical/1', 'backend': provenance.get('backend'),
               'workspace': provenance['workspace'], 'provenance': provenance,
               'tasks': provenance.get('task_definitions') or ([definition] if definition else []),
+              'scene_configuration':provenance.get('scene_configuration') or provenance.get('scene',{}).get('scene_configuration'),
               'coordinates': provenance['coordinates'],
               'representation': {'action_space': 'arm_rad_gripper_fraction', 'backend': provenance.get('backend')}}
     if kind == 'policy':
@@ -124,6 +125,11 @@ def inspect_canonical(kind, path):
     episodes = manifest.get('episodes', [])
     if not episodes:
         raise ValueError('No nonempty demonstration episodes')
+    definitions=[e.get('task_definition') or definition for e in episodes]
+    if any(definitions):result['tasks']=list({t['task_id']:t for t in definitions if t}.values())
+    scenes=[e.get('scene_configuration') or result['scene_configuration'] for e in episodes]
+    if any(scenes):
+        result['provenance']={**provenance,'scene_configurations':list({s['sha256']:s for s in scenes if s}.values())}
     for entry in episodes:
         folder = (p / entry['path']).resolve()
         if not folder.is_relative_to(p.resolve()):

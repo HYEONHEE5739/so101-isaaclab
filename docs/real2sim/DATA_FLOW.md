@@ -1,5 +1,41 @@
 # SO-101 Real2Sim Data Flow
 
+## 실행별 Scene 구성 (2026-10-15)
+
+Published Workspace identity와 실행별 Scene 구성을 구분한다. `workflow.tasks.configured()`는
+원본을 복사하고 비선택 dynamic을 profile/physics roles에서도 제거한다. 객체 순서는 Workspace
+순서로 정규화한다. 기존 Request/Artifact에 다음 `scene_configuration`을 넣는다.
+
+```text
+workspace: 원본 package metadata/hash
+active_object_ids: 정규화한 조작 물체 ID 목록
+pick_object_id / place_target_id / task_definition
+reset: 기존 Workspace reset 설정 (mode/margin/separation/seed 포함)
+backend: isaac 또는 mujoco
+sha256: 위 payload의 정렬된 canonical JSON SHA256
+```
+
+실행 hash는 원본 Workspace hash를 대체하지 않는다. MuJoCo model XML/hash/state/physics 검사는
+추가로 유지한다. Isaac은 구성의 dynamic만 Spawn하고 reset은 그 ID와 정확히 같은 위치 집합을 받는다.
+원본 measured q, Precision Profile 및 RobotCoordinates 변환에는 영향을 주지 않는다.
+
+| 경로 | 저장·복원 위치 |
+|---|---|
+| Isaac Source / Annotation / DataGen | HDF5 `data.env_args.scene_configuration`, episode `scene_configuration`/`task_definition` attrs |
+| MuJoCo Source | `project_provenance.json.scene_configuration`, `scene.scene_configuration`, manifest episode의 같은 필드 |
+| Replay / Annotation / DataGen | 입력의 저장 구성으로 복원. 현재 UI 선택으로 원본을 재라벨하지 않음 |
+| Resume | 원본 workspace/task/physics/model/좌표 계약 검사와 active set 동일성 검사 |
+| Curation / Convert | episode 속성 보존, 구성별 `scene_configurations`, `episode_scene_configurations` |
+| Train / checkpoint | 기존 provenance에 episode→구성, task, source group을 보존 |
+| Sim Eval | 학습 set과 평가 set을 각각 기록. 구성 차이 자체는 거절하지 않음 |
+
+혼합 조합 데이터는 episode별 구성과 Task를 명시하여 기존 데이터 형식으로 결합해 학습할 수 있다.
+Source group 분리는 그대로다. 한 환경으로 Replay/Annotation/DataGen할 때는 동일 구성의 Source
+subset을 선택한다. 섞인 구성을 하나로 추측하여 재생하지 않는다.
+과거 MuJoCo의 명시적 `scene.dynamic_objects`, 또는 동일 Workspace의 HDF5 initial rigid-object
+state에서 확정 가능한 구성은 읽기 전용으로 복원한다. 근거가 없으면 `UNKNOWN`이며 전체 3개로
+가정하지 않는다. 구형 Dataset/Workspace를 새 구성으로 덮어쓰지 않는다.
+
 ## 현재 실시간 관절 경로 (2026-10-12)
 
 Leader raw/SDK native → Precision/legacy mapping → requested URDF q

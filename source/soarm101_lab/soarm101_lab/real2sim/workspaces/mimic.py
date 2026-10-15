@@ -10,10 +10,10 @@ def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, 
     from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
     from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
     from ...workflow.tasks import configured
-    w = configured(load(workspace))
+    w = configured(workspace if isinstance(workspace,dict) else load(workspace))
     from ..precision import uses_urdf_frame
     identity_sim = uses_urdf_frame(coordinates)
-    base = make_config(workspace, device, num_envs, identity_sim=identity_sim)
+    base = make_config(w, device, num_envs, identity_sim=identity_sim)
     from isaaclab.sensors import ContactSensorCfg
     # One sensor per rigid body: Isaac filtered contacts are one-to-many.
     for sensor, link in [('grasp_fixed_contact', 'gripper'), ('grasp_moving_contact', 'jaw')]:
@@ -89,7 +89,7 @@ def preserve_metadata(source, output, workspace):
         from ...representation import describe
         coordinates = args.get('so101_coordinates', coordinate_contract(w))
         updated.update(representation=describe(coordinates), workspace=metadata(w), workspace_path=str(w['root']),
-                       so101_coordinates=coordinates,
+                       so101_coordinates=coordinates, scene_configuration=w['scene_configuration'],
                        grasp_object=w['task']['pick'], place_bin=w['task']['place'],
                        source_dataset=str(source), source_env_args=args)
         try:
