@@ -104,4 +104,16 @@ def simulation_joint_offsets(node, names):
             or node.get('provenance') not in ('estimated', 'optimized')
             or not isinstance(node.get('evidence'), list) or not node['evidence']):
         raise ValueError('Invalid unvalidated simulation joint offsets')
+    if 'precision_mapping_sha256' in node:
+        import re
+        if not isinstance(node['precision_mapping_sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', node['precision_mapping_sha256']):
+            raise ValueError('Invalid Precision mapping binding for simulation joint offsets')
     return values
+
+
+def require_precision_simulation_binding(node, mapping):
+    """A fitted model residual is valid only after the exact recorded mapping."""
+    reference = node.get('precision_mapping_sha256')
+    if (mapping.get('schema') != 'so101.precision-joint-mapping/1'
+            or not reference or mapping.get('sha256') != reference):
+        raise ValueError('Scene joint correction requires the Precision mapping used for its fit')

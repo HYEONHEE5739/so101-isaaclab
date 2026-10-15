@@ -65,9 +65,10 @@ class MujocoBackend(SimBackend):
         self.v_indices = self.model.jnt_dofadr[self.joint_ids]
         self.actuator_ids = np.array([self._id(mujoco.mjtObj.mjOBJ_ACTUATOR, 'target_' + n) for n in JOINTS])
         self.eef_id = self._id(mujoco.mjtObj.mjOBJ_SITE, 'tool0')
-        self.object_joint = self._id(mujoco.mjtObj.mjOBJ_JOINT, 'object_free')
-        self.object_q = int(self.model.jnt_qposadr[self.object_joint])
-        self.object_v = int(self.model.jnt_dofadr[self.object_joint])
+        review = self.workspace['task'].get('mode') == 'geometry_review'
+        self.object_joint = None if review else self._id(mujoco.mjtObj.mjOBJ_JOINT, 'object_free')
+        self.object_q = None if review else int(self.model.jnt_qposadr[self.object_joint])
+        self.object_v = None if review else int(self.model.jnt_dofadr[self.object_joint])
         self.object_indices = {}
         for name in self.metadata['dynamic_objects']:
             joint = self._id(mujoco.mjtObj.mjOBJ_JOINT, 'object_free' if name == self.metadata['pick'] else 'object_free_' + name)
@@ -192,6 +193,8 @@ class MujocoBackend(SimBackend):
     def success_details(self):
         self._open()
         task, p = self.workspace['task'], self.workspace['profile']
+        if task.get('mode') == 'geometry_review':
+            return {'success': None, 'definition': 'not applicable: geometry review'}
         cup = p['objects'][task['targets'][task['place']]]
         relative = np.linalg.inv(self.get_object_pose(task['place'])) @ self.get_object_pose(task['pick'])
         size = np.asarray(p['objects'][task['pick']]['dimensions_m'])

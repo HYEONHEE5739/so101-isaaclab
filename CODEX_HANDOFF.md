@@ -1,5 +1,120 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — MiniVLA Flow-DiT 교체 (2026-10-15)
+
+`docs/minivla/DESIGN.md`, `README.md`, `VALIDATION.md` 및
+`docs/real2sim/MINIVLA_INTEGRATION.md` 우선. 기존 패키지를 직접 교체했다.
+Qwen NF4 block15 output/letterbox256square/side64image tokens, adapter256, state+40actions,
+AdaLN-Zero FlowDiT4, Euler8/replan4. ActionHead7,319,558params. 기본config/default.json.
+Deterministic/head선택/UV head/옛4presets 제거. 공용 grounding data/ACT/SmolVLA 유지.
+Checkpoint schema so101.minivla.flow-dit/1, 구형 MiniVLA 가중치 거절(원본 보존).
+실제 frozen/QLoRA GPU F/B와8~15층 Action gradient 통과. 짧은2step 합성 모델은 작업용 아님.
+검증 결과/실패/VRAM/남은 성공률 검증은 outputs/workflow_validation/minivla_flow_dit 참조.
+
+
+## 최신 — v8 충돌 / 미끄러짐 (2026-10-14)
+
+`outputs/workflow_validation/scene2_v8_contact_physics/REPORT.md` 참조.
+정정: v8 finger collision은 USD instance proxy 내부에 존재한다. 앞선 누락 진단 오류.
+복원 helper는 instance proxy까지 검사해 중복 생성하지 않도록 수정했다.
+후속 Isaac 실제 렌더에서 왼쪽 틈/오른쪽 겹침 재현.
+Builder Isaac dt1/240, decimation/render8로 변경해30Hz 제어 유지.
+동일 합성 자세의 fixed-pad 평면 최소간격5.51→0.54mm, 실제 grasp 완전 해결 아님.
+후속 근거/오진 정정은 같은 폴더 FOLLOWUP.md 우선.
+원본 USD/Workspace 수정 없음. Builder isaac_matched MuJoCo noslip_iterations=10.
+비관통 합성 유지6/6, 열기 bilateral 해제6/6. 실제 pick/lift/Sim2Real 검증 아님.
+Isaac GPU/CPU AppLauncher는 CUDA 초기화 오류로 동적 검사 미완료.
+UI 동일v8, Precision ON/Scene보정제외 OFF. 관절 보정/패드 두께/마찰계수 변경 없음.
+
+
+## 최신 — Scene2 새 접촉 캡처 v8 (2026-10-14)
+
+`outputs/workflow_validation/scene2_final_contact_refinement/REPORT.md` 우선.
+새9Pair(3–9 접촉; 사용자 블록 윗면 중앙/컵rim 확인), static001 영상14개와8/9높이 제약.
+Builder scene2-final-contact-review-20261014-932c8f2e/final_contact_review export/import→scene2_builder/v8.
+평면 tilt2.604°+물체위치 보정; 기존 v7 signed Sim residual/Precision/카메라/원본 보존.
+사용자가 base/table 접촉·수평강제를 해제했다. 물리측량된 기울기라고 해석하지 않는다.
+contact-height fitting RMS3.95→1.50mm, Side RGB3.2%개선/Wrist0.14%악화, OPEN/UNVALIDATED.
+UI v8, Precision ON, Scene보정제외 OFF, 직접 재연결. 실제 grasp/동적응답/Sim2Real 미해결.
+
+
+## 최신 진행 중 — v7 grasp 대응 진단 (2026-10-14)
+
+`outputs/workflow_validation/scene2_v7_grasp_alignment/REPORT.md` 참조. 실행 개선본은 아직 없다.
+새 v7 두 Pair의 실물 grip0.431° 대비 Sim5.859/-9.913°, 동일모델 FK 높이차+6.927/+6.382mm.
+MuJoCo full-dynamic18조건과 Isaac GPU2합성 fixture를 실행했다. 초기 관통이 있어 pick 성공 아님.
+팔 q 강제 고정한 이전 probe의 낙하는 실제 Runtime 실패로 인용하지 않는다.
+그리퍼 offset6/10°는 깊이/접촉 형상과 결합되어 미채택; 새 export/Workspace/Profile 변경 없음.
+사용자가 실제 pad는 finger flat surface 크기의 약0.5mm 스티커라고 확인했다(추정 두께).
+0.5mm MuJoCo 메모리 실험6조건 후에도 깊이 불일치가 남는다. user_pad_evidence.json 참조.
+다음은 flat surface 충돌형상/부착 위치 확인, 비관통 접근/lift 및 Isaac bilateral contact 검사다.
+
+## 최신 UI — Real/Sim Scene·보정 설정 통합 (2026-10-14)
+
+Real/Sim 오른쪽 맨 위 Scene/관절 보정 영역에서 기존 Registry의 Workspace 선택/Import,
+저장 Precision 사용 및 identity-Sim 제외 옵션을 설정한다. Workflow와 Workspace 경로를 공유한다.
+Capture와 보정 체크박스는 동일 위젯이며 기존 ui_settings.json에 선택을 저장한다.
+Pair 저장 설정도 Real/Sim에 표시한다. 설정 변경/탭 전환에는 worker/device 시작이 없다.
+현재 worker의 workspace/precision_run_configuration과 다음 Connect 선택을 구분해 표시한다.
+현재 연결의 camera tiles는 다음 Scene 선택만으로 바뀌지 않는다. 직접 재연결한다.
+사용법: `docs/real2sim/BUILDER_WORKSPACE.md` 맨 위, 검사: `tests/real2sim/test_live_scene_selection.py`,
+실제 v7 UI payload/화면: `outputs/workflow_validation/real_sim_scene_controls/REPORT.md`.
+
+## 최신 — Scene2 v7 접촉 보정 실행 연결 (2026-10-14)
+
+UI 검토용은 `scene2_builder/v7`. Builder `scene2-v6-corner-contact-review-20261014-56e6a8bf`
+`corner_joint_review`를 실제 재평가·Blender·export/import했고 두 엔진8pose FK/6task smoke 완료.
+기존 offsets에 precision_mapping_sha256 binding을 추가해 정확한 Precision 뒤의 Sim residual만 허용한다.
+역사적 unbound 중첩 차단은 유지한다. active Profile/raw q/motor target/URDF는 변경하지 않았다.
+UI 재시작→v7→저장된 관절 보정 ON→URDF 원형 검사(Scene 보정 제외) OFF→직접 재연결.
+model residual을 제외하는 checkbox가 켜지면 v7 보정도 보이지 않는다.
+접촉 proxy RMS12.49→3.07mm; RGB MAE는 소폭 악화, 독립 검증/실물 grasp 미완료,OPEN/UNVALIDATED.
+보고서/코드 계약/실패/테스트: `outputs/workflow_validation/scene2_v7_contact_application/REPORT.md`.
+아래 중첩guard 때문에 export 못했다는 v6 진단은 이 후속 계약 수정 이전의 기록이다.
+Workflow Source의 기존 identity-Sim 선택은 유지하여 전 단계가 동일 잔차를 쓰는 E2E는 미검증이다.
+
+## 최신 진단 — Scene2 v6 네 꼭짓점 (2026-10-14)
+
+새 snapshot_20261014_110211_377fb860의8자세는 전부scene2_builder/v6.
+사용자가 모두 같은 고정 finger 끝 접촉이라고 확인했다.8장 전부 measured-q 분석/import.
+COPIED Builder `scene2-v6-corner-contact-review-20261014-56e6a8bf`: geometry-only REJECTED,
+corner_joint_review OPEN draft. 접촉 proxy RMS12.49→3.07mm의 추정 zero+marker 제안이다.
+현재 Builder/Runtime가 Precision 관측에 역사적 simulation offsets 중첩을 거절하여 export/import하지 않았다.
+Guard/서명/Reference를 우회하지 않았다. transient32렌더는 실제 Candidate acceptance가 아니다.
+UI용은 여전히scene2_builder/v6. Calibration/active/원본/URDF를 변경하지 않았다.
+계수 일부±2° prior 경계, contact point·pose 결합 및 독립 검증 부족이 남는다.
+보고서/제안/재현: `outputs/workflow_validation/scene2_v6_corner_refinement/REPORT.md`.
+이전 snapshot_20261014_103225_018883f6의8장은scene1_builder/v1이므로 혼동하지 않는다.
+
+## 최신 — Scene2 베이스·상판 수평 접촉 (2026-10-14)
+
+작업용 검토 Workspace는 `scene2_builder/v6`, Builder 같은 project의 `base_table_contact`다.
+v5에서 base CAD 최저점보다 상판이15.898mm 높고0.27736° 기울어진 문제를 수정했다.
+상판 normal=robot +Z, 최저 base mesh와 상면 높이 일치. 물체들은 지지면을 따라 이동했다.
+로봇/base/q/카메라/보정/물성/6개 workflow는 그대로다. v5/원본은 보존한다.
+이후 정합에서도 베이스 매립/상판 기울기로 영상 오차를 숨기지 않는다.
+Wrist RGB는 악화했고 Real fingertip 접촉·grasp/slip 해결은 미검증이다. OPEN/UNVALIDATED 유지.
+검사/비교/UI: `outputs/workflow_validation/scene2_base_table_contact/REPORT.md`.
+
+## 현재 — Scene2 Workflow 연결 (2026-10-14)
+
+사용자 지정대로 단일 블록→컵6조합을 Builder `single_block_workflow`에 추가했다.
+Project `scene2-visual-physics-refinement-20261013-bbb16a35`, 실행 Workspace `scene2_builder/v5`.
+Scene1 성공/랜덤 Reset을 재사용한다. v4 geometry_review는 보존한다.
+상세 검사와 사용법: `outputs/workflow_validation/scene2_workflow_binding/REPORT.md`.
+Source 사전검사/두 엔진 판정·Mimic 연결 완료, 실제 데모→학습 E2E와 그리퍼 slip 해결은 미완료다.
+
+## 현재 — Scene2 외형/물리 후속 (2026-10-13)
+
+최신 검토 후보는 sibling Builder `scene2-visual-physics-refinement-20261013-bbb16a35`의
+`mounted_clip_detail_review`, 실행 Workspace는 `scene2_builder/v4`다. 기존 v2/v3는 보존한다.
+Scene1 camera mesh의 장착/클립을 수정하고 roller pose와 cup ink pose를 보정했다.
+배경색/조명/광학 카메라/q/보정/실측 물체 치수는 유지했다.
+명시적 canonical mass가 있는 geometry_review는 기존 physics로 dynamic block와 열린 고정 cup을 만든다.
+픽앤플레이스 task/success를 자동 생성하지 않는다. Source/Datagen은 별도 workflow metadata가 필요하다.
+상세 증거·불확실성·UI 절차: `outputs/workflow_validation/scene2_visual_physics_refinement/REPORT.md`.
+아래 이전 Scene1 기록은 역사적 맥락이다. 엔진 smoke와 실물 grasp 성공을 혼동하지 않는다.
+
 ## 최신 — 2026-10-13 / Teleop 모터 범위 초과 처리
 
 사용자 요청으로 Runtime.command_target의 기존 clip에 Follower 모터 명령 가능 범위를 포함했다.
@@ -231,7 +346,7 @@ Metadata camera ID 기반 UI/view·관측·변환·정책 입력, object collisi
 Source/Replay/Annotation/Datagen/Convert/Train/Eval 경로가 있다.
 범용성은 SO101 + 기존 pick/place recipe 범위다. 임의 로봇/임의 task 알고리즘 자동 생성은 없다.
 MuJoCo Datagen bounded IK는 Isaac MimicGen과 동일 알고리즘이 아니다.
-MiniVLA 구현은 `source/soarm101_lab/soarm101_lab/learning/minivla/`: deterministic/flow 두 head.
+MiniVLA 구현은 `source/soarm101_lab/soarm101_lab/learning/minivla/`: 단일 Flow-DiT head(위 최신 문서 참조).
 Qwen 이미지 진단은 action policy와 다르다. 전체 새 Scene의 성공 grasp→annotation→datagen→훈련→rollout은 미검증.
 Camera mount world/gripper 지원; Snapshot producer는 Side/Wrist 계약이다.
 새 camera 입력을 기존 checkpoint에 자동 치환하지 않는다.

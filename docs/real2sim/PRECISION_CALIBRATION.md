@@ -1,5 +1,23 @@
 # Joint Precision Calibration
 
+실행 옵션 `저장된 관절 보정 사용`, `URDF 원형 검사 · Scene 관절 보정 제외`는
+Capture와 Real/Sim 오른쪽 맨 위 공통 영역에 있다. 보정 파일을 다시 만들지 않고
+Real/Sim에서 Scene과 함께 선택할 수 있다. 다음 Connect에 적용하며 선택은 재시작 후 복원된다.
+자세한 실행 순서는 [BUILDER_WORKSPACE.md](BUILDER_WORKSPACE.md)의 첫 절을 참고한다.
+
+## Scene의 접촉 잔차 보정과 Precision (2026-10-14)
+
+Scene2 v7은 active Precision 계수를 바꾸지 않고, 그 변환 이후의 Sim 모델 FK 잔차만 보정한다.
+`simulation_joint_offsets_rad.precision_mapping_sha256`은 fitting 입력의 signed mapper hash다.
+Builder는 model/실제 capture의 mapping hash를 검사하고 Runtime은 실제 bound Follower mapper를 검사한다.
+이 명시적 binding 없는 과거 Scene offsets와 Precision 중첩은 계속 거절한다.
+이 보정은 model geometry에 한 번 적용하며 native↔URDF/hardware inverse에 합치지 않는다.
+다른 Calibration/Profile로 바뀌면 기존 잔차를 자동으로 재사용하지 않는다.
+기존 checkbox **URDF 원형 검사 · Scene 관절 보정 제외**를 켜면 이 잔차도 제외한다.
+Scene 보정 검토는 이 checkbox를 해제하고 기존 저장 관절 보정은 켠다.
+검토용 보정은 실제 motor calibration/관절각 검증 성공이 아니다.
+세부 증거: `outputs/workflow_validation/scene2_v7_contact_application/REPORT.md`.
+
 ## URDF Limit 변경 시 기존 보정 자동 호환 (2026-10-12)
 
 현재 모델과 저장 보정의 모델이 lower/upper만 다르면 기존 활성 Profile을 그대로 쓴다.

@@ -720,3 +720,56 @@ def test_limit_only_connect_reuses_original_profile_without_saving(tmp_path, mon
     bus.calibration['shoulder_pan'].homing_offset+=1
     with pytest.raises(ValueError,match='normalization/register'):attach_precision(adapter,role,saved,new_hash)
     assert before=={str(x):x.read_bytes() for x in tmp_path.rglob('*.json')}
+
+
+@pytest.mark.parametrize('backend', ['mujoco', 'isaac'])
+@pytest.mark.parametrize('mode', ['bound', 'mismatch', 'identity'])
+def test_runtime_precision_bound_sim_residual_preserves_motor_mapping(tmp_path, monkeypatch, backend, mode):
+    import json
+    from unittest.mock import Mock
+    from soarm101_lab.real2sim import runtime as module
+    from soarm101_lab.real2sim import hardware
+    from soarm101_lab.real2sim.storage import atomic
+    saved = {role: profile(role) for role in ('leader','follower')}
+    mapped = PrecisionMapper(saved['follower'])
+    node = {'value':[.01,0,0,0,0,0], 'provenance':'estimated', 'evidence':['post-Precision contact fit'],
+            'precision_mapping_sha256': mapped.metadata()['sha256'] if mode!='mismatch' else 'a'*64}
+    data=json.loads((ROOT/'tests/real2sim/fixtures/partial_profile.json').read_text())
+    data['simulation_joint_offsets_rad']=node;atomic(tmp_path/'scene.json',data)
+    adapters=[]
+    def adapter(*args, **kwargs):
+        native=dict.fromkeys(JOINTS,0.);native['shoulder_pan']=native_from_raw(1500,saved['follower']['joints']['shoulder_pan']['motor'])
+        a=SimpleNamespace(connect=Mock(),disconnect=Mock(),activate=Mock(),send=Mock(),read=lambda:(native,{}),
+            metadata={'calibration':{'sha256':'fake'}},last_raw=None,motor_specs=None)
+        adapters.append(a);return a
+    monkeypatch.setattr(module,'Leader',adapter);monkeypatch.setattr(module,'Follower',adapter)
+    monkeypatch.setattr(ProfileStore,'active',lambda store,role:copy.deepcopy(saved[role]))
+    def attach(a,role,p,model_hash):
+        a.precision_mapper=PrecisionMapper(p)
+        a.metadata['precision_mapping']=a.precision_mapper.metadata()
+    monkeypatch.setattr(hardware,'attach_precision',attach)
+    def build(r,p):
+        r.env=SimpleNamespace(close=Mock());r.profile=p;r.robot_hash='fake'
+    monkeypatch.setattr(module.Runtime,'build_environment',build)
+    monkeypatch.setattr(module.Runtime,'open_cameras',lambda *a:None)
+    r=module.Runtime(SimpleNamespace(workspace=tmp_path,backend=backend),None)
+    before=copy.deepcopy(saved)
+    try:
+        request={'profile':str(tmp_path/'scene.json'), 'hardware':{'follower_id':'fake',
+            'leader_port':'/tmp/fake-leader','follower_port':'/tmp/fake-follower',
+            'leader_calibration':'fake','side_camera':'/tmp/fake-side','wrist_camera':'/tmp/fake-wrist'},
+            'precision_options':{'use_precision':True,'identity_sim_for_validation':mode=='identity'}}
+        if mode=='mismatch':
+            with pytest.raises(ValueError,match='Precision mapping used for its fit'):r.connect(request)
+        else:
+            r.connect(request);assert r.state=='CONNECTED'
+            if mode=='bound':
+                assert r.profile['simulation_joint_offsets_rad']==node
+                assert 'simulation only' in r.message
+            else:assert 'simulation_joint_offsets_rad' not in r.profile
+            assert r.mapper().metadata()==mapped.metadata()
+        for a in adapters:a.activate.assert_not_called();a.send.assert_not_called()
+        assert saved==before
+        assert json.loads((tmp_path/'scene.json').read_text())['simulation_joint_offsets_rad']==node
+    finally:
+        r.disconnect_hardware();r.writer.shutdown();r.bus.close()

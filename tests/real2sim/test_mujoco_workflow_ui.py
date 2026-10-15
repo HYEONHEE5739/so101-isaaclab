@@ -91,19 +91,16 @@ def test_model_specific_options_are_isolated_and_preserved(panel):
     assert 'source_groups' not in panel.options.editors
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
     assert set(panel.options.editors) == {'model_config', 'source_groups', 'steps', 'output'}
-    assert not panel.minivla_head.isHidden()
+    assert not hasattr(panel, "minivla_head")
     assert 'batch_size' not in panel.stage_options()
     opts = panel.stage_options()
     from pathlib import Path
-    assert json.loads(Path(opts['model_config']).read_text())['head_type'] == 'flow'
-    panel.minivla_head.setCurrentIndex(panel.minivla_head.findData('deterministic'))
-    opts = panel.stage_options()
-    assert json.loads(Path(opts['model_config']).read_text())['head_type'] == 'deterministic'
+    assert json.loads(Path(opts['model_config']).read_text())['layers'] == 4
     panel.options.editors['steps'][1].setValue(12345)
     panel.architecture.setCurrentIndex(panel.architecture.findData('smolvla'))
     assert panel.stage_options()['batch_size'] == 3
     assert 'model_config' not in panel.stage_options()
-    assert panel.minivla_head.isHidden()
+    assert not hasattr(panel, "minivla_head")
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
     assert panel.stage_options()['steps'] == 12345
     panel.stage.setCurrentIndex(panel.stage.findData('source'))
@@ -115,10 +112,10 @@ def test_minivla_custom_json_overrides_head_preset_and_drops_foreign_options(pan
     from soarm101_lab.learning.minivla.config import MODEL_ROOT
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
-    config = str(MODEL_ROOT / 'configs/qlora_deterministic.json')
+    config = str(MODEL_ROOT / 'configs/default.json')
     panel.options.setPlainText(json.dumps({'model_config': config, 'batch_size': 999, 'base_model': 'unused'}))
     opts = panel.stage_options()
-    assert opts['model_config'] == config and panel.minivla_head.isHidden()
+    assert opts['model_config'] == config and not hasattr(panel, "minivla_head")
     assert 'batch_size' not in opts and 'base_model' not in opts
 
 

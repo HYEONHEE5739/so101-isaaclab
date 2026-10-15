@@ -245,12 +245,12 @@ def test_training_worker_uses_integrated_module_and_clean_source_path(tmp_path, 
         assert kwargs['cwd'] == ROOT
         assert kwargs['env']['PYTHONPATH'] == str(ROOT / 'source/soarm101_lab')
         config = Path(argv[argv.index('--config') + 1])
-        assert json.loads(config.read_text())['head_type'] == 'flow'
+        assert json.loads(config.read_text())['layers'] == 4
         raise RuntimeError('validated launch before GPU training')
     monkeypatch.setattr(worker.subprocess, 'run', launch)
     with pytest.raises(RuntimeError, match='validated launch'):
         worker.train({'input': str(prepared), 'options': {},
-                      'config': str(worker.MODEL_ROOT / 'configs/frozen_flow.json')}, output)
+                      'config': str(worker.MODEL_ROOT / 'configs/default.json')}, output)
 
 
 def test_leader_import_no_isaac_dependencies():

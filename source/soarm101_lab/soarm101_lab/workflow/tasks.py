@@ -10,6 +10,7 @@ TASK_ENV = 'SO101_TASK_SELECTION'
 
 def catalog(workspace):
     task = workspace['task']
+    if task.get('mode') == 'geometry_review': return []
     reset_hash = hashlib.sha256(json.dumps(task['reset'], sort_keys=True).encode()).hexdigest()
     if task.get('tasks'):
         return [dict(schema='so101.task-definition/1', task_id=t['id'], pick_object_id=t['pick'],
@@ -39,6 +40,8 @@ def validate(definition, workspace):
 
 
 def selected(workspace):
+    if workspace['task'].get('mode') == 'geometry_review':
+        raise ValueError('Geometry review has no workflow task; import explicit workflow metadata first')
     path = os.environ.get(TASK_ENV)
     if path:
         definitions = json.loads(Path(path).read_text())['tasks']
@@ -51,6 +54,8 @@ def selected(workspace):
 
 
 def configured(workspace, definition=None):
+    if workspace['task'].get('mode') == 'geometry_review' and definition is None:
+        return copy.deepcopy(workspace)
     definition = validate(definition, workspace) if definition is not None else selected(workspace)
     w = copy.deepcopy(workspace)
     w['task'].update(pick=definition['pick_object_id'], place=definition['target_object_id'],

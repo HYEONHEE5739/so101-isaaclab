@@ -273,8 +273,6 @@ def train(request, output):
     stats_path = dataset / 'statistics.json'
     stats = json.loads(stats_path.read_text())
     manifest = json.loads((dataset / 'manifest.json').read_text())
-    if Path(request['config']).resolve().parent == (MODEL_ROOT/'configs').resolve() and not request['options'].get('resume_checkpoint'):
-        cfg.cameras = tuple(manifest.get('cameras',['side']))
     for entry in manifest['episodes']:
         outcome = json.loads((dataset / entry['path'] / 'outcome.json').read_text())
         if outcome.get('validation_only'):
@@ -381,7 +379,7 @@ def train_from_lerobot(artifact, options, output):
     prepare_dataset(source, prepared, include_failed=True)
     workspace = options['workspace']
     request = {'input': str(prepared), 'workspace': workspace,
-        'config': options.get('model_config', str(MODEL_ROOT / 'configs/frozen_flow.json')), 'options': options}
+        'config': options.get('model_config', str(MODEL_ROOT / 'configs/default.json')), 'options': options}
     result = train(request, output)
     model = output / 'policy'
     atomic(model / 'project_provenance.json', {**_provenance(model), 'lerobot_source_dataset': str(root.resolve())})
@@ -402,7 +400,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
         raise ValueError('Positive rollout episodes/max_steps required')
     with _environment(request, output, provenance['coordinates'], policy.control_hz) as env:
         cameras = tuple(env.backend.workspace['task'].get('observation_cameras', ['side']))
-        if tuple(policy.cfg.cameras) != cameras:
+        if not set(policy.cfg.cameras).issubset(cameras):
             raise ValueError('Checkpoint camera contract differs from workspace: '+str(policy.cfg.cameras)+' vs '+str(cameras))
         publish = _preview(env, request, publish)
         guard = ActionGuard(env.lower, env.upper, options.get('max_velocity', [2.] * 5 + [1.]), env.hz)
@@ -417,7 +415,8 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                 observed = env.observe()
                 if not remaining:
                     time_before = env.backend.data.time
-                    chunk, metrics = policy.predict(observed['images'], observed['state'], options['instruction'])
+                    model_images = [observed['camera_images'][n] for n in policy.cfg.cameras] if 'camera_images' in observed else observed['images']
+                    chunk, metrics = policy.predict(model_images, observed['state'], options['instruction'])
                     chunk = np.asarray(chunk)
                     if chunk.shape != (policy.cfg.horizon, 6) or not np.isfinite(chunk).all():
                         raise ValueError('Policy must output finite [H,6] chunk')

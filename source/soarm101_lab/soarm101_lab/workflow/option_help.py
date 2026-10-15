@@ -15,7 +15,7 @@ FIELDS = {
     'repo_id': ('문자열', '', '필수. 예: my-account/so101-demo. 변환에서는 로컬 dataset 식별자이며 업로드는 별도 단계입니다.'),
     'architecture': ('문자열', 'smolvla', '학습 모델: smolvla, act 또는 minivla. 엔진 선택과 독립적으로 고릅니다.'),
     'renderer': ('문자열', 'egl', 'MuJoCo RGB 렌더 경로: egl(GPU), software-egl(Mesa CPU), osmesa. Isaac은 기존 렌더러를 사용합니다.'),
-    'model_config': ('문자열', None, 'MiniVLA 모델 JSON 경로. 생략하면 UI의 MiniVLA head 선택에 따라 frozen_flow.json 또는 frozen_deterministic.json을 사용합니다. 직접 지정한 JSON과 재개 checkpoint 설정이 head 선택보다 우선합니다.'),
+    'model_config': ('문자열', None, 'MiniVLA Flow-DiT 학습 JSON 경로. 생략하면 configs/default.json을 사용합니다. Resume은 저장된 설정을 사용합니다.'),
     'include_failed': ('true/false', False, 'MuJoCo 변환에서 실패로 기록된 데모도 명시적으로 포함합니다. 기본값은 성공 데모만 포함합니다.'),
     'max_attempts': ('정수', None, 'MuJoCo Datagen 최대 시도 수. 미달이면 실패 보고서를 저장하며 성공 수를 부풀리지 않습니다.'),
     'source_groups': ('객체', None, 'MiniVLA용 generated LeRobot 데이터의 원본 group 매핑. 예: {"0":"source_a","1":"source_a","2":"source_b"}. 자동 기록된 매핑이 있으면 생략합니다.'),

@@ -65,6 +65,9 @@ def test_checkpoint_roundtrip(tmp_path):
     save_checkpoint(path,c,h,FrozenStub(),{},opt,1,.5,0,30)
     ck=torch.load(path,weights_only=True)
     restored=ActionHead(MiniVLAConfig(**ck['config'])); restored.load_state_dict(ck['head'])
+    from soarm101_lab.learning.minivla.train import require_architecture
+    require_architecture(ck)
+    with pytest.raises(ValueError,match='Legacy'):require_architecture({'config':ck['config']})
     assert ck['step']==1 and ck['adapter'] is None
     for p,q in zip(h.parameters(),restored.parameters()): torch.testing.assert_close(p,q)
 
@@ -84,3 +87,12 @@ def test_explicit_hdf5_import(tmp_path):
     convert(tmp_path/'recipe.json',tmp_path/'converted')
     q=np.load(tmp_path/'converted/e0/state.npy')
     assert q[0,0]==pytest.approx(np.pi/6) and q[0,-1]==.5
+
+
+def test_paired_target_identity_and_noise_contract():
+    from soarm101_lab.learning.minivla.evaluate import paired_action_differences
+    row=dict(pair_id='same',seed=7,initial_observation_sha256='pixels+state',target_body='red',initial_chunk=[[0]*6]*40)
+    blue={**row,'target_body':'blue','initial_chunk':[[1]*6]*40}
+    assert paired_action_differences([row,blue])[0]['initial_action_difference_rms']==1
+    with pytest.raises(ValueError,match='observation'):paired_action_differences([row,{**blue,'seed':8}])
+    with pytest.raises(ValueError,match='identities'):paired_action_differences([row,row])

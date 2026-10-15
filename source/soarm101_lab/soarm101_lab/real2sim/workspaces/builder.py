@@ -75,8 +75,9 @@ def inspect_export(source):
     robot = scene.get('robot_model', {})
     from ...so101_robot_spec import simulation_joint_offsets
     simulation_joint_offsets(robot.get('simulation_joint_offsets_rad'), DEFAULT_MAPPER.metadata()['joint_order'])
-    if robot.get('joint_names') != DEFAULT_MAPPER.metadata()['joint_order'] or robot.get('mapping') != DEFAULT_MAPPER.metadata():
+    if robot.get('joint_names') != DEFAULT_MAPPER.metadata()['joint_order']:
         raise ValueError('Builder robot joint order/mapping differs from the SO-101 controller')
+    package.validate_mapping(robot.get('mapping'), package.ROOT / ROBOT_ASSET['urdf'])
     # Portable exports rename mesh files, but must preserve the controller's kinematic tree.
     def joint_contract(path):
         result = {}
@@ -89,11 +90,14 @@ def inspect_export(source):
     return root, manifest, scene
 
 
-def profile_and_task(scene):
+def profile_and_task(scene, explicit_task=False):
     objects = {o['id']: o for o in scene['objects']}
     reserved = {'robot','ee_frame','dome_light','workspace_static','workspace_camera_mount','wrist_mount','camera_overview'} | {'camera_'+c['id']+'view' for c in scene['cameras']}
     if set(objects) & reserved: raise ValueError('Builder object ID conflicts with runtime entity')
     integration = copy.deepcopy(scene.get('workflow', {}))
+    review = not integration and not explicit_task
+    physical_review = review and any(o['role'] == 'manipulable_object' and
+        (o.get('physics', {}).get('mass_kg', {}).get('value') or 0) > 0 for o in scene['objects'])
     if integration and integration.get('schema') != 'so101.scene-workflow/1':
         raise ValueError('Unsupported scene workflow metadata')
     allowed = {'schema','support_surface','tasks','reset','physics','object_physics','success','observation_cameras','real_camera_bindings','roles','provenance'}
@@ -113,7 +117,9 @@ def profile_and_task(scene):
         raise ValueError('Target visual alias conflicts with canonical object ID')
     support = supports[0]
     world = np.eye(4); world[:3, :3] = world_pose(scene, support)[:3, :3]
-    if not np.allclose(world[:3, 2], [0, 0, 1]): raise ValueError('Task support must be horizontal')
+    # Reset samples in this support frame; both engines transform positions and
+    # orientations into world coordinates. Keep measured plane inclination.
+    if not review and world[2, 2] <= 0: raise ValueError('Task support must face upward')
     inv = np.linalg.inv(world)
     provenance = lambda *keys: {k: 'provisional' for k in keys}
     def primitive(obj):
@@ -133,13 +139,14 @@ def profile_and_task(scene):
     for obj in scene['objects']:
         if obj['role'] == 'reference_robot' or obj['id'] == table_id or mounted(scene, obj) or obj.get('parent_object'): continue
         name = obj['id']; spec = primitive(obj)
-        if obj['role'] == 'manipulable_object':
+        if obj['role'] == 'manipulable_object' and (not review or physical_review and
+                (obj.get('physics', {}).get('mass_kg', {}).get('value') or 0) > 0):
             if obj['collision']['type'] == 'none':
                 raise ValueError('Dynamic object requires explicit collision geometry: ' + name)
             spec['geometry_source'] = 'builder_export'
             spec['bounds_source'] = 'canonical dimensions; conservative local bounding box'
             dynamics.append(name)
-        if obj['role'] == 'receptacle':
+        if obj['role'] == 'receptacle' and (not review or physical_review):
             targets[name] = name + '_visual'
             if obj['collision']['type'] == 'container' and obj['collision'].get('round'):
                 spec.update(shape='cup_proxy', bottom_diameter_m=obj['collision'].get('bottom_diameter_m', obj['dimensions']['value'][0]),
@@ -163,6 +170,25 @@ def profile_and_task(scene):
         p['simulation_joint_offsets_rad'] = copy.deepcopy(scene['robot_model']['simulation_joint_offsets_rad'])
     p['wrist_mount'] = {'parent': 'gripper', 'source': 'provisional', 'parts': {}}
     validate(p)
+    if review:
+        task = package.review_contract(p, support['id'], dynamic=dynamics, targets=targets)
+        if physical_review:
+            task['physics'].update(mass_kg=next(o['physics']['mass_kg']['value'] for o in scene['objects'] if o['id'] in dynamics),
+                note='Explicit canonical object physics; review has no task success or random reset')
+            task['object_physics'] = {}
+            for obj in scene['objects']:
+                if obj['id'] not in [*dynamics, *targets]: continue
+                row = {'provenance': 'provisional', 'field_provenance': {}}
+                for field, keys in [('mass_kg', ('mass_kg',)), ('friction', ('static_friction', 'dynamic_friction')),
+                                    ('restitution', ('restitution',))]:
+                    evidence = obj.get('physics', {}).get(field, {})
+                    if evidence.get('value') is not None:
+                        for key in keys:
+                            row[key] = evidence['value']
+                            row['field_provenance'][key] = copy.deepcopy(evidence)
+                task['object_physics'][obj['id']] = row
+
+        return p, package.validate_task(task, p)
     task = package.default_task(p)
     if not dynamics or not targets: raise ValueError('Builder scene needs manipulands and receptacles for the current workflow')
     task.update(dynamic=dynamics, targets=targets, pick='cube_red' if 'cube_red' in dynamics else dynamics[0], place=next(iter(targets)),
@@ -258,12 +284,13 @@ def build_usd_assets(root, scene, profile, task):
     for obj in scene['objects']:
         name = obj['id']
         if name == profile['table'].get('source_id','table'): name = 'table'
-        if obj['role'] == 'reference_robot' or name in task['dynamic'] or name in task['targets'] or obj.get('parent_object'): continue
+        if (obj['role'] == 'reference_robot' or name in task['dynamic'] or name in task['targets']
+                or obj.get('parent_object') in [*task['dynamic'], *task['targets']]): continue
         if mounted(scene, obj):
             mount.append((name, name, np.linalg.inv(frame(scene, 'robot_link_gripper')) @ world_pose(scene, obj), False))
         else:
             # Table supplies collision; marker/printed edges/background are visual-only like existing workspaces.
-            static.append((obj['id'], name, inv @ world_pose(scene, obj), physics[name]['collision']))
+            static.append((obj['id'], name, inv @ world_pose(scene, obj), physics.get(name, {}).get('collision', False)))
     document(root/'scene/static.usda', static)
     document(root/'scene/wrist_mount.usda', mount)
     for link in sorted({o['link'] for o in scene['objects'] if o['role'] == 'reference_robot'}):
@@ -352,7 +379,7 @@ def import_scene(source, workspace_id=None, version=1, task=None, registry=packa
     workspace_id = workspace_id or ('builder_' + package.sha(root/'scene_manifest.yaml')[:12])
     if not re.fullmatch(r'[A-Za-z0-9_]+', workspace_id) or type(version) is not int or version < 1: raise ValueError('Invalid workspace identity')
     explicit_task = task is not None
-    profile, default = profile_and_task(scene)
+    profile, default = profile_and_task(scene, explicit_task=explicit_task)
     task = package.validate_task(copy.deepcopy(task or default), profile)
     dest = Path(registry)/workspace_id/f'v{version}'
     digest = package.sha(root/'scene_manifest.yaml')
@@ -392,10 +419,10 @@ def import_scene(source, workspace_id=None, version=1, task=None, registry=packa
         data = {'schema': package.SCHEMA, 'status': 'READY', 'workspace_id': workspace_id, 'version': version,
                 'source_revision': 'builder:'+digest, 'source_profile_sha256': files['profile.json'],
                 'robot_asset': robot_asset, 'identity_robot_asset': identity_asset, 'robot_asset_sha256': hashlib.sha256(package.canonical(robots)).hexdigest(),
-                'mapper': DEFAULT_MAPPER.metadata(), 'task_sha256': files['task.json'], 'files': files,
+                'mapper': copy.deepcopy(scene['robot_model']['mapping']), 'task_sha256': files['task.json'], 'files': files,
                 'content_sha256': hashlib.sha256(package.canonical(files)).hexdigest(),
                 'builder': {'manifest_sha256': digest, 'status': manifest['status'], 'validation_scope': manifest.get('validation_scope'),
-                            'physics_status': 'PROVISIONAL_TASK_PHYSICS',
+                            'physics_status': ('REVIEW_PHYSICS_UNVALIDATED' if task.get('mode') == 'geometry_review' and task['dynamic'] else 'PROVISIONAL_TASK_PHYSICS'),
                             'robot_visual_links': sorted({o['link'] for o in scene['objects'] if o['role'] == 'reference_robot'}),
                             'scene': 'builder/scene.yaml',
                             'mjcf': 'builder/scene.xml', 'usd': 'builder/scene.usd'}}

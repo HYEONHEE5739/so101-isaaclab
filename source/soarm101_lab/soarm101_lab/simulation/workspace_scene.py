@@ -28,7 +28,7 @@ def extend_scene(scene, robot, workspace, urdf, width, height, physics_profile='
     physics = compile_physics(p, task)['objects']
     dynamic = list(task['dynamic'])
     targets = list(task['targets'])
-    included = ['table', task['pick'], task['place']]
+    included = [n for n in ('table', task['pick'], task['place']) if n]
 
     def primitive(parent, name, obj, collision=False):
         body = ET.SubElement(parent, 'body', name=name, **pose_attrs(obj['T_workspace']))

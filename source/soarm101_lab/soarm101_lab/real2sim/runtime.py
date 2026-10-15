@@ -99,6 +99,7 @@ class Runtime:
             snapshot_results=getattr(self,"snapshot_results",[]),
             profile_hash=digest(self.profile) if self.profile else None,
             scene_cameras=list(self.profile['cameras']) if self.profile else [],
+            workspace=getattr(self, 'live_workspace', None),
             precision=self.precision.status() if getattr(self, 'precision', None) else None,
             precision_run_configuration=getattr(self, 'precision_options', {}),
             precision_teleop_ready=self.precision_teleop_ready(),
@@ -150,14 +151,20 @@ class Runtime:
         self.disconnect_hardware()
         p = load(payload["profile"])
         self.precision_options = copy.deepcopy(payload.get('precision_options', {}))
+        precision_residual_reference = None
         if self.precision_options.get('use_precision'):
             from ..so101_robot_spec import simulation_joint_offsets
             offsets = simulation_joint_offsets(p.get('simulation_joint_offsets_rad'), JOINTS)
             if self.backend!='real' and np.any(abs(offsets) > 1e-12):
-                if not self.precision_options.get('identity_sim_for_validation'):
+                if self.precision_options.get('identity_sim_for_validation'):
+                    p = copy.deepcopy(p)
+                    p.pop('simulation_joint_offsets_rad', None)
+                elif p['simulation_joint_offsets_rad'].get('precision_mapping_sha256'):
+                    # Residual model geometry fitted *after* Precision, never a
+                    # second motor conversion. Check the active mapper below.
+                    precision_residual_reference = p['simulation_joint_offsets_rad']
+                else:
                     raise ValueError('Precision calibration conflicts with Scene simulation_joint_offsets_rad; choose explicit identity-Sim validation configuration')
-                p = copy.deepcopy(p)
-                p.pop('simulation_joint_offsets_rad', None)
         cfg = payload["hardware"]
         self.config = cfg
         if not payload.get("preview_only") and not cfg.get("follower_id"):
@@ -229,6 +236,9 @@ class Runtime:
                 if active:
                     attach_precision(adapter, role, active, model_hash); found = True
             if not found: raise ValueError('Activate a validated precision profile first')
+            if precision_residual_reference is not None:
+                from ..so101_robot_spec import require_precision_simulation_binding
+                require_precision_simulation_binding(precision_residual_reference, self.mapper().metadata())
         # Sensor/branch preflight is read-only. Finite out-of-model observations
         # are accepted; invalid packets/ambiguous encoders still fail Connect.
         for role, adapter in [('leader',self.leader),('follower',self.follower)]:
@@ -260,6 +270,8 @@ class Runtime:
         self.error = None
         self.state = "CONNECTED"
         self.message = "Connected for observation; no goal or torque configuration sent. Press Start to follow leader targets."
+        if precision_residual_reference is not None:
+            self.message += " Scene joint correction enabled (simulation only; Precision unchanged)."
         self.last_cycle = None
 
     def open_cameras(self, cfg, p):

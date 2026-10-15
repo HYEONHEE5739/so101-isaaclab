@@ -1,5 +1,96 @@
 # Builder export를 기존 Real/Sim과 Workflow에서 사용
 
+## Real/Sim에서 바로 Scene 선택 (2026-10-14)
+
+이제 **Real / Sim 탭 → 오른쪽 맨 위 `Scene / 관절 보정 · 다음 Connect`**에서
+Scene 목록 선택 또는 `Scene 선택 / Import`를 할 수 있다. 기존 Workflow Registry와
+Workspace 선택을 공유하며, Source Demo의 Workspace 선택도 Real/Sim에 동기화된다.
+Workflow 탭으로 이동할 필요 없이 저장 관절 보정과 Scene 보정 제외 옵션도 같은 영역에서 바꾼다.
+두 옵션은 Capture와 동일한 위젯/값이고 재시작 후에도 선택을 복원한다.
+Pair의 저장 위치·Scene 이름·Scene state는 같은 탭 오른쪽 `Snapshot 저장 설정`에 있다.
+
+Scene2 v7 접촉 보정 검토: `scene2_builder/v7` 선택 → `선택한 Scene 사용` ON →
+`저장된 관절 보정 사용` ON → `URDF 원형 검사 · Scene 관절 보정 제외` OFF → backend 선택 → Connect.
+이미 연결되어 있으면 직접 Disconnect → Connect한다. Scene 선택/탭 전환/옵션 변경은
+장치 연결이나 로봇 이동을 실행하지 않는다. 화면 아래 `연결된 Scene/설정`은 현재 worker 값이며
+다음 연결 선택값과 구분한다. Workflow 실행 중에는 Scene 설정 변경을 막는다.
+
+검사/화면: `outputs/workflow_validation/real_sim_scene_controls/REPORT.md`.
+아래 이전 기록의 Workflow 탭 선택 절차는 계속 사용할 수 있지만 필수는 아니다.
+
+## 최신 Scene2 v7 접촉 보정 검토
+
+현재 UI용 **scene2_builder/v7**은 marker XY/yaw와 캡처 기반 Sim joint residual을 포함한다.
+보정 파일은 그대로이며 model residual은 정확한 Precision mapping hash에 binding된다.
+UI를 재시작하고 v7 선택/저장 관절 보정 사용 ON/**URDF 원형 검사·Scene 관절 보정 제외 OFF**로
+사용자 직접 Connect한다. 원형 옵션이 켜져 있으면 residual을 제외한다.
+MuJoCo/Isaac 실제8pose FK/6task smoke 및 Fake 저장 Profile Connect를 확인했다.
+실물 접촉/independent calibration은 UNVALIDATED다.
+`outputs/workflow_validation/scene2_v7_contact_application/REPORT.md` 참조. 아래v6는 이전 버전이다.
+
+## 최신 Scene2 검토 Workspace — 2026-10-14
+
+**scene2_builder/v6**는 v5의6개 단일 블록→컵 task를 유지하면서 상판과 robot base의
+수평·접촉 조건을 수정한 새 package다. UI에서는 v6를 선택한다. 이미 연결했으면 직접 재연결한다.
+베이스 매립15.898mm→0, 상판 기울기0.27736°→0. 카메라/보정/원본 v5는 유지한다.
+영상 정합은 UNVALIDATED이며 Wrist 잔차와 실제 grasp/slip 문제가 남는다.
+근거: `outputs/workflow_validation/scene2_base_table_contact/REPORT.md`.
+아래 v5/v4 절차는 각 버전 당시의 기록이다.
+
+## Scene2 작업용 Workspace — 2026-10-14
+
+현재 작업용은 `scene2_builder/v5`: 빨강/초록/파랑 블록 × cup_a/b의6개 단일 pick/place task.
+Builder `single_block_workflow` export의 명시적 Metadata를 사용한다. 성공은 Scene1과 같은
+컵 내부 포함+속도0.03m/s 미만, Reset은 four_anchors와 XY±20mm다.
+UI에서 v5와 task 하나를 선택하고 Source→Annotation→Datagen으로 진행한다.
+파생 데이터는 Source task를 유지한다. 아래 v4는 역사적 geometry/physics 검토용이다.
+검사 범위·미검증 E2E: `outputs/workflow_validation/scene2_workflow_binding/REPORT.md`.
+
+## 현재 사용법 — 2026-10-13
+
+Scene2 검토 Workspace: `outputs/real2sim/environments/scene2_builder/v4`.
+Builder `scene2-visual-physics-refinement-20261013-bbb16a35`의 `mounted_clip_detail_review` export를 사용한다.
+재구성은 OPEN/UNVALIDATED이며 실행 검토 준비와 별개다.
+실제 검사/잔여 한계는 `outputs/workflow_validation/scene2_visual_physics_refinement/REPORT.md`.
+
+```bash
+python scripts/real2sim/workflow.py import-builder /absolute/path/to/export --workspace-id scene2_builder --version 1
+.venv-real2sim-ui/bin/python scripts/real2sim/real2sim_ui.py
+```
+
+Import CLI는 package checksum 검사→새 immutable Workspace→Workflow Registry 등록을 수행한다.
+같은 package/task는 재사용하고 다른 결과는 새 version이다. 기존 UI 선택은 변경하지 않는다.
+UI Workspace Pipeline에서 `scene2_builder/v4` 선택 → Real/Sim의 Pipeline Workspace 사용
+→ MuJoCo 또는 Isaac → **Sim 미리보기**. 실제 장치는 사용자가 직접 Connect/Start Teleop한다.
+실행 Worker Python은 기존 lerobot-arena를 사용한다. GUI 전용 Python에 simulator를 설치하지 않는다.
+
+### Geometry review와 Task Workspace
+
+명시적인 `scene.workflow` 또는 `--task`가 없으면 `task.json.mode=geometry_review`다.
+pick/place/success는 null이다. 명시적 양의 canonical mass가 없는 기존 review는 dynamic/targets가 비어 있다.
+명시적 질량을 가진 manipulable이 있으면 기존 엔진의 dynamic object와 열린 cup collision을 사용한다.
+Scene2 v4는 Scene1 템플릿의 20g 블록 3개와 고정 컵 2개를 사용한다. 물성 provenance는 task.object_physics에 보존한다.
+이 경우도 task를 자동 생성하지 않는다. reset은 저장 initial pose로 되돌리며 물성은 실측 검증 완료가 아니다.
+기울어진 표시 영역도 world transform을 그대로 보존한다. reset은 robot 초기 자세와 고정 배치만 제공한다.
+가짜 task나 randomization을 만들지 않는다. Source/Annotation/Datagen/Task Eval에는 명시적인 workflow가 필요하다.
+기존 task Workspace 파일과 task/reset/success 경로는 유지한다.
+
+### Precision 계약
+
+Adapter는 기존 legacy metadata와 `so101.precision-joint-mapping/1`을 구분한다.
+서명, joint order/rad output, Profile coefficient/reference 일관성, reference motor/device/calibration identity,
+원본 URDF의 limit-only 호환성을 검증한다. Portable URDF의 joint tree/origin/axis도 현재 모델과 비교한다.
+manifest mapper는 실제 입력을 보존하며 DEFAULT로 위장하지 않는다. Sim은 URDF radians를 직접 받는다.
+실물은 hardware.attach_precision에서 현재 활성 Profile/device identity를 검사하고 경계에서만 변환한다.
+Import는 저장 Profile/active/LeRobot JSON/register를 변경하지 않는다.
+
+Builder 작업 기준: sibling `real2sim-builder/docs/SCENE_REFINEMENT.md`.
+패키지/도구 상세는 Builder `docs/CONSUMING_SCENES.md`, `docs/AGENTIC_TOOLKIT.md`를 참조한다.
+
+## 이전 Scene1 실행 및 구현 기록
+
+아래 “최신”, “지금 선택할 장면”은 기록 당시 기준이며 현재 Scene2 절차는 위를 따른다.
+
 2026-10-11 최신 실행용 후보는 **`outputs/real2sim/environments/scene1_builder/v5`**.
 v2 컵 배치 기반 Sim 영점/base/Wrist/블록 추정 보정이며 UNVALIDATED 검토용이다.
 실제 두 엔진 렌더/FK smoke와 제한은 `outputs/workflow_validation/builder_v2_scene_refinement/REPORT.md`.

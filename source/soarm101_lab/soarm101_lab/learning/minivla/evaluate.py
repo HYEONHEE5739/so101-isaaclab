@@ -29,7 +29,7 @@ def summarize_episode(trace, *, hz, approach_radius=.04, progress_threshold=.02)
     calls=[r for r in trace if r.get('replan')]
     return {'success':success,'grounding_success':grounding,'target_selection_correct':selected,
         'wrong_object_approach':None if selected is None else not selected,
-        'approach':approach,'grasp':grasp,'transport':transport,'failure':failure,
+        'approach':approach,'grasp':grasp,'transport':transport,'place_success':success,'full_task_success':bool(grasp and transport and success),'failure':failure,
         'target_distance_reduction_m':reduction,'target_preference':preferred,
         'final_approach_distance_m':float(td[-1]), 'final_approach_eef':trace[stop]['eef'],
         'completion_sim_seconds':len(trace)/hz,'replans':len(calls),
@@ -46,13 +46,31 @@ def aggregate(records):
     result={}
     for split, rows in grouped.items():
         summary={'episodes':len(rows)}
-        for key in ('success','grounding_success','grasp','transport','target_selection_correct','wrong_object_approach'):
+        for key in ('success','grounding_success','grasp','transport','target_selection_correct','wrong_object_approach','place_success','full_task_success'):
             vals=[float(r[key]) for r in rows if r.get(key) is not None]
             summary[key+'_rate']=float(np.mean(vals)) if vals else None
             summary[key+'_count']=len(vals)
         summary['failure_counts']={k:sum(r['failure']==k for r in rows) for k in sorted({r['failure'] for r in rows})}
         result[split]=summary
     return result
+
+def paired_action_differences(records):
+    """Compare actions only when initial pixels/state/noise seed match exactly."""
+    groups={}
+    for row in records:
+        if row.get('pair_id'): groups.setdefault(row['pair_id'],[]).append(row)
+    result=[]
+    for name,rows in groups.items():
+        if len(rows)!=2: raise ValueError('A paired trial requires exactly two cases')
+        a,b=rows
+        if a['seed']!=b['seed'] or a['initial_observation_sha256']!=b['initial_observation_sha256']:
+            raise ValueError('Paired trial must share observation, state and flow noise seed')
+        if a['target_body']==b['target_body']: raise ValueError('Paired target identities must differ')
+        result.append(dict(pair_id=name,targets=[a['target_body'],b['target_body']],
+            initial_action_difference_rms=float(np.sqrt(np.mean((np.asarray(a['initial_chunk'])-b['initial_chunk'])**2))),
+            scope='Action sensitivity; semantic success is measured separately per target'))
+    return result
+
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(); p.add_argument('files',nargs='+'); a=p.parse_args()

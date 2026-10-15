@@ -1,7 +1,7 @@
 [
   {
     "id": "same_scene_red",
-    "split": "test",
+    "split": "red_id",
     "instruction": "pick up the red cube and place it in the bin",
     "robot_state": [
       null,
@@ -23,11 +23,12 @@
     ],
     "destination_radius": 0.025,
     "destination_z_tolerance": 0.015,
-    "seed": 42
+    "seed": 42,
+    "pair_id": "same_scene"
   },
   {
     "id": "same_scene_blue",
-    "split": "test",
+    "split": "blue_zero_shot",
     "instruction": "pick up the blue cube and place it in the bin",
     "robot_state": [
       null,
@@ -49,6 +50,7 @@
     ],
     "destination_radius": 0.025,
     "destination_z_tolerance": 0.015,
-    "seed": 42
+    "seed": 42,
+    "pair_id": "same_scene"
   }
 ]

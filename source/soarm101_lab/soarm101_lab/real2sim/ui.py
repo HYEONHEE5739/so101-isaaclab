@@ -113,15 +113,29 @@ class Window(QMainWindow):
         self.button(controls,'Stop Teleop',self.stop)
         self.button(controls,'Disconnect',self.disconnect_sim)
         self.pair_button=self.button(controls,'현재 상태 Pair 캡처',self.capture_pair)
-        self.pair_result=QLabel('Pair 저장 위치/Scene state는 Real2Sim Capture의 저장 설정을 사용합니다.');self.pair_result.setWordWrap(True);live_l.addWidget(self.pair_result)
+        self.pair_result=QLabel('Pair 저장 위치와 Scene state는 오른쪽 Snapshot 저장 설정에서 변경하세요.');self.pair_result.setWordWrap(True);live_l.addWidget(self.pair_result)
         hint=QLabel('Connect는 새 follower 목표를 보내지 않습니다. Start가 Teleop을 활성화하고 Stop은 새 목표 전송을 멈춥니다.');hint.setWordWrap(True);live_l.addWidget(hint)
         settings=QWidget();settings_layout=QVBoxLayout(settings)
+        self.scene_options=QGroupBox('Scene / 관절 보정 · 다음 Connect');scene_form=QVBoxLayout(self.scene_options)
+        settings_layout.addWidget(self.scene_options)
+        self.scene_controls=QWidget();scene_controls=QVBoxLayout(self.scene_controls);scene_controls.setContentsMargins(0,0,0,0)
+        scene_form.addWidget(self.scene_controls)
+        scene_controls.addWidget(QLabel('Scene (Workspace Pipeline과 공유)'))
+        self.live_scene=QComboBox();self.live_scene.setMinimumContentsLength(16)
+        self.live_scene.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        scene_controls.addWidget(self.live_scene)
+        scene_buttons=QHBoxLayout();scene_controls.addLayout(scene_buttons)
+        self.scene_browse=self.button(scene_buttons,'Scene 선택 / Import',lambda:self.workflow_panel.browse_workspace())
+        self.scene_refresh=self.button(scene_buttons,'목록 새로고침',self.refresh_live_scenes)
+        self.live_workspace=QCheckBox('선택한 Scene 사용');self.live_workspace.setChecked(True);scene_controls.addWidget(self.live_workspace)
+        self.scene_selection_hint=QLabel();self.scene_selection_hint.setWordWrap(True)
+        self.scene_selection_hint.setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Minimum)
+        scene_controls.addWidget(self.scene_selection_hint)
         self.connection_group=QGroupBox('연결 설정');form=QFormLayout(self.connection_group);self.connection_form=form
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         settings_layout.addWidget(self.connection_group)
         self.sim_options=QGroupBox('Simulation');sim_form=QFormLayout(self.sim_options)
         sim_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows);form.addRow(self.sim_options)
-        self.live_workspace=QCheckBox('Pipeline Workspace 사용');self.live_workspace.setChecked(True);sim_form.addRow(self.live_workspace)
         self.live_real_preview=QCheckBox('미리보기에서 REAL 카메라 연결');sim_form.addRow(self.live_real_preview)
         self.live_renderer=QComboBox();self.live_renderer.addItems(['software-egl','egl','osmesa']);sim_form.addRow('MuJoCo renderer',self.live_renderer)
         self.live_renderer.setCurrentText('egl')
@@ -136,8 +150,10 @@ class Window(QMainWindow):
         self.button(buttons,'Profile 선택',self.open_profile)
         self.button(buttons,'선택 Profile 적용',lambda:self.send('apply_profile',{'profile':self.profile_path()}))
         self.sim_preview_button=self.button(buttons,'Sim 미리보기',lambda:self.connect_hw(True))
-        self.use_precision=QCheckBox('저장된 관절 보정 사용 (다음 Connect)');form.addRow(self.use_precision)
-        self.identity_sim=QCheckBox('URDF 관절 기준 사용 · 예전 Scene 영점 보정 제외');form.addRow(self.identity_sim)
+        self.use_precision=QCheckBox('저장된 관절 보정 사용');scene_form.addWidget(self.use_precision)
+        self.identity_sim=QCheckBox('URDF 원형 검사 · Scene 관절 보정 제외');scene_form.addWidget(self.identity_sim)
+        self.use_precision.setToolTip('현재 활성 Leader/Follower Precision 보정을 사용합니다. Capture와 Real/Sim이 같은 설정을 사용합니다.')
+        self.identity_sim.setToolTip('체크하면 Scene의 Sim 관절 보정을 제외합니다. 접촉 보정 Scene을 검토할 때는 해제하세요. 실제 Precision 보정 파일은 바뀌지 않습니다.')
         has_precision=any((self.workspace/'joint_calibration'/role/'active.json').is_file() for role in ('leader','follower'))
         self.use_precision.setChecked(has_precision);self.identity_sim.setChecked(has_precision)
         settings_layout.addWidget(self.capture_options);settings_layout.addStretch()
@@ -154,12 +170,21 @@ class Window(QMainWindow):
             settings=json.loads(settings_path.read_text())
             for k,v in settings.items():
                 if k in self.fields:self.fields[k].setText(v)
+            choices=settings.get('real_sim',{})
+            for key,widget in [('use_precision',self.use_precision),('identity_sim_for_validation',self.identity_sim),('use_workspace',self.live_workspace)]:
+                if isinstance(choices.get(key),bool):widget.setChecked(choices[key])
         from ..workflow.ui import WorkflowPanel
         self.workflow_panel=WorkflowPanel(self.work,self)
         self.live_backend.setCurrentIndex(self.live_backend.findData(self.workflow_panel.backend.currentData()))
         self.live_backend.currentIndexChanged.connect(lambda i:self.workflow_panel.backend.setCurrentIndex(i))
         self.workflow_panel.backend.currentIndexChanged.connect(lambda i:self.live_backend.setCurrentIndex(i))
         self.tabs.addTab(self.workflow_panel,'3 · Workspace Pipeline')
+        self.live_scene.currentIndexChanged.connect(lambda:self.guard(self.select_live_scene))
+        self.workflow_panel.workspace.textChanged.connect(self.refresh_live_scenes)
+        self.refresh_live_scenes()
+        for widget in (self.live_workspace,self.use_precision,self.identity_sim):
+            widget.toggled.connect(self.save_settings)
+            widget.toggled.connect(self.update_scene_selection_hint)
         from .precision_ui import PrecisionPanel
         self.precision_panel=PrecisionPanel(self);self.tabs.addTab(self.precision_panel,'4 · Precision Calibration')
         self.tabs.currentChanged.connect(self.change_tab);self.change_tab(0)
@@ -172,6 +197,49 @@ class Window(QMainWindow):
 
     def button(self,row,title,fn):
         button=QPushButton(title);button.clicked.connect(lambda checked=False:self.guard(fn));row.addWidget(button);return button
+
+    def refresh_live_scenes(self):
+        """List the existing registry; selecting a Scene never starts a worker."""
+        path=self.workflow_panel.workspace.text().strip()
+        self.live_scene.blockSignals(True);self.live_scene.clear()
+        self.live_scene.addItem('Scene을 선택하세요', '')
+        seen=set()
+        for artifact in self.workflow_panel.registry.all():
+            scene=artifact['path']
+            if artifact['type']!='workspace' or artifact.get('status','SUCCEEDED')!='SUCCEEDED' or not Path(scene).exists() or scene in seen:continue
+            seen.add(scene)
+            folder=Path(scene)
+            self.live_scene.addItem(folder.parent.name+'/'+folder.name,scene)
+            self.live_scene.setItemData(self.live_scene.count()-1,scene,Qt.ItemDataRole.ToolTipRole)
+        if path and path not in seen:
+            self.live_scene.addItem(Path(path).parent.name+'/'+Path(path).name,path)
+        self.live_scene.setCurrentIndex(max(0,self.live_scene.findData(path)))
+        self.live_scene.blockSignals(False)
+        self.update_scene_selection_hint()
+        if self.tabs.currentIndex()==1 and not self.runtime_enabled:self.sync_scene_cameras()
+
+    def select_live_scene(self):
+        path=self.live_scene.currentData()
+        if path:
+            try:self.workflow_panel.select_workspace(path)
+            except Exception:
+                self.refresh_live_scenes()
+                raise
+        else:
+            self.refresh_live_scenes()
+        self.update_scene_selection_hint()
+
+    def update_scene_selection_hint(self):
+        path=self.workflow_panel.workspace.text().strip()
+        self.live_scene.setToolTip(path)
+        selected=(Path(path).parent.name+'/'+Path(path).name if path else '없음') if self.live_workspace.isChecked() else '연결 설정의 Profile 사용'
+        self.scene_selection_hint.setText('선택: '+selected+'\n연결 중 변경했다면 Disconnect → Connect하세요.')
+
+    def save_settings(self):
+        atomic(self.workspace/'ui_settings.json',{**{k:v.text() for k,v in self.fields.items()},
+            'real_sim':{'use_precision':self.use_precision.isChecked(),
+                        'identity_sim_for_validation':self.identity_sim.isChecked(),
+                        'use_workspace':self.live_workspace.isChecked()}})
 
     def sync_scene_cameras(self):
         path = self.workflow_panel.workspace.text().strip()
@@ -193,7 +261,10 @@ class Window(QMainWindow):
             tile.setVisible(key.removeprefix('real_').removeprefix('sim_') in names)
             self.live_grid.removeWidget(tile)
         for i,name in enumerate(names):
-            for col,prefix in enumerate(('real_','sim_')): self.live_grid.addWidget(self.live_tiles[prefix+name],i,col)
+            for col,prefix in enumerate(('real_','sim_')):
+                tile=self.live_tiles[prefix+name]
+                self.live_grid.addWidget(tile,i,col)
+                tile.setVisible(True)
         bindings = workspace['task'].get('real_camera_bindings', {})
         for name in names:
             key=bindings.get(name,name+'_camera')
@@ -235,10 +306,12 @@ class Window(QMainWindow):
         identifier=self.bus.send(name,payload);self.pending[identifier]=name;return identifier
 
     def change_tab(self,index):
-        if index == 1 and hasattr(self, 'workflow_panel'): self.sync_scene_cameras()
+        if index == 1 and hasattr(self, 'workflow_panel'): self.refresh_live_scenes()
         self.log.setVisible(index!=2)
         self.settings_scroll.setVisible(index!=2)
-        self.capture_options.setVisible(index==0)
+        self.scene_controls.setVisible(index==1)
+        self.scene_options.setVisible(index in (0,1))
+        self.capture_options.setVisible(index in (0,1))
         self.sim_options.setVisible(index==1);self.sim_preview_button.setVisible(index==1)
 
     def start_capture(self):
@@ -293,7 +366,7 @@ class Window(QMainWindow):
         self.requested_backend=backend
         self.runtime_session=self.bus.status().get('session') if identifier else None
         if identifier:self.pending[identifier]='connect'
-        atomic(self.workspace/'ui_settings.json',{k:v.text() for k,v in self.fields.items()})
+        self.save_settings()
 
     def disconnect_sim(self):
         identifier=self.runtime_launcher.disconnect()
@@ -301,6 +374,7 @@ class Window(QMainWindow):
         if identifier:self.pending[identifier]='disconnect'
         self.runtime_enabled=False
         self.runtime_session=None
+        if self.tabs.currentIndex()==1:self.sync_scene_cameras()
 
     def refresh(self):
         if self.runtime_enabled and self.runtime_session == self.bus.status().get('session'):
@@ -318,6 +392,8 @@ class Window(QMainWindow):
         # Choice is for the next explicit Connect; old status must not override or lock it.
         self.live_backend.setEnabled(not starting and not self.workflow_panel.busy)
         self.workflow_panel.backend.setEnabled(not starting and not self.workflow_panel.busy);self.live_renderer.setEnabled(not starting)
+        for widget in (self.live_scene,self.scene_browse,self.scene_refresh,self.live_workspace,self.use_precision,self.identity_sim):
+            widget.setEnabled(not starting and not self.workflow_panel.busy)
         fresh=bool(self.runtime_enabled and self.runtime_session == s.get('session') and self.bus.responsive(s))
         self.precision_panel.refresh(s.get('precision') if fresh else {})
         availability=s.get('availability',{}) if fresh else {}
@@ -337,7 +413,13 @@ class Window(QMainWindow):
         self.pair_button.setEnabled(bool(feedback and side and wrist and s.get('sim_connected') and not connecting
             and 'capture_pair' not in self.pending.values()))
         self.status.setText(f"{backend or 'runtime'} · {s.get('state')} · {s.get('message','')}\n{s.get('error') or ''}" if fresh else '대기 · Capture Start 또는 Real/Sim Connect를 눌러 시작하세요.')
-        self.live_details.setText(f"적용 profile hash: {s.get('profile_hash') if fresh else '없음'} · Real: {connected} / Sim: {bool(fresh and s.get('sim_connected'))}")
+        options=s.get('precision_run_configuration',{}) if fresh else {}
+        current_scene=s.get('workspace') if fresh else None
+        current_options=(f"연결된 설정 · 저장 관절 보정: {'ON' if options.get('use_precision') else 'OFF'} · Scene 관절 보정 제외: {'ON' if options.get('identity_sim_for_validation') else 'OFF'}"
+            if fresh else '연결된 설정: 없음 (아직 Connect하지 않음)')
+        self.live_details.setText(f"연결된 Scene: {current_scene or ('Profile 사용' if fresh else '없음')}\n"
+            f"{current_options}\n"
+            f"적용 profile hash: {s.get('profile_hash') if fresh else '없음'} · Real: {connected} / Sim: {bool(fresh and s.get('sim_connected'))}")
         if self.runtime_launcher.pending is not None:self.status.setText('Runtime 시작 중 · 로그: '+str(self.runtime_launcher.log_path))
         elif self.runtime_launcher.stopping:self.status.setText('이전 Runtime 종료 중 · 장치 재연결은 종료 후에 진행합니다.')
         elif not self.runtime_enabled and self.bus.owner_alive():
@@ -377,7 +459,7 @@ class Window(QMainWindow):
         except RuntimeError:pass
         self.runtime_launcher.cancel_connect()
         if self.worker and self.worker.isRunning():event.ignore();return
-        atomic(self.workspace/'ui_settings.json',{k:v.text() for k,v in self.fields.items()});event.accept()
+        self.save_settings();event.accept()
 
 
 def main():

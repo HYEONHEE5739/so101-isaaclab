@@ -44,6 +44,33 @@ def default_task(profile):
 def validate_task(task, profile):
     if task.get('schema') != 'so101.workspace-task/1' or task.get('version') != 1:
         raise ValueError('Unsupported task schema/version')
+    if task.get('mode') == 'geometry_review':
+        dynamic, targets = task['dynamic'], task['targets']
+        if len(set(dynamic)) != len(dynamic) or set(dynamic) & set(targets):
+            raise ValueError('Invalid review physics classification')
+        for name in dynamic:
+            if name not in profile['objects'] or profile['objects'][name].get('geometry_source') != 'builder_export':
+                raise ValueError('Review dynamics require explicit Builder collision geometry')
+        for name, visual in targets.items():
+            if name == visual or visual not in profile['objects'] or visual in dynamic or profile['objects'][visual]['shape'] != 'cup_proxy':
+                raise ValueError('Review receptacles require explicit open round collision geometry')
+        physics = task['physics']
+        for key in ('static_friction', 'dynamic_friction', 'restitution'):
+            if not np.isfinite(physics[key]) or physics[key] < 0:
+                raise ValueError('Invalid review physics value')
+        if physics['restitution'] > 1 or dynamic and (not np.isfinite(physics.get('mass_kg', np.nan)) or physics['mass_kg'] <= 0):
+            raise ValueError('Invalid review dynamics mass/restitution')
+        for name, row in task.get('object_physics', {}).items():
+            if name not in [*dynamic, *targets]: raise ValueError('Unknown review physics object')
+            for key in ('mass_kg', 'static_friction', 'dynamic_friction', 'restitution'):
+                if key in row and (not np.isfinite(row[key]) or row[key] < 0 or key == 'mass_kg' and row[key] <= 0 or key == 'restitution' and row[key] > 1):
+                    raise ValueError('Invalid review object physics')
+        expected = review_contract(profile, task['reset']['support_object'], dynamic, targets)
+        expected['physics'] = copy.deepcopy(physics)
+        if 'object_physics' in task: expected['object_physics'] = copy.deepcopy(task['object_physics'])
+        if task != expected:
+            raise ValueError('Invalid geometry review contract; task semantics require explicit workflow metadata')
+        return task
     dynamic, targets = task['dynamic'], task['targets']
     if not dynamic or len(set(dynamic)) != len(dynamic) or set(dynamic) & set(targets):
         raise ValueError('Invalid dynamic/target classification')
@@ -167,8 +194,7 @@ def load(workspace, registry=REGISTRY):
     remap(resolved);validate_profile(resolved)
     if sha(root/'profile.json') != manifest['source_profile_sha256']:
         raise ValueError('Profile hash mismatch')
-    if manifest['mapper'] != DEFAULT_MAPPER.metadata():
-        raise ValueError('Current joint mapper differs from workspace')
+    validate_mapping(manifest['mapper'], root/'assets/SO101/urdf/so101_isaaclab.urdf')
     task = validate_task(json.loads((root/'task.json').read_text()), profile)
     for name in [*task['targets'], *(task['dynamic'] if builder else [])]:
         if f'scene/{name}.usda' not in manifest['files']:raise ValueError('Task object asset missing')
@@ -183,3 +209,44 @@ def metadata(workspace):
                             'robot_asset_sha256','mapper','task_sha256','content_sha256')}
     if m.get('builder'): result['builder_scene'] = copy.deepcopy(m['builder'])
     return result
+
+
+def review_contract(profile, support, dynamic=(), targets=None):
+    """Fixed geometry inspection, with no manipulation goal or success predicate."""
+    if support not in profile['objects'] and support != 'table':
+        raise ValueError('Unknown review support')
+    return {'schema': 'so101.workspace-task/1', 'version': 1, 'mode': 'geometry_review',
+            'semantics_source': 'geometry review only; no task/reset distribution/success supplied',
+            'dynamic': list(dynamic), 'targets': dict(targets or {}), 'pick': None, 'place': None, 'success': None,
+            'reset': {'mode': 'fixed', 'seed': 0, 'support_object': support},
+            'physics': {'static_friction': 1., 'dynamic_friction': 1., 'restitution': 0.,
+                        'provenance': 'provisional', 'note': 'Fixed review geometry; contact fidelity unvalidated'},
+            'robot_initial_joint_rad': {n: 0. for n in DEFAULT_MAPPER.metadata()['joint_order']},
+            'observation_cameras': list(profile['cameras']),
+            'real_camera_bindings': {n: n+'_camera' for n in profile['cameras'] if n in ('side','wrist')}}
+
+
+def validate_mapping(mapping, urdf):
+    """Validate capture coordinate provenance; never activate or rewrite a device profile."""
+    if mapping == DEFAULT_MAPPER.metadata():
+        return
+    from ..precision import MAPPING, mapper_from_metadata, profile_for_model
+    if not isinstance(mapping, dict) or mapping.get('schema') != MAPPING:
+        raise ValueError('Builder robot mapping differs from supported SO-101 mappings')
+    if mapping.get('joint_order') != DEFAULT_MAPPER.metadata()['joint_order'] or mapping.get('output') != 'urdf_joint_radian':
+        raise ValueError('Precision joint order/unit mismatch')
+    mapper = mapper_from_metadata(mapping)
+    identity = mapper.profile.get('identity', {})
+    if mapper.profile.get('role') not in ('leader', 'follower') or identity.get('role') != mapper.profile.get('role') or not identity.get('calibration_sha256'):
+        raise ValueError('Precision device/calibration identity missing or conflicting')
+    for joint, entry in mapper.profile['joints'].items():
+        motor = identity.get('motors', {}).get(joint, {})
+        if (motor.get('id') != entry['motor']['calibration']['id'] or motor.get('model') != 'sts3215'
+                or entry['motor'].get('calibration_hash') != identity['calibration_sha256']):
+            raise ValueError('Precision motor/calibration identity mismatch: '+joint)
+        for reference in entry['references']:
+            if reference.get('device_identity') != identity or reference.get('calibration_hash') != identity['calibration_sha256']:
+                raise ValueError('Precision reference motor/calibration identity mismatch: '+joint)
+            if reference.get('motor') != entry['motor']:
+                raise ValueError('Precision reference motor mismatch: '+joint)
+    profile_for_model(mapper.profile, sha(urdf))

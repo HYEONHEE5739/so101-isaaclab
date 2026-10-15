@@ -139,6 +139,8 @@ class Operations:
             workspace = path
         needs_workspace = stage in {'source', 'replay', 'annotate', 'datagen', 'sim_eval', 'real_eval'}
         w = load(workspace) if needs_workspace or (workspace and stage in ('convert', 'train')) else None
+        if w and w['task'].get('mode') == 'geometry_review':
+            raise ValueError('Geometry review Workspace: use Real/Sim preview; explicit workflow metadata is required for task execution')
         if w and artifact.get('workspace') != metadata(w):
             raise ValueError('Input workspace identity differs from selected workspace')
         from .tasks import catalog, validate, from_artifact
@@ -437,7 +439,7 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
         raise ValueError('Source/Annotation/Datagen require one task')
     opts.update(tasks=definitions, task_definition=definitions[0], instruction=definitions[0]['language_instruction'])
     renderer = opts.get('renderer', 'egl')
-    config = opts.get('model_config', str(MODEL_ROOT / 'configs/frozen_flow.json'))
+    config = opts.get('model_config', str(MODEL_ROOT / 'configs/default.json'))
     if stage == 'sim_eval' and artifact.get('format') == 'so101.minivla-policy/1':
         config = str(Path(artifact['path']) / 'config.json')
     if stage == 'sim_eval':

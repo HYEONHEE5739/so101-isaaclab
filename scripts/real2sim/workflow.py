@@ -29,7 +29,7 @@ def main():
     worker.add_argument('--stage', choices=sorted(MUJOCO_STAGES))
     worker.add_argument('--workspace', default='')
     worker.add_argument('--input', default='')
-    worker.add_argument('--config', default=str(MODEL_ROOT / 'configs/frozen_deterministic.json'))
+    worker.add_argument('--config', default=str(MODEL_ROOT / 'configs/default.json'))
     worker.add_argument('--checkpoint', default='')
     worker.add_argument('--renderer', choices=['egl', 'software-egl', 'osmesa', 'none'], default='egl')
     worker.add_argument('--options', default='{}', help='JSON options object')
@@ -46,7 +46,10 @@ def main():
     if args.command == 'import-builder':
         from soarm101_lab.real2sim.workspaces.builder import import_scene
         task = json.loads(Path(args.task).read_text()) if args.task else None
-        print(import_scene(args.source, args.workspace_id, args.version, task), flush=True)
+        destination = import_scene(args.source, args.workspace_id, args.version, task)
+        from soarm101_lab.workflow.artifacts import Registry
+        Registry().register('workspace', destination)
+        print(destination, flush=True)
         return
     if args.command == 'worker':
         if args.request:

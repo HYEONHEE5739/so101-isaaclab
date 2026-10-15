@@ -10,7 +10,7 @@ class TaskSelector(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.definitions = {}; self.loading = False; self.inherited = None
+        self.definitions = {}; self.loading = False; self.inherited = None; self.review = False
         layout = QFormLayout(self); layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.preset = QComboBox(); self.pick = QComboBox(); self.target = QComboBox()
         self.instruction = QLineEdit()
@@ -30,6 +30,7 @@ class TaskSelector(QWidget):
         self.multiple.itemChanged.connect(lambda: self.changed.emit())
 
     def configure(self, workspace, stage, inherited=None):
+        self.review = workspace['task'].get('mode') == 'geometry_review'
         previous = self.preset.currentData()
         previous_definitions = self.definitions
         self.loading = True
@@ -38,7 +39,7 @@ class TaskSelector(QWidget):
         for key, value in previous_definitions.items():
             if key in self.definitions and value['randomization_spec'] == self.definitions[key]['randomization_spec']:
                 self.definitions[key]['language_instruction'] = value['language_instruction']
-        editable = stage in ('source', 'sim_eval', 'real_eval')
+        editable = not self.review and stage in ('source', 'sim_eval', 'real_eval')
         self.inherited = None if editable else copy.deepcopy(inherited or [])
         for t in inherited or []:
             if t['task_id'] in self.definitions:
@@ -60,6 +61,9 @@ class TaskSelector(QWidget):
             self.layout().labelForField(widget).setVisible(stage in ('sim_eval', 'real_eval'))
         self.summary.setText('명시적 객체 ID가 의미를 결정합니다. 문장은 파싱하지 않습니다.' if editable else
                              '입력 artifact에서 상속: ' + ', '.join(t['task_id'] for t in inherited or []))
+        if self.review:
+            title = 'Geometry/Physics Review · 물체 동역학 활성' if workspace['task']['dynamic'] else 'Geometry Review'
+            self.summary.setText(title + ' · Real/Sim 미리보기 사용 가능 · 작업 실행에는 명시적인 Workflow Metadata가 필요합니다.')
         self.loading = False; self.choose_preset()
 
     def choose_preset(self):
@@ -82,6 +86,7 @@ class TaskSelector(QWidget):
             self.changed.emit()
 
     def selection(self, evaluation=False):
+        if self.review: return []
         if self.inherited is not None: return copy.deepcopy(self.inherited)
         scope = self.scope.currentData() if evaluation else 'single'
         if scope == 'all': keys = list(self.definitions)

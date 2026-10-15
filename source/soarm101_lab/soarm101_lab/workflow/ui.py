@@ -114,15 +114,10 @@ class WorkflowPanel(QWidget):
         self.architecture = QComboBox()
         self.architecture.addItem('SmolVLA — smolvla_base 파인튜닝', 'smolvla')
         self.architecture.addItem('ACT', 'act')
-        self.architecture.addItem('MiniVLA · Qwen3-VL', 'minivla')
+        self.architecture.addItem('MiniVLA · Qwen3-VL + Flow-DiT', 'minivla')
         primary_form.addRow('학습 모델', self.architecture)
         self.architecture.currentIndexChanged.connect(self.change_model)
-        self.minivla_head = QComboBox()
-        self.minivla_head.addItem('Flow matching (기본)', 'flow')
-        self.minivla_head.addItem('Deterministic', 'deterministic')
-        self.minivla_head.setToolTip('Frozen Qwen 기본 설정. model_config를 직접 지정하거나 Resume하면 해당 JSON 설정을 사용합니다.')
-        primary_form.addRow('MiniVLA head · Frozen', self.minivla_head)
-        self.minivla_head.currentIndexChanged.connect(self.update_ready)
+
         self.resume_training = QCheckBox('이어서 학습')
         self.resume_training.setToolTip('모델·optimizer·scheduler·step 복원. 저장 경로를 비우면 기존 학습 폴더에 계속 저장합니다.')
         primary_form.addRow('학습 방식', self.resume_training)
@@ -246,6 +241,7 @@ class WorkflowPanel(QWidget):
             self.mode.setCurrentIndex(max(0, self.mode.findData(saved.get('mode', 'operator'))))
         self.stage.currentIndexChanged.connect(self.changed)
         self.inputs.currentIndexChanged.connect(self.sync_tasks)
+        self.inputs.activated.connect(lambda:self.guard(self.select_input_workspace))
         self.options.textChanged.connect(self.update_ready)
         self.workspace.editingFinished.connect(self.refresh)
         # Register the selected imported workspace without starting any worker.
@@ -345,7 +341,6 @@ class WorkflowPanel(QWidget):
         from .option_help import help_html
         self.options_help.setHtml(help_html(stage))
         self.reset_options(restore_saved=True)
-        self.show_model_controls()
         self.kind.clear(); self.kind.addItems(sorted(STAGES[stage][0])); self.refresh()
 
     def refresh(self):
@@ -357,7 +352,7 @@ class WorkflowPanel(QWidget):
             if a.get('status', 'SUCCEEDED') != 'SUCCEEDED' or not Path(a['path']).exists():
                 continue
             engine_match = a.get('backend', 'isaac') == self.backend.currentData() if hasattr(self, 'backend') else True
-            if a['type'] in allowed and (a['type'] == 'workspace' or engine_match or self.stage.currentData() in ('train', 'sim_eval', 'hf_dataset', 'hf_policy')) and (not workspace or not a.get('workspace') or a['workspace'] == workspace):
+            if a['type'] in allowed and (a['type'] == 'workspace' or engine_match or self.stage.currentData() in ('train', 'sim_eval', 'hf_dataset', 'hf_policy')) and (a['type'] == 'workspace' or not workspace or not a.get('workspace') or a['workspace'] == workspace):
                 path = Path(a['path'])
                 tasks = ','.join(t['task_id'] for t in a.get('tasks', []))
                 created = time.strftime('%m/%d %H:%M', time.localtime(a['created_at']))
@@ -368,9 +363,25 @@ class WorkflowPanel(QWidget):
         self.inputs.setCurrentIndex(index if index >= 0 else self.inputs.count() - 1)
         self.inputs.blockSignals(False); self.sync_tasks(); self.update_ready()
 
+    def select_workspace(self, path):
+        """Share the chosen Workspace with Real/Sim without running a stage."""
+        if self.busy:raise ValueError('Workflow 실행이 끝난 뒤 Scene을 선택하세요.')
+        w=load(path)
+        self.workspace.setText(str(w['root']))
+        self.refresh()
+        for index in range(self.inputs.count()):
+            artifact=self.registry.get(self.inputs.itemData(index))
+            if artifact['type']=='workspace' and artifact['path']==str(w['root']):
+                self.inputs.setCurrentIndex(index)
+                break
+        self.save_backend_settings()
+
+    def select_input_workspace(self):
+        if self.busy or not self.inputs.currentData():return
+        artifact=self.registry.get(self.inputs.currentData())
+        if artifact['type']=='workspace':self.select_workspace(artifact['path'])
+
     def update_ready(self):
-        if hasattr(self, 'minivla_head') and hasattr(self, 'options'):
-            self.show_model_controls()
         if self.busy:
             self.status.setText('RUNNING — 완료 후 output 검증 및 등록'); self.run.setEnabled(False); return
         try:
@@ -549,7 +560,7 @@ class WorkflowPanel(QWidget):
             opts['architecture'] = self.architecture.currentData()
             if opts['architecture'] == 'minivla' and not opts.get('model_config'):
                 from ..learning.minivla.config import MODEL_ROOT
-                opts['model_config'] = str(MODEL_ROOT / 'configs' / ('frozen_' + self.minivla_head.currentData() + '.json'))
+                opts['model_config'] = str(MODEL_ROOT / 'configs/default.json')
             opts.pop('resume_checkpoint', None)
             if self.resume_training.isChecked():
                 if not self.resume_path.text().strip():
@@ -618,17 +629,7 @@ class WorkflowPanel(QWidget):
         if self.options_context:
             self.saved_stage_options[self.options_context] = json.loads(self.options.toPlainText())
         self.reset_options(restore_saved=True)
-        self.show_model_controls()
         self.update_ready()
-
-    def show_model_controls(self):
-        custom = self.options.editors.get('model_config')
-        custom_path = bool(custom and custom[0].isChecked() and custom[1].text().strip())
-        visible = (self.stage.currentData() == 'train' and self.architecture.currentData() == 'minivla'
-                   and not custom_path and not self.resume_training.isChecked())
-        self.minivla_head.setVisible(visible)
-        self.primary.layout().labelForField(self.minivla_head).setVisible(visible)
-        self.minivla_head.setEnabled(not self.busy)
 
     def change_section(self):
         groups = [('source', 'replay', 'annotate', 'datagen', 'convert', 'train', 'sim_eval', 'hf_dataset', 'hf_policy'),

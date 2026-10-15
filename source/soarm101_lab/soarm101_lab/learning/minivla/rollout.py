@@ -1,6 +1,7 @@
 """Paused-simulation evaluation: no false real-time claim, no stale asynchronous actions."""
 import argparse
 import json
+import hashlib
 from pathlib import Path
 import time
 import numpy as np
@@ -24,14 +25,23 @@ def main():
     cases=json.loads(Path(a.cases).read_text()); out=Path(a.out); out.mkdir(parents=True,exist_ok=True); results=[]
     try:
         for i,case in enumerate(cases):
-            case_seed=int(case.get('seed',a.seed+i)); seed_all(case_seed); obs=env.reset(case); guard.reset(); trace=[]; start=time.perf_counter()
+            case_seed=int(case.get('seed',a.seed+i)); seed_all(case_seed); obs=env.reset(case); guard.reset(); trace=[]; first_chunk=None; observation_hash=None; start=time.perf_counter()
             # Initial measurement establishes distance reduction from t=0.
             initial=env.measure(); remaining=[]; model_metrics={}
             for step in range(a.max_steps):
                 replan=not remaining
                 if replan:
                     obs=env.observe(); stamp=obs['timestamp']
-                    chunk,model_metrics=policy.predict(obs['images'],obs['state'],case['instruction'])
+                    if a.policy=='vla':
+                        import torch
+                        noise=torch.randn(1,policy.cfg.horizon,6,device='cuda',generator=torch.Generator(device='cuda').manual_seed(case_seed+step))
+                        chunk,model_metrics=policy.predict(obs['images'],obs['state'],case['instruction'],noise=noise)
+                    else:
+                        chunk,model_metrics=policy.predict(obs['images'],obs['state'],case['instruction'])
+                    if first_chunk is None:
+                        first_chunk=np.asarray(chunk).tolist()
+                        payload=b''.join(np.asarray(im).tobytes() for im in obs['images'])+np.asarray(obs['state']).tobytes()
+                        observation_hash=hashlib.sha256(payload).hexdigest()
                     if env.data.time!=stamp: raise RuntimeError('Simulation advanced during inference; discard stale chunk')
                     remaining=list(chunk[:policy.cfg.replan_steps])
                 before_v,before_r=guard.violations,guard.rate_limited
@@ -45,7 +55,8 @@ def main():
             metrics=summarize_episode(metric_trace,hz=policy.control_hz,
                 approach_radius=env.cfg.get('approach_radius_m',.04))
             metrics['completion_sim_seconds']=len(trace)/policy.control_hz
-            metrics.update(case=case['id'],split=case['split'],seed=case_seed,wall_seconds=time.perf_counter()-start)
+            metrics.update(case=case['id'],split=case['split'],seed=case_seed,wall_seconds=time.perf_counter()-start,
+                pair_id=case.get('pair_id'),target_body=case['target_body'],initial_chunk=first_chunk,initial_observation_sha256=observation_hash)
             results.append(metrics)
             # Convert absent distractor infinity to null for strict JSON traces.
             for row in trace:
@@ -54,5 +65,7 @@ def main():
             print(json.dumps(metrics),flush=True)
     finally: env.close()
     (out/'summary.json').write_text(json.dumps(aggregate(results),indent=2))
+    from .evaluate import paired_action_differences
+    (out/'paired_comparison.json').write_text(json.dumps(paired_action_differences(results),indent=2))
 
 if __name__=='__main__': main()

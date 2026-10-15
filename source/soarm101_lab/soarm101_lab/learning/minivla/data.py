@@ -129,12 +129,10 @@ class Episodes(Dataset):
                 'instruction': self.episodes[i]['instruction'],
                 'state': torch.from_numpy(self.pre.normalize(a['state'][t], 'state')),
                 'actions': torch.from_numpy(actions), 'mask': torch.arange(h)<count,
-                'grounding': torch.from_numpy(np.array(a['grounding'][t], dtype=np.float32)) if 'grounding' in a else torch.zeros(2,2),
-                'grounding_mask': torch.from_numpy(np.array(a['grounding_mask'][t], dtype=bool)) if 'grounding' in a else torch.zeros(2,dtype=torch.bool),
                 'episode': self.episodes[i]['id'], 'frame':t}
 
 def collate(samples):
-    out={k:torch.stack([s[k] for s in samples]) for k in ('state','actions','mask','grounding','grounding_mask')}
+    out={k:torch.stack([s[k] for s in samples]) for k in ('state','actions','mask')}
     out.update({k:[s[k] for s in samples] for k in ('images','instruction','episode','frame')})
     return out
 

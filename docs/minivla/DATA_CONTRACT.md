@@ -11,16 +11,16 @@
 | images | camera별 uint8 [H,W,3] 리스트 | RGB, 0..255, 파일의 camera 순서 |
 | instruction | str | episode 단위 task; 공백 정리, 임의 잘라내기 금지 |
 | state | float32 [6] | train 통계 z-score, clipping 없음 |
-| actions | float32 [16,6] | 관측 직후부터 16개 absolute target의 z-score |
-| mask | bool [16] | True=유효 target, False=episode 끝 padding |
+| actions | float32 [40,6] | 관측 직후부터 40개 absolute target의 z-score |
+| mask | bool [40] | True=유효 target, False=episode 끝 padding |
 | grounding | float32 [2,2] | 첫 camera 원본상의 target/destination 중심 [u,v], 0..1 |
 | grounding_mask | bool [2] | UV 라벨의 유효성, 없으면 전부 False |
 
 B=1이 기본. Qwen processor 결과는 input_ids int64 [B,N], attention_mask [B,N],
 pixel_values [total_patches, patch_dimension], image_grid_thw [B*camera_count,3].
-Qwen 최종 feature BF16 [B,N,2048], head의 VL adapter는 [B,N,256].
+Qwen language block15 출력 feature BF16 [B,N,2048], head의 VL adapter는 [B,N,256].
 좌표 [B,N,2], camera id int64 [B,N], text=0/image=1..4.
-추론 출력은 float32/64 [16,6] canonical 물리 단위. joint limiter 적용 전 출력이다.
+추론 출력은 float32/64 [40,6] canonical 물리 단위. joint limiter 적용 전 출력이다.
 
 ## 폴더
 
@@ -82,7 +82,7 @@ qpos[t+1]를 command라고 재명명하지 않는다. leader 명령과 follower 
 - paraphrase는 원래 target/destination이 보존되는 검수된 문장만 episode 복제/변형으로 제공한다.
 
 ## 이미지 처리
-geometry를 보존하는 thumbnail 후 Qwen processor smart resize/정규화. crop, flip, hue jitter 없음.
+256×256 LANCZOS letterbox(640×480→256×192+상하32px 검정) 후 Qwen processor 정규화. crop, flip, hue jitter 없음.
 brightness/contrast만 .9~1.1. 과도한 조명 변형은 색 grounding을 망칠 수 있다.
 max_instruction_tokens=96, max_tokens=512는 초과 시 예외. 임의 truncate로 image tokens를 자르지 않는다.
 2 cameras를 쓰면 카메라 순서와 config, 데이터, MuJoCo mapping을 함께 변경하고 VRAM을 재측정한다.

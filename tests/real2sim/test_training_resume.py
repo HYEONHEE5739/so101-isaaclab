@@ -108,7 +108,7 @@ def test_minivla_resume_can_extend_steps_but_not_change_model():
     from soarm101_lab.learning.minivla.config import MiniVLAConfig
     from soarm101_lab.learning.minivla.train import validate_resume
     cfg = MiniVLAConfig()
-    saved = {'config': asdict(cfg), 'statistics': {'mean': [0.]}, 'control_hz': 30, 'step': cfg.steps}
+    saved = {'architecture_schema': cfg.architecture_schema, 'config': asdict(cfg), 'statistics': {'mean': [0.]}, 'control_hz': 30, 'step': cfg.steps}
     cfg.steps += 100
     validate_resume(saved, cfg, saved['statistics'], 30)
     cfg.horizon += 1

@@ -9,7 +9,7 @@ import shutil
 import time
 import numpy as np
 import torch
-from .config import MiniVLAConfig
+from .config import MiniVLAConfig, ARCHITECTURE_SCHEMA
 from .data import Episodes, collate
 from .head import ActionHead
 
@@ -22,7 +22,7 @@ def device_batch(batch, device):
 
 def compute_loss(backbone, head, batch, augment=False):
     features=backbone(batch['images'], batch['instruction'], augment=augment)
-    return head.loss(features,batch['state'],batch['actions'],batch['mask'],batch['grounding'],batch['grounding_mask'])
+    return head.loss(features,batch['state'],batch['actions'],batch['mask'])
 
 def adapter_state(backbone):
     if backbone.cfg.adaptation=='frozen': return None
@@ -34,8 +34,14 @@ def restore_adapter(backbone, state):
         from peft import set_peft_model_state_dict
         set_peft_model_state_dict(backbone.model,state)
 
+def require_architecture(checkpoint):
+    if checkpoint.get('architecture_schema') != ARCHITECTURE_SCHEMA:
+        raise ValueError('Legacy/incompatible MiniVLA checkpoint: expected '+ARCHITECTURE_SCHEMA+'; retraining is required')
+
+
 def validate_resume(checkpoint, cfg, stats, control_hz):
     """Allow extending total steps while retaining model, dataset and optimizer contracts."""
+    require_architecture(checkpoint)
     saved = dict(checkpoint['config']); current = asdict(cfg)
     saved.pop('steps'); current.pop('steps')
     if saved != current or checkpoint['statistics'] != stats:
@@ -47,7 +53,7 @@ def validate_resume(checkpoint, cfg, stats, control_hz):
 
 def save_checkpoint(path, cfg, head, backbone, stats, optimizer, step, best, stale, hz):
     path=Path(path); tmp=path.with_suffix('.tmp')
-    torch.save({'config':asdict(cfg),'head':head.state_dict(),'adapter':adapter_state(backbone),
+    torch.save({'architecture_schema':ARCHITECTURE_SCHEMA,'config':asdict(cfg),'head':head.state_dict(),'adapter':adapter_state(backbone),
                 'statistics':stats,'optimizer':optimizer.state_dict(),'step':step,'best':best,'stale':stale,
                 'control_hz':hz},tmp)
     tmp.replace(path)
@@ -77,6 +83,8 @@ def main():
     train=Episodes(args.manifest,stats,cfg,'train'); val=Episodes(args.manifest,stats,cfg,'val')
     out=Path(args.out); out.mkdir(parents=True,exist_ok=True)
     if (out/'last.pt').exists() and not args.resume: raise FileExistsError('Run exists: use --resume or a fresh --out')
+    if args.resume:
+        require_architecture(torch.load(args.resume,map_location='cpu',weights_only=True))
     seed_all(cfg.seed)
     from .backbone import QwenBackbone
     backbone=QwenBackbone(cfg)
@@ -118,7 +126,7 @@ def main():
             with torch.autocast('cuda',dtype=torch.bfloat16): loss,_=compute_loss(backbone,head,batch,augment=True)
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite training loss')
             (loss/cfg.accumulation).backward(); losses.append(float(loss.detach()))
-        if lora and step==start and not any(p.grad is not None and p.grad.abs().sum()>0 for p in lora):
+        if lora and step==start+1 and not any(p.grad is not None and p.grad.abs().sum()>0 for p in lora):
             raise RuntimeError('Action loss does not reach LoRA')
         norm=torch.nn.utils.clip_grad_norm_(params,1.,error_if_nonfinite=True)
         opt.step(); torch.cuda.synchronize()

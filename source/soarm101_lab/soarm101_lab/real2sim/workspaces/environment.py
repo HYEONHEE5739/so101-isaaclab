@@ -16,10 +16,50 @@ def deactivate_legacy_wrist_camera(robot_prim):
             camera.SetActive(False)
 
 
-def spawn_workspace_robot(prim_path, cfg, translation=None, orientation=None, visual_links=(), **kwargs):
+def restore_missing_finger_collisions(robot_prim, urdf):
+    """Session geometry from the selected URDF; preserve authored nonempty colliders."""
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    import trimesh
+    from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Gf
+    from scipy.spatial.transform import Rotation
+    stage = robot_prim.GetStage()
+    model = ET.parse(urdf).getroot()
+    for name in ('gripper', 'jaw'):
+        group = stage.GetPrimAtPath(robot_prim.GetPath().AppendPath(name + '/collisions'))
+        if group and any(p.IsA(UsdGeom.Mesh) for p in Usd.PrimRange(group, Usd.TraverseInstanceProxies())):
+            continue
+        for index, node in enumerate(model.find(f"link[@name='{name}']").findall('collision')):
+            geometry = node.find('geometry/mesh')
+            if geometry is None:
+                raise ValueError('Expected SO101 finger collision mesh')
+            mesh = trimesh.load_mesh(Path(urdf).parent / geometry.get('filename'), process=False)
+            vertices = np.asarray(mesh.vertices) * np.fromstring(geometry.get('scale', '1 1 1'), sep=' ')
+            path = robot_prim.GetPath().AppendPath(f'{name}/URDFCollision_{index}')
+            shape = UsdGeom.Mesh.Define(stage, path)
+            shape.CreatePointsAttr([Gf.Vec3f(*v) for v in vertices])
+            shape.CreateFaceVertexCountsAttr([3] * len(mesh.faces))
+            shape.CreateFaceVertexIndicesAttr(np.asarray(mesh.faces).ravel().tolist())
+            shape.CreateSubdivisionSchemeAttr('none')
+            origin = node.find('origin'); T = np.eye(4)
+            if origin is not None:
+                T[:3, 3] = np.fromstring(origin.get('xyz', '0 0 0'), sep=' ')
+                T[:3, :3] = Rotation.from_euler('xyz', np.fromstring(origin.get('rpy', '0 0 0'), sep=' ')).as_matrix()
+            UsdGeom.Xformable(shape).MakeMatrixXform().Set(Gf.Matrix4d(T.T.tolist()))
+            shape.CreateVisibilityAttr('invisible')
+            UsdPhysics.CollisionAPI.Apply(shape.GetPrim()).CreateCollisionEnabledAttr(True)
+            UsdPhysics.MeshCollisionAPI.Apply(shape.GetPrim()).CreateApproximationAttr('convexHull')
+            material = UsdShade.Material.Get(stage, robot_prim.GetPath().AppendPath('gripper_collider_material'))
+            if material:
+                UsdShade.MaterialBindingAPI.Apply(shape.GetPrim()).Bind(material, materialPurpose='physics')
+
+
+def spawn_workspace_robot(prim_path, cfg, translation=None, orientation=None, visual_links=(), collision_urdf=None, **kwargs):
     from isaaclab.sim.spawners.from_files import spawn_from_usd
     robot = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
     deactivate_legacy_wrist_camera(robot)
+    if collision_urdf:
+        restore_missing_finger_collisions(robot, collision_urdf)
     if visual_links:
         from pxr import UsdGeom
         for link in visual_links:
@@ -79,7 +119,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from isaaclab.envs import ManagerBasedEnvCfg
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
-    from isaaclab.sensors import CameraCfg, FrameTransformerCfg
+    from isaaclab.sensors import Camera, CameraCfg, FrameTransformerCfg
     from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
     import isaaclab.sim as sim
     from ...assets.robots.so101 import SO101_FOLLOWER_CFG
@@ -87,6 +127,28 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from ..profile import pose, render_k
     from ...workflow.tasks import configured
     w=configured(load(workspace), task_definition);p=w['profile'];task=w['task'];root=w['root']
+    class RuntimeCamera(Camera):
+        def _update_poses(self, env_ids):
+            # USD Xform reads remain at the authored pose with Fabric enabled.
+            # For the moving camera read its existing PhysX parent, then compose
+            # the unchanged optical mount. The renderer owns the same hierarchy.
+            if not self.cfg.prim_path.rsplit('/', 1)[0].endswith('/gripper'):
+                return super()._update_poses(env_ids)
+            import torch
+            from isaaclab.utils.math import combine_frame_transforms, convert_camera_frame_orientation_convention
+            context = sim.SimulationContext.instance()
+            if not hasattr(self, '_mount_view'):
+                parent = self.cfg.prim_path.rsplit('/', 1)[0].replace('.*', '*')
+                self._mount_view = context.physics_sim_view.create_rigid_body_view(parent)
+            state = self._mount_view.get_transforms()[env_ids]
+            local_position = torch.tensor(self.cfg.offset.pos, device=self.device, dtype=state.dtype).expand(len(state), -1)
+            local_rotation = torch.tensor(self.cfg.offset.rot, device=self.device, dtype=state.dtype).expand(len(state), -1)
+            position, rotation = combine_frame_transforms(
+                state[:, :3], state[:, [6, 3, 4, 5]], local_position, local_rotation)
+            self._data.pos_w[env_ids] = position
+            self._data.quat_w_world[env_ids] = convert_camera_frame_orientation_convention(
+                rotation, origin=self.cfg.offset.convention, target='world')
+
     @configclass
     class Events:
         reset_episode=EventTermCfg(func=reset_workspace,mode='reset',params={'workspace':w,'random_state':None})
@@ -103,7 +165,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     if w['manifest'].get('builder'):
         from functools import partial
         links = w['manifest']['builder'].get('robot_visual_links', [])
-        scene.robot.spawn.func = partial(spawn_workspace_robot, visual_links=links)
+        scene.robot.spawn.func = partial(spawn_workspace_robot, visual_links=links, collision_urdf=root/'assets/SO101/urdf/so101_isaaclab.urdf')
         for link in links:
             setattr(scene, 'builder_robot_' + link, AssetBaseCfg(
                 prim_path='{ENV_REGEX_NS}/Robot/' + link + '/BuilderVisuals',
@@ -143,7 +205,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
             init_state=RigidObjectCfg.InitialStateCfg(pos=pos,rot=rot)))
     for view,c in p['cameras'].items():
         width,height=c['resolution'];k=render_k(c);pos,rot=pose(c['T_parent_camera'])
-        setattr(scene,'camera_'+view+'view',CameraCfg(
+        setattr(scene,'camera_'+view+'view',CameraCfg(class_type=RuntimeCamera,
             prim_path='{ENV_REGEX_NS}/'+(('Robot/gripper/' if c['parent']=='gripper' else '') + ('Camera_Side' if view=='side' else 'Camera_WorkspaceWrist' if view=='wrist' else 'Camera_'+view)),
             width=width,height=height,data_types=['rgb'],update_latest_camera_pose=True,update_period=0.,
             spawn=sim.PinholeCameraCfg(focal_length=24.,horizontal_aperture=24*width/k[0,0],vertical_aperture=24*height/k[1,1],horizontal_aperture_offset=24*(width/2-k[0,2])/k[0,0],vertical_aperture_offset=24*(k[1,2]-height/2)/k[1,1],clipping_range=(.001,100.),f_stop=0.),
@@ -159,6 +221,8 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
             spawn=sim.PinholeCameraCfg(focal_length=18., horizontal_aperture=36., vertical_aperture=27., clipping_range=(.01, 100.)),
             offset=CameraCfg.OffsetCfg(pos=overview_pos, rot=overview_rot, convention='ros'))
     cfg.actions=ActionsCfg();cfg.observations=ObservationsCfg();cfg.observations.task=TaskObservations(concatenate_terms=False)
+    if task.get('mode') == 'geometry_review':
+        cfg.observations.task = None
     from isaaclab.managers import SceneEntityCfg
     image_template = copy.deepcopy(cfg.observations.policy.side_cam)
     cfg.observations.policy.side_cam = None; cfg.observations.policy.wrist_cam = None
@@ -181,6 +245,10 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
         subtask.grasp.params['object_cfg'] = SceneEntityCfg(task['pick'])
         cfg.observations.subtask_terms = subtask
     cfg.events=Events();cfg.decimation=2;cfg.sim.dt=1/60;cfg.sim.render_interval=2;cfg.sim.device=device
+    if w['manifest'].get('builder'):
+        # Keep commands/cameras at 30 Hz; resolve fingertip contact at 240 Hz.
+        cfg.sim.dt = 1 / 240
+        cfg.decimation = cfg.sim.render_interval = 8
     cfg.workflow_workspace=w
     cfg.workspace_metadata=metadata(w);cfg.workspace_package=str(root)
     return cfg

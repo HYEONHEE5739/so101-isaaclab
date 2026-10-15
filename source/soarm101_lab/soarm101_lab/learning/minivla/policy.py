@@ -4,12 +4,13 @@ import torch
 from .config import MiniVLAConfig
 from .data import RobotPreprocessor
 from .head import ActionHead
-from .train import restore_adapter
+from .train import restore_adapter, require_architecture
 
 class MiniVLA:
     """Public RGB + instruction + canonical state -> absolute action chunk API."""
     def __init__(self, checkpoint):
         ck=torch.load(checkpoint,map_location='cpu',weights_only=True)
+        require_architecture(ck)
         self.cfg=MiniVLAConfig(**ck['config']); self.control_hz=ck['control_hz']
         from .backbone import QwenBackbone
         self.backbone=QwenBackbone(self.cfg); restore_adapter(self.backbone,ck['adapter'])
@@ -25,14 +26,12 @@ class MiniVLA:
         with torch.autocast('cuda',dtype=torch.bfloat16):
             f=self.backbone([images],[instruction])
             chunk=self.head.sample(f,s,noise=noise)
-            ctx,mask=self.head.context(f); grounding=self.head.grounding(ctx,mask)
         torch.cuda.synchronize()
         action=self.pre.denormalize(chunk[0].float().cpu().numpy())
         if not np.isfinite(action).all(): raise FloatingPointError('Policy produced nonfinite action')
         return action,{'latency_s':time.perf_counter()-start,
             'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,
-            'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30,
-            'grounding_uv':grounding[0].float().cpu().tolist()}
+            'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30}
 
 class ActionGuard:
     def __init__(self, lower, upper, max_velocity, hz):

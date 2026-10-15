@@ -45,7 +45,10 @@ def make_export(tmp_path):
            'frames':{'world':{},'robot_base':{'parent':'world','transform':val(np.eye(4).tolist())},
                      'robot_link_gripper':{'parent':'robot_base','transform':val(np.eye(4).tolist())}},
            'robot_model':{'format':'urdf','path':'assets/robot.urdf','joint_names':DEFAULT_MAPPER.metadata()['joint_order'],
-                          'mapping':DEFAULT_MAPPER.metadata()}}
+                          'mapping':DEFAULT_MAPPER.metadata()},
+           'workflow': {'schema': 'so101.scene-workflow/1', 'tasks': [
+               {'id':f'{pick}_to_{target}','pick':pick,'place':target,'instruction':f'Place {pick} in {target}'}
+               for pick in ('cube_red','cube_green','cube_blue') for target in ('cup_a','cup_b')]}}
     (root/'scene.yaml').write_text(yaml.safe_dump(scene));(root/'SCENE.md').write_text('Synthetic test scene')
     xml=ET.Element('mujoco');ET.SubElement(xml,'asset');world=ET.SubElement(xml,'worldbody')
     usd=['#usda 1.0','(defaultPrim = "Scene")','def Xform "Scene" {']
@@ -104,6 +107,10 @@ def test_generic_task_roles(exported):
     for o in s['objects']:
         if o['id']=='cube_red':o['id']='block'
         if o['id']=='cup_a':o['id']='bin'
+    for row in s['workflow']['tasks']:
+        if row['pick']=='cube_red':row['pick']='block'
+        if row['place']=='cup_a':row['place']='bin'
+        row['id']=row['pick']+'_to_'+row['place']
     p,t=builder.profile_and_task(s)
     assert catalog({'profile':p,'task':t})[0]['task_id']=='block_to_bin'
 
@@ -121,6 +128,7 @@ for geom,body in [('builder_camera_case_visual_0','robot_gripper'),('builder_cup
  assert e.model.geom_bodyid[g]==b
  assert e.model.geom_contype[g]==0
 assert e.model.opt.enableflags & e.mj.mjtEnableBit.mjENBL_MULTICCD
+assert e.model.opt.noslip_iterations == 10
 assert e.model.nu==6
 assert len(e.object_indices)==3
 for _ in range(20):e.step(e.home)
@@ -288,3 +296,151 @@ def test_new_execution_usd_limits_and_unchanged_wrist_and_default_prim(tmp_path)
             assert values==[old.GetLowerLimitAttr().Get(),old.GetUpperLimitAttr().Get()]
     assert package.sha(source)==original_hash
     with pytest.raises(ValueError,match='new file'):limit_usd(source,ROBOT_URDF,result)
+
+
+def test_no_workflow_is_fixed_review_not_inferred_task(exported, tmp_path):
+    scene=builder.inspect_export(exported)[2]
+    scene.pop('workflow')
+    from scipy.spatial.transform import Rotation
+    rotation=Rotation.from_euler('x', .02).as_matrix()
+    pose=np.array(scene['objects'][1]['pose']['value']);pose[:3,:3]=rotation
+    scene['objects'][1]['pose']['value']=pose.tolist()
+    p,t=builder.profile_and_task(scene)
+    assert t['mode']=='geometry_review' and t['success'] is None and t['pick'] is None
+    assert catalog({'task':t})==[]
+    state=WorkspaceRandomizer({'profile':p,'task':t}).sample()
+    assert state['cube_positions']=={} and state['sampling']['mode']=='fixed'
+    from soarm101_lab.workflow.tasks import selected
+    with pytest.raises(ValueError,match='workflow metadata'):selected({'task':t})
+    bad=copy.deepcopy(t);bad['success']={'relation':'contained_and_settled'}
+    with pytest.raises(ValueError,match='review contract'):package.validate_task(bad,p)
+
+
+def test_precision_mapping_identity_and_units():
+    from test_precision_calibration import profile, URDF
+    from soarm101_lab.real2sim.precision import PrecisionMapper, fingerprint
+    p=profile()
+    p['identity']['motors']={n:{'id':e['motor']['calibration']['id'],'model':'sts3215'} for n,e in p['joints'].items()}
+    for entry in p['joints'].values():
+        for ref in entry['references']:
+            ref.update(device_identity=copy.deepcopy(p['identity']),motor=copy.deepcopy(entry['motor']))
+    mapping=PrecisionMapper(p).metadata()
+    package.validate_mapping(mapping, URDF)
+    assert mapping==PrecisionMapper(p).metadata()
+    for key,value in [('joint_order',list(reversed(mapping['joint_order']))),('output','degrees')]:
+        bad=copy.deepcopy(mapping);bad[key]=value
+        bad['sha256']=fingerprint({k:v for k,v in bad.items() if k!='sha256'})
+        with pytest.raises(ValueError,match='order/unit'):package.validate_mapping(bad,URDF)
+    bad=copy.deepcopy(mapping);bad['profile']['identity']['calibration_sha256']='changed'
+    bad['sha256']=fingerprint({k:v for k,v in bad.items() if k!='sha256'})
+    with pytest.raises(ValueError,match='identity mismatch'):package.validate_mapping(bad,URDF)
+
+
+@pytest.mark.parametrize('change',['axis','origin','order'])
+def test_robot_contract_change_rejected(exported, change):
+    scene=yaml.safe_load((exported/'scene.yaml').read_text())
+    if change=='order':
+        scene['robot_model']['joint_names'].reverse()
+        (exported/'scene.yaml').write_text(yaml.safe_dump(scene))
+    else:
+        path=exported/'assets/robot.urdf';tree=ET.parse(path)
+        joint=tree.find("joint[@name='shoulder_pan']")
+        joint.find(change).set('xyz','1 0 0')
+        tree.write(path)
+    manifest=yaml.safe_load((exported/'scene_manifest.yaml').read_text())
+    for relative in manifest['files']:manifest['files'][relative]=package.sha(exported/relative)
+    (exported/'scene_manifest.yaml').write_text(yaml.safe_dump(manifest))
+    with pytest.raises(ValueError,match='kinematics|joint order'):builder.inspect_export(exported)
+
+
+def test_review_import_runtime_and_workflow_denial(exported,tmp_path):
+    import subprocess,sys,os
+    scene=yaml.safe_load((exported/'scene.yaml').read_text());scene.pop('workflow')
+    (exported/'scene.yaml').write_text(yaml.safe_dump(scene))
+    manifest=yaml.safe_load((exported/'scene_manifest.yaml').read_text())
+    manifest['files']['scene.yaml']=package.sha(exported/'scene.yaml')
+    (exported/'scene_manifest.yaml').write_text(yaml.safe_dump(manifest))
+    destination=builder.import_scene(exported,registry=tmp_path/'registry')
+    w=package.load(destination)
+    assert w['manifest']['mapper']==DEFAULT_MAPPER.metadata()
+    assert 'cup_print' in (destination/'scene/static.usda').read_text()
+    from soarm101_lab.workflow.artifacts import Registry
+    from soarm101_lab.workflow.operations import Operations
+    registry=Registry(tmp_path/'workflow');artifact=registry.register('workspace',destination)
+    ready,reason=Operations(registry).readiness('source',artifact,str(destination))
+    assert ready=='NOT_READY' and 'Geometry review' in str(reason)
+    code="""
+import sys,numpy as np
+from soarm101_lab.simulation.mujoco_backend import MujocoBackend
+with MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none') as e:
+ assert e.model.opt.noslip_iterations == 10
+ assert e.model.nu==6 and e.object_indices=={} and e.is_success() is None
+ for _ in range(10):e.step(e.home)
+ assert np.isfinite(e.data.qpos).all()
+"""
+    subprocess.run([sys.executable,'-c',code,str(destination),str(tmp_path/'runtime')],check=True,
+                   env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')})
+
+
+def test_review_physics_without_invented_tasks(exported, tmp_path):
+    import os,subprocess,sys
+    scene=yaml.safe_load((exported/'scene.yaml').read_text());scene.pop('workflow')
+    for obj in scene['objects']:
+        if obj['role']=='manipulable_object':obj['physics']={'mass_kg':val(.02),'friction':val(1.),'restitution':val(0.)}
+        elif obj['role'] in ('receptacle','support_surface'):obj['physics']={'friction':val(1.),'restitution':val(0.)}
+    (exported/'scene.yaml').write_text(yaml.safe_dump(scene))
+    manifest=yaml.safe_load((exported/'scene_manifest.yaml').read_text());manifest['files']['scene.yaml']=package.sha(exported/'scene.yaml')
+    (exported/'scene_manifest.yaml').write_text(yaml.safe_dump(manifest))
+    destination=builder.import_scene(exported,registry=tmp_path/'registry');w=package.load(destination)
+    assert w['task']['mode']=='geometry_review' and w['task']['success'] is None
+    assert set(w['task']['dynamic'])=={'cube_red','cube_green','cube_blue'} and len(w['task']['targets'])==2
+    assert catalog(w)==[]
+    state=WorkspaceRandomizer(w,seed=13).sample()
+    for name,point in state['cube_positions'].items():np.testing.assert_allclose(point,np.array(w['profile']['objects'][name]['T_workspace'])[:3,3])
+    physics=json.loads((destination/'physics.json').read_text())
+    assert physics['objects']['cube_red']['mass_kg']==.02
+    assert physics['objects']['cup_a']['collision'] and physics['objects']['cup_a']['kinematic']
+    assert physics['objects']['cube_red']['field_provenance']['mass_kg']==val(.02)
+    bad=copy.deepcopy(w['task']);bad['object_physics']['cube_red']['mass_kg']=-1
+    with pytest.raises(ValueError,match='review object physics'):package.validate_task(bad,w['profile'])
+    code='''
+import sys,numpy as np
+from soarm101_lab.simulation.mujoco_backend import MujocoBackend
+with MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none') as e:
+ assert len(e.object_indices)==3 and e.is_success() is None
+ for name in e.object_indices:
+  assert abs(e.model.body_mass[e.model.body(name).id]-.02)<1e-12
+ for _ in range(200):e.step(e.home)
+ assert np.isfinite(e.data.qpos).all()
+ e.reset(seed=99)
+ for name in e.object_indices:
+  np.testing.assert_allclose(e.get_object_pose(name),e.workspace['profile']['objects'][name]['T_workspace'],atol=1e-9)
+'''
+    subprocess.run([sys.executable,'-c',code,str(destination),str(tmp_path/'runtime')],check=True,
+                   env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')})
+
+
+def test_inclined_workflow_support_preserves_geometry_and_reset(exported):
+    from scipy.spatial.transform import Rotation
+    scene=yaml.safe_load((exported/'scene.yaml').read_text())
+    R=Rotation.from_euler('xy',[.28,-.05],degrees=True).as_matrix()
+    for obj in scene['objects']:
+        if obj['frame']=='world':
+            T=np.array(obj['pose']['value']);T[:3,:]=R@T[:3,:];obj['pose']=val(T.tolist())
+    profile,task=builder.profile_and_task(scene)
+    package.validate_task(task,profile)
+    np.testing.assert_allclose(np.array(profile['workspace']['T_world'])[:3,:3],R)
+    w={'profile':profile,'task':task};assert len(catalog(w))==6
+    states=[WorkspaceRandomizer(w,seed=k).sample() for k in range(5)]
+    assert states[0]['cube_positions']!=states[1]['cube_positions']
+    marker=next(o for o in scene['objects'] if o['id']=='marker')
+    normal=R[:,2];point=np.array(marker['pose']['value'])[:3,3]
+    for state in states:
+        for name,xyz in state['cube_positions'].items():
+            world=R@xyz
+            height=float(normal@(world-point))
+            expected=(profile['objects']['marker']['dimensions_m'][2]+profile['objects'][name]['dimensions_m'][2])/2+task['reset']['clearance_m']
+            assert height==pytest.approx(expected)
+    for obj in scene['objects']:
+        if obj['id']=='marker':obj['pose']['value']=np.diag([1,-1,-1,1]).tolist()
+    with pytest.raises(ValueError,match='face upward'):builder.profile_and_task(scene)

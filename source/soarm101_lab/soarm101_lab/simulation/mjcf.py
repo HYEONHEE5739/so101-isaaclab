@@ -189,11 +189,12 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
         w = configured(w, task_definition)
     p, task = w['profile'], w['task']
     builder_scene = bool(w.get('manifest', {}).get('builder'))
-    if task['success']['relation'] not in ('contained_and_settled','inside_region_and_settled'):
+    review = task.get('mode') == 'geometry_review'
+    if not review and task['success']['relation'] not in ('contained_and_settled','inside_region_and_settled'):
         raise ValueError('Only contained_and_settled supported')
     pick, target = task['pick'], task['place']
-    cube = p['objects'][pick]
-    cup = p['objects'][task['targets'][target]]
+    cube = p['objects'][pick] if not review else None
+    cup = p['objects'][task['targets'][target]] if not review else None
     if not builder_scene and (cube['shape'] != 'box' or cup['shape'] not in ('cup', 'cup_proxy')):
         raise ValueError('Phase 2 requires a box and a cup target')
     workspace_pose = transform(p['workspace']['T_world'])
@@ -204,6 +205,9 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
     solver = {'cone': 'elliptic', 'iterations': '100', 'tolerance': '1e-10', 'impratio': '10'} if physics_profile == 'isaac_matched' else {}
     option = ET.SubElement(scene, 'option', timestep=str(timestep), integrator='implicitfast', gravity='0 0 -9.81', **solver)
     if w.get('manifest', {}).get('builder'):
+        if physics_profile == 'isaac_matched':
+            # Resolve residual tangential slip without inflating material friction.
+            option.set('noslip_iterations', '10')
         # Flat box against cylinder bottom needs a contact manifold to avoid rocking.
         ET.SubElement(option, 'flag', multiccd='enable')
     default = ET.SubElement(scene, 'default')
@@ -233,34 +237,35 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
     support = task['reset']['support_object']
     if support != 'table':
         box(support, p['objects'][support])
-    cube_body = box(pick, cube)
-    ET.SubElement(cube_body, 'freejoint', name='object_free')
-    cube_body.find('geom').set('mass', str(task['physics']['mass_kg']))
-    # Explicit inertia for the free box (compiler never derives robot inertia from visuals).
-    size = np.asarray(cube['dimensions_m'], dtype=float)
-    mass = float(task['physics']['mass_kg'])
-    ET.SubElement(cube_body, 'inertial', pos='0 0 0', mass=str(mass),
-                  diaginertia=numbers(mass / 12 * (size @ size - size**2)))
-    bin_body = ET.SubElement(world, 'body', name=target,
-                            **pose_attrs(workspace_pose @ transform(cup['T_workspace'])))
-    if not builder_scene:
-        h = float(cup['dimensions_m'][2])
-        top = float(cup['dimensions_m'][0]) / 2
-        bottom = float(cup.get('bottom_diameter_m', top * 2)) / 2
-        wall = float(cup['wall_m'])
-        if min(h, bottom, top, wall) <= 0 or wall >= min(bottom, top, h / 2):
-            raise ValueError('Invalid target dimensions')
-        ET.SubElement(bin_body, 'geom', name='bin_bottom', type='cylinder',
-                      pos=numbers([0, 0, -h / 2 + wall / 2]), size=numbers([bottom, wall / 2]), rgba=rgba(cup))
-        # Primitive tapered rings; open top. Same segmented idea as the existing USD cup compiler.
-        for ring in range(4):
-            radius = bottom + (top - bottom) * (ring + .5) / 4 - wall / 2
-            for segment in range(32):
-                angle = 2 * np.pi * segment / 32
-                ET.SubElement(bin_body, 'geom', name=f'bin_wall_{ring}_{segment}', type='box',
-                              pos=numbers([radius * np.cos(angle), radius * np.sin(angle), -h / 2 + (ring + .5) * h / 4]),
-                              quat=numbers([np.cos(angle / 2), 0, 0, np.sin(angle / 2)]),
-                              size=numbers([wall / 2, radius * np.tan(np.pi / 32) * 1.02, h / 8 + .0001]), rgba=rgba(cup))
+    if not review:
+        cube_body = box(pick, cube)
+        ET.SubElement(cube_body, 'freejoint', name='object_free')
+        cube_body.find('geom').set('mass', str(task['physics']['mass_kg']))
+        # Explicit inertia for the free box (compiler never derives robot inertia from visuals).
+        size = np.asarray(cube['dimensions_m'], dtype=float)
+        mass = float(task['physics']['mass_kg'])
+        ET.SubElement(cube_body, 'inertial', pos='0 0 0', mass=str(mass),
+                      diaginertia=numbers(mass / 12 * (size @ size - size**2)))
+        bin_body = ET.SubElement(world, 'body', name=target,
+                                **pose_attrs(workspace_pose @ transform(cup['T_workspace'])))
+        if not builder_scene:
+            h = float(cup['dimensions_m'][2])
+            top = float(cup['dimensions_m'][0]) / 2
+            bottom = float(cup.get('bottom_diameter_m', top * 2)) / 2
+            wall = float(cup['wall_m'])
+            if min(h, bottom, top, wall) <= 0 or wall >= min(bottom, top, h / 2):
+                raise ValueError('Invalid target dimensions')
+            ET.SubElement(bin_body, 'geom', name='bin_bottom', type='cylinder',
+                          pos=numbers([0, 0, -h / 2 + wall / 2]), size=numbers([bottom, wall / 2]), rgba=rgba(cup))
+            # Primitive tapered rings; open top. Same segmented idea as the existing USD cup compiler.
+            for ring in range(4):
+                radius = bottom + (top - bottom) * (ring + .5) / 4 - wall / 2
+                for segment in range(32):
+                    angle = 2 * np.pi * segment / 32
+                    ET.SubElement(bin_body, 'geom', name=f'bin_wall_{ring}_{segment}', type='box',
+                                  pos=numbers([radius * np.cos(angle), radius * np.sin(angle), -h / 2 + (ring + .5) * h / 4]),
+                                  quat=numbers([np.cos(angle / 2), 0, 0, np.sin(angle / 2)]),
+                                  size=numbers([wall / 2, radius * np.tan(np.pi / 32) * 1.02, h / 8 + .0001]), rgba=rgba(cup))
     primary_camera = task.get('observation_cameras', list(p['cameras']))[0]
     camera = p['cameras'][primary_camera]
     if not builder_scene and (camera['parent'] != 'world' or np.any(np.asarray(camera['distortion']) != 0)):

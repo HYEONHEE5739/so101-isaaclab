@@ -21,7 +21,13 @@ class WorkspaceRandomizer:
         self.sample_index = 0
 
     def sample(self):
-        p,t=self.workspace['profile'],self.workspace['task'];r=t['reset'];support=p['objects'][r['support_object']]
+        p,t=self.workspace['profile'],self.workspace['task'];r=t['reset']
+        if t.get('mode') == 'geometry_review':
+            self.sample_index += 1
+            return {'sampling': {'mode': 'fixed', 'seed': self.seed, 'sample_index': self.sample_index},
+                    'frame': 'workspace', 'cube_positions': {n: np.array(p['objects'][n]['T_workspace'])[:3, 3].tolist() for n in t['dynamic']},
+                    'joint_positions': copy.deepcopy(t['robot_initial_joint_rad'])}
+        support=p['objects'][r['support_object']]
         center=np.array(support['T_workspace'])[:3,3];half=np.array(support['dimensions_m'])/2
         placed={};sizes={}
         mode = r.get('mode', 'uniform')
