@@ -151,6 +151,9 @@ def test_hdf5_pre_post_and_initial_only(tmp_path,motion_workspace,mode):
     row=analyze(path)[0];reader=EpisodeReader(row);one=reader.frame(4,'wrist')
     assert row['events']=={'grasp':3,'place':9,'transport':6} and row['physical_success'] is None
     assert one['rgb'][0,0,0]==14 and one['timestamp']==pytest.approx(.4)
+    pair=reader.frame(4,('side','wrist'))
+    assert pair['rgb_frames']['side'][0,0,0]==4 and pair['rgb_frames']['wrist'][0,0,0]==14
+    assert pair['rgb_timestamps']=={'side':pytest.approx(.4),'wrist':pytest.approx(.4)}
     if mode!='initial':
         actual=one['object_poses']['cube_red'];base_world=np.linalg.inv(motion_workspace['profile']['robot_base']['T_world'])
         np.testing.assert_allclose(actual[:3,3],(base_world@np.array([.008,0,.01,1]))[:3],atol=1e-7)
@@ -236,7 +239,11 @@ def test_synchronized_ui_rgb_events_seek_and_responsive_worker(tmp_path,motion_w
     wait_qt(lambda:d.reader is not None and d.frame_job is None and d.job is None)
     assert set(d.trajectory.row['object_paths'])==set(motion_workspace['task']['dynamic'])
     assert d.trajectory.robot is not None and not d.rgb.pixmap().isNull()
-    assert 'grasp' in d.event_label.text() and 'Physical UNKNOWN' in d.metrics.text()
+    assert set(d.event_buttons)=={'grasp','place'} and '물리 판정: 판정 근거 없음' in d.metrics.text()
+    assert all(not label.pixmap().isNull() for label in d.rgb_views.values())
+    assert not d.filter_panel.isVisible() and not d.analysis_panel.isVisible() and not d.advanced_panel.isVisible()
+    d.preview_tabs.setCurrentIndex(1);app.processEvents()
+    assert d.trajectory.width()==d.trajectory.height() and d.trajectory.width()>=320
     original=d.reader.frame;threads=[]
     def slow(index,camera):
         import threading
@@ -250,7 +257,8 @@ def test_synchronized_ui_rgb_events_seek_and_responsive_worker(tmp_path,motion_w
     import threading
     assert all(i!=threading.get_ident() for i in threads)
     assert d.trajectory.payload['index']==2 and d.timeline.value()==2
-    d.camera.setCurrentIndex(d.camera.findData('wrist'));wait_qt(lambda:d.frame_job is None)
+    assert set(d.trajectory.payload['rgb_frames'])=={'side','wrist'}
+    assert d.trajectory.payload['rgb_timestamps']['side']==d.trajectory.payload['rgb_timestamps']['wrist']
     d.rate.setCurrentIndex(3);d.timeline.setValue(0);wait_qt(lambda:d.frame_job is None)
     d.toggle_play();wait_qt(lambda:not d.play_timer.isActive() and d.frame_job is None)
     assert d.timeline.value()==d.timeline.maximum()
@@ -312,3 +320,205 @@ def test_new_builder_object_geometry_is_metadata_driven(tmp_path):
     writer=record_fixture(tmp_path/'source',w,['cube_red','new_manipulable']);row=load_episode(analyze(writer.root)[0]);spec=row['object_specs']['new_manipulable']
     assert spec['dimensions_m']==[.03,.02,.02] and row['object_paths']['new_manipulable'] is not None
     tri=object_triangles(spec,np.eye(4));np.testing.assert_allclose(np.ptp(tri.reshape(-1,3),axis=0),[.03,.02,.02])
+
+
+@pytest.mark.parametrize('storage',['canonical','hdf5'])
+def test_distribution_boundary_matches_reset_and_robot_view(tmp_path,motion_workspace,storage):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.workflow.curation_ui import Plot
+    from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
+    app=QApplication.instance() or QApplication([])
+    if storage=='canonical':
+        path=motion_canonical(tmp_path,motion_workspace,['cube_red']).root
+    else:
+        path=tmp_path/'motion.hdf5';hdf5_motion(path,motion_workspace)
+    row=analyze(path)[0];region=row['placement_region'];profile=motion_workspace['profile'];reset=row['scene_configuration']['reset']
+    support=profile['objects'][reset['support_object']];target=profile['objects'][row['pick_object_id']]
+    center=np.array(support['T_workspace'])[:2,3]
+    limit=np.array(support['dimensions_m'])[:2]/2-np.array(target['dimensions_m'])[:2]/2-reset['margin_m']
+    np.testing.assert_allclose(np.min(region['allowed'],axis=0),center-limit)
+    np.testing.assert_allclose(np.max(region['allowed'],axis=0),center+limit)
+    sampler=WorkspaceRandomizer(motion_workspace)
+    for _ in range(30):
+        point=np.array(sampler.sample()['cube_positions'][row['pick_object_id']])[:2]
+        assert np.all(point>=center-limit) and np.all(point<=center+limit)
+    plot=Plot('scatter');plot.resize(500,350);plot.rows=[row];plot.context_rows=[row]
+    robot,work=plot.project([region['robot_xy'],center])
+    assert robot.y()>work.y()
+    edges=np.diff(np.array([[p.x(),p.y()] for p in plot.project(region['support']+[region['support'][0]])]),axis=0)
+    assert np.all(np.isclose(edges,0).any(axis=1)) # Horizontal/vertical edges, including a rotated robot base.
+    assert 6<robot.x()<plot.width()-6 and 6<robot.y()<plot.height()-6
+    old=plot.project([row['xy']])[0];plot.rows=[]
+    new=plot.project([row['xy']])[0]
+    assert (old.x(),old.y())==pytest.approx((new.x(),new.y()))
+    assert plot.project([])==[]
+    picture=plot.grab().toImage()
+    assert picture.pixelColor(round(robot.x()),round(robot.y())).name()=='#a367db'
+    plot.close()
+
+
+@pytest.mark.parametrize('latest_kind',['source','annotated','datagen'])
+def test_open_latest_uses_latest_completed_data_in_current_workspace(tmp_path,monkeypatch,latest_kind):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    registry=Registry(tmp_path/'registry');workspace={'workspace_id':'current','version':2};artifacts=[]
+    for i,(kind,status,ws,exists) in enumerate([
+        ('source','SUCCEEDED',workspace,True),('annotated','SUCCEEDED',workspace,True),
+        ('datagen','SUCCEEDED',workspace,True),(latest_kind,'SUCCEEDED',workspace,True),
+        ('datagen','SUCCEEDED',{'workspace_id':'other'},True),('annotated','FAILED',workspace,True),
+        ('datagen','SUPERSEDED',workspace,True),('source','SUCCEEDED',workspace,False)]):
+        path=tmp_path/str(i)
+        if exists:path.mkdir()
+        artifacts.append(dict(type=kind,status=status,workspace=ws,path=str(path),created_at=i))
+    monkeypatch.setattr(registry,'all',lambda:artifacts)
+    d=CurationDialog(registry,workspace=workspace);opened=[];monkeypatch.setattr(d,'load_data',opened.append)
+    d.open_latest();assert opened==[str(tmp_path/'3')]
+    d.workspace={'workspace_id':'empty'};d.open_latest();assert len(opened)==1
+    d.close()
+
+
+def test_unified_picker_accepts_file_and_dataset_folder(tmp_path):
+    from PyQt6.QtWidgets import QApplication,QDialog
+    from soarm101_lab.workflow.curation_ui import DatasetPicker
+    app=QApplication.instance() or QApplication([])
+    folder=tmp_path/'canonical';folder.mkdir()
+    for name in ('manifest.json','project_provenance.json'):(folder/name).write_text('{}')
+    file=tmp_path/'source.hdf5';file.touch()
+    for path in (folder,file):
+        picker=DatasetPicker(None,str(tmp_path));picker.selectFile(str(path));picker.accept()
+        assert picker.result()==QDialog.DialogCode.Accepted and picker.selectedFiles()==[str(path)]
+        picker.close()
+
+
+@pytest.mark.parametrize('latest_kind',['annotated','datagen'])
+def test_workflow_entry_opens_latest_stage_and_labels_artifact(tmp_path,motion_workspace,monkeypatch,latest_kind):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    writer=motion_canonical(tmp_path,motion_workspace,['cube_red']);registry=Registry(tmp_path/'registry')
+    registry.register('source',writer.root)
+    selected=export_subset(writer.root,tmp_path/'annotated',['episode_0000'])
+    registry.register('annotated',selected)
+    if latest_kind=='datagen':
+        selected=export_subset(selected,tmp_path/'generated',['episode_0000'])
+        registry.register('datagen',selected)
+    monkeypatch.setattr(ui,'Registry',lambda:registry)
+    panel=ui.WorkflowPanel(lambda *args:None)
+    panel.task_selector.configure(motion_workspace,'source',active_object_ids=['cube_red'])
+    opened=[]
+    def inspect_dialog(dialog):
+        # Process the entry point's queued automatic load, including both frame decoders.
+        wait_qt(lambda:dialog.path is not None and dialog.reader is not None and dialog.job is None and dialog.frame_job is None)
+        assert dialog.path==str(selected) and dialog.workspace==panel.task_selector.workspace_identity
+        assert dialog.kind==latest_kind and dialog.dataset_label.text().startswith('Annotation' if latest_kind=='annotated' else 'DataGen')
+        assert set(dialog.trajectory.payload['rgb_frames'])=={'side','wrist'}
+        opened.append(dialog.path);dialog.close();return 0
+    monkeypatch.setattr(CurationDialog,'exec',inspect_dialog)
+    panel.open_curation();assert opened==[str(selected)]
+    panel.timer.stop();panel.close()
+
+
+@pytest.mark.parametrize('storage',['canonical','hdf5'])
+def test_annotation_markers_jump_to_exact_observation_and_clear(tmp_path,motion_workspace,storage):
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import Qt,QPointF
+    from PyQt6.QtTest import QTest
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry,fingerprint
+    app=QApplication.instance() or QApplication([])
+    if storage=='canonical':
+        path=motion_canonical(tmp_path,motion_workspace,['cube_red']).root
+        times=np.array([12.,12.1,12.4,12.9]);events=dict(approach=0,grasp=1,transport=2,place=3)
+        folder=path/'episode_0000'
+        for name in ('timestamp','action_timestamp','side_timestamp','wrist_timestamp'):
+            if (folder/(name+'.npy')).exists():np.save(folder/(name+'.npy'),times)
+        (folder/'annotation.json').write_text(json.dumps({'schema':'so101.subtask-boundaries/1','frame_count':4,'boundaries':events}))
+    else:
+        path=tmp_path/'annotated.hdf5';hdf5_motion(path,motion_workspace)
+        times=5+np.cumsum(np.linspace(.1,.2,12));events=dict(grasp=3,transport=6,place=9)
+        with h5py.File(path,'a') as h:
+            h['data/demo_0/obs/timestamp'][:,0]=times
+            h['data/demo_0'].attrs['annotation']=json.dumps({'transport':6})
+    before=fingerprint(path);rows=analyze(path)
+    d=CurationDialog(Registry(tmp_path/'registry'));d.error=lambda error:pytest.fail(str(error));d.show();d.loaded(str(path),rows)
+    wait_qt(lambda:d.job is None and d.frame_job is None and d.reader is not None)
+    assert not d.analysis_panel.isVisible() and set(d.event_buttons)==set(events)
+    assert [m['time'] for m in d.timeline.markers]==pytest.approx([times[i]-times[0] for i in events.values()])
+    for name,index in events.items():
+        button=d.event_buttons[name]
+        assert f'{times[index]-times[0]:.2f}s' in button.text() and f'{index+1}F' in button.text()
+        d.toggle_play();assert d.play_timer.isActive()
+        button.click()
+        wait_qt(lambda:d.frame_job is None and d.pending_frame is None)
+        assert not d.play_timer.isActive()
+        assert d.trajectory.frame==d.actions.frame==d.timeline.value()==index
+        assert d.trajectory.payload['timestamp']==pytest.approx(times[index])
+        assert set(d.trajectory.payload['rgb_frames'])=={'side','wrist'}
+        assert button.isChecked() and '시점' in d.event_label.text()
+    for width in (1100,1500):
+        d.resize(width,920);app.processEvents()
+        for name,index in events.items():
+            point=d.timeline.marker_position(index)-QPointF(0,11)
+            QTest.mouseClick(d.timeline,Qt.MouseButton.LeftButton,pos=point.toPoint())
+            wait_qt(lambda:d.frame_job is None and d.pending_frame is None)
+            assert d.trajectory.frame==d.actions.frame==index
+    # Loading another episode must remove the previous episode's annotations.
+    plain={**rows[0],'events':{}}
+    d.rows=[plain];d.select(0);assert not d.event_buttons and not d.timeline.markers
+    wait_qt(lambda:d.job is None and d.frame_job is None and d.reader is not None)
+    assert not d.event_buttons and not d.timeline.markers and '주석 없음' in d.event_label.text()
+    assert fingerprint(path)==before
+    d.close()
+
+
+@pytest.mark.parametrize('inverted',[False,True])
+def test_annotation_marker_uses_native_slider_geometry(inverted):
+    from PyQt6.QtWidgets import QApplication,QStyle,QStyleOptionSlider
+    from soarm101_lab.workflow.curation_ui import EventTimeline
+    app=QApplication.instance() or QApplication([])
+    slider=EventTimeline();slider.resize(600,40);slider.setRange(0,100);slider.setInvertedAppearance(inverted)
+    slider.set_events({'approach':0,'grasp':25,'place':100},dt=.2)
+    for marker in slider.markers:
+        slider.setValue(marker['frame']);option=QStyleOptionSlider();slider.initStyleOption(option)
+        handle=slider.style().subControlRect(QStyle.ComplexControl.CC_Slider,option,QStyle.SubControl.SC_SliderHandle,slider)
+        assert abs(slider.marker_position(marker['frame']).x()-handle.center().x())<=1
+    assert [m['time'] for m in slider.markers]==[0,5,20]
+    slider.close()
+
+
+def test_review_reasons_include_original_values_and_comparison():
+    from soarm101_lab.workflow.curation import flag_outliers
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    rows=[dict(name=str(i),task_id='pick',active_object_ids=['cube'],duration=2.,stop_fraction=.1,command_stop_fraction=.1,jitter=1.,flags=[]) for i in range(12)]
+    rows[-1].update(duration=20.,stop_fraction=.9,command_stop_fraction=.8,jitter=15.)
+    rows[-2]['duration']=.01
+    rows.append(dict(rows[-1],name='other',task_id='other',flags=[]))
+    flag_outliers(rows)
+    assert len(rows[-2]['flag_details'])==4 and not rows[-1]['flags']
+    assert rows[-2]['flag_details'][1]==dict(label='EE 정지 비율 높음',metric='stop_fraction',value=.9,median=.1,
+                                          threshold=pytest.approx(.13),direction='high',group_size=12)
+    reason=CurationDialog.review_text(rows[-2])
+    assert '90.0%' in reason and '13.0%' in reason and '12개' in reason and '불량 확정' in reason
+    assert '미만' in CurationDialog.review_text(rows[-3])
+    assert not CurationDialog.review_text(rows[0])
+
+
+def test_scatter_split_colors_keep_flag_outline_and_exclusion():
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation_ui import Plot
+    app=QApplication.instance() or QApplication([])
+    plot=Plot('scatter');plot.resize(500,350)
+    plot.rows=[dict(name='train',xy=[0,0],split='train',flags=[]),dict(name='val',xy=[1,0],split='val',flags=['check']),
+               dict(name='excluded',xy=[0,1],split='val',flags=[])]
+    plot.context_rows=plot.rows;plot.excluded={'excluded'};plot.selected=1
+    picture=plot.grab().toImage();points=plot.project([r['xy'] for r in plot.rows])
+    assert [picture.pixelColor(round(p.x()),round(p.y())).name() for p in points]==['#55d6b0','#69b9ff','#66717d']
+    assert any(picture.pixelColor(round(points[1].x())+dx,round(points[1].y())+dy).name()=='#efb467'
+               for dx in range(-6,7) for dy in range(-6,7))
+    plot.close()

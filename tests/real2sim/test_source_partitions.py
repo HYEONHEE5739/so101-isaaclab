@@ -128,3 +128,94 @@ def test_curation_split_preview_and_manual_ui(tmp_path,monkeypatch):
     assert dialog.split_plan['counts']=={'train':25,'val':5}
     assert any('val' in dialog.list.item(i).text() for i in range(dialog.list.count()))
     dialog.close()
+
+
+def test_curation_selection_split_preview_state_is_clear_and_not_saved(tmp_path,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation_ui import CurationDialog,SPLIT_COLORS
+    app=QApplication.instance() or QApplication([]);src=tmp_path/'source.hdf5';source_fixture(src,20);before=src.read_bytes()
+    from soarm101_lab.workflow.artifacts import Registry
+    d=CurationDialog(Registry(tmp_path/'registry'))
+    monkeypatch.setattr(d,'run_job',lambda fn,done:done(fn()))
+    d.rows=analyze(src);d.path=str(src);d.kind='source';d.count.setMaximum(20);d.count.setValue(20);d.refresh_list()
+    d.auto_select();assert not d.excluded # Keeping all 20 does not create Train/Val assignments.
+    assert not d.split_plan and not any(r.get('split') for r in d.rows)
+    d.count.setValue(10);d.auto_select();assert len(d.excluded)==10 and not d.split_plan
+    d.train_ratio.setValue(70);d.split_seed.setValue(1);assert d.val_ratio.text()=='검증 30%'
+    d.preview_source_split();assert d.split_plan['counts']=={'train':7,'val':3}
+    assert '저장 전' in d.split_status.text() and '7개' in d.split_status.text() and '3개' in d.split_status.text()
+    assert d.export_button.isEnabled() and d.export_button.text()=='Train / Val 저장' and d.analysis_toggle.isChecked()
+    assert {d.scatter.point_color(r,True) for r in d.rows if r['name'] not in d.excluded}==set(SPLIT_COLORS.values())
+    assignments=dict(d.split_plan['assignments']);d.preview_source_split();assert d.split_plan['assignments']==assignments
+    d.split_seed.setValue(2)
+    assert not d.split_plan and d.export_button.isEnabled() and d.export_button.text()=='데이터 저장'
+    assert not any(r.get('split') for r in d.rows)
+    assert len(d.excluded)==10 # Changing split settings preserves episode selection.
+    d.preview_source_split();d.cancel_source_split();assert not d.split_plan and len(d.excluded)==10
+    d.preview_source_split();d.restore_all()
+    assert not d.excluded and d.count.value()==20 and not d.split_plan
+    assert not any(r.get('split') for r in d.rows) and src.read_bytes()==before
+    d.close()
+
+
+def test_curation_ignores_split_preview_computed_for_old_settings(tmp_path,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([]);src=tmp_path/'source.hdf5';source_fixture(src,20)
+    d=CurationDialog(Registry(tmp_path/'registry'));d.rows=analyze(src);d.path=str(src);queued=[]
+    monkeypatch.setattr(d,'run_job',lambda fn,done:queued.append((fn,done)))
+    d.preview_source_split();fn,done=queued.pop();old_plan=fn();d.train_ratio.setValue(70);done(old_plan)
+    assert not d.split_plan and not any(r.get('split') for r in d.rows)
+    d.close()
+
+
+@pytest.mark.parametrize('mode',['subset','planned','locked'])
+def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(tmp_path,monkeypatch,mode):
+    from PyQt6.QtWidgets import QApplication,QFileDialog,QPushButton
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    original=tmp_path/'source.hdf5';source_fixture(original,6);original_bytes=original.read_bytes()
+    src=Path(export_source_splits(original,tmp_path/'existing_split',.5)['outputs']['train']) if mode=='locked' else original
+    before=src.read_bytes();records,partition=source_catalog(src)
+    registry=Registry(tmp_path/'registry');parent=registry.register('source',str(src))
+    d=CurationDialog(registry);errors=[]
+    monkeypatch.setattr(d,'run_job',lambda fn,done:done(fn()))
+    monkeypatch.setattr(d,'error',errors.append)
+    assert not d.export_button.isEnabled()
+    d.rows=analyze(src);d.path=str(src);d.kind='source'
+    d.set_excluded({d.rows[-1]['name']})
+    names=[r['name'] for r in d.rows if r['name'] not in d.excluded]
+    if mode=='planned':d.preview_source_split()
+    assert not errors and d.export_button.isEnabled()
+    assert [b for b in d.findChildren(QPushButton) if '저장' in b.text()]==[d.export_button]
+    assert d.export_button.text()==('Train / Val 저장' if mode=='planned' else '데이터 저장')
+    dest=tmp_path/('new_split' if mode=='planned' else 'curated.hdf5');requests=[]
+    def choose_destination(*args):
+        requests.append(args);return str(dest),''
+    monkeypatch.setattr(QFileDialog,'getSaveFileName',choose_destination)
+    d.export_button.click()
+    assert not errors and len(requests)==1 and dest.exists()
+    if mode=='planned':
+        result=json.loads((dest/'source_split.json').read_text())
+        assert result['assignments']==d.split_plan['assignments']
+        outputs={s:source_catalog(dest/(s+'.hdf5')) for s in ('train','val')}
+        for split,(saved,saved_partition) in outputs.items():
+            expected={records[n]['source_id'] for n in names if d.split_plan['assignments'][n]==split}
+            assert {r['source_id'] for r in saved.values()}==expected
+            assert saved_partition==d.split_plan['partitions'][split]
+    else:
+        saved,saved_partition=source_catalog(dest)
+        expected={records[n]['source_id'] for n in names}
+        assert {r['source_id'] for r in saved.values()}==expected
+        if partition:
+            assert saved_partition['split']==partition['split']
+            assert saved_partition['parent_partition_sha256']==partition['sha256']
+            assert set(saved_partition['source_ids'])==expected
+        else:assert saved_partition is None
+    registered=[a for a in registry.all() if a['id']!=parent['id']]
+    assert len(registered)==(2 if mode=='planned' else 1)
+    assert all(a['parents']==[parent['id']] for a in registered)
+    assert src.read_bytes()==before and original.read_bytes()==original_bytes
+    d.close()

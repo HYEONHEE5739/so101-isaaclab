@@ -1,0 +1,277 @@
+"""Physics adapters for the common Mimic protocol. No engine import at module load."""
+from collections import defaultdict
+import json
+from pathlib import Path
+import time
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+
+from .dataset import as_pose7,cartesian_actions
+from .mimic import GenerationStopped,configuration
+from ..real2sim.workspaces.grasp import StableGrasp
+from ..so101_joint_mapping import JOINTS
+
+
+class EpisodeBuffer:
+    """One environment owns numeric rows and two bounded MP4 streams."""
+    def __init__(self,adapter,output):
+        self.adapter=adapter;self.output=Path(output);self.rows=[];self.video=None;self.initial=None
+        self.metrics=defaultdict(float);self.queue_peak=0
+
+    def abort(self):
+        if self.video is not None:
+            self.video.abort()
+            self.metrics['encoding_s']+=sum(w.encoding_seconds for w in self.video.writers.values())
+            self.queue_peak=max(self.queue_peak,max((w.queue_peak for w in self.video.writers.values()),default=0))
+            self.video=None
+        self.rows=[]
+
+    def begin(self):self.abort();self.initial=self.adapter.initial_state()
+
+    def append(self,joints,target,observation=None):
+        from ..utils.async_video_writer import VideoEpisode
+        a=self.adapter
+        if self.video is None:self.video=VideoEpisode(self.output,a.hz,18)
+        t=time.perf_counter();state=a.state() if observation is None else observation
+        self.metrics['observation_s']+=time.perf_counter()-t
+        t=time.perf_counter();images=a.images();self.metrics['render_s']+=time.perf_counter()-t
+        a.last_images=images
+        t=time.perf_counter();self.video.append({k+'_cam':v for k,v in images.items()})
+        self.metrics['video_enqueue_s']+=time.perf_counter()-t
+        self.queue_peak=max(self.queue_peak,max((v._queue.qsize() for v in self.video.writers.values()),default=0))
+        self.rows.append({'state':state,'joint_target':np.array(joints,copy=True),'eef_target':np.array(target,copy=True),
+            'grasp':bool(a.tracker.completed),'place':bool(a.place_success())})
+
+    def finish(self,attrs):
+        if not self.rows or self.video is None:raise ValueError('No completed episode frames')
+        n=len(self.rows);a=self.adapter;states=[r['state'] for r in self.rows]
+        q=np.array([s['joint_pos'] for s in states]);targets=np.array([r['joint_target'] for r in self.rows])
+        ee=np.array([s['eef_pose'] for s in states]);goals=np.array([r['eef_target'] for r in self.rows])
+        ts=np.arange(n,dtype=np.float64)/a.hz
+        objects={name:np.array([s['object_poses'][name] for s in states]) for name in states[0]['object_poses']}
+        b=a.base_world;world={name:as_pose7(b@value) for name,value in objects.items()}
+        values={'actions':cartesian_actions(goals,ee[0],targets[:,5]),'joint_targets':targets,'action_timestamp':ts,
+            'obs':{'timestamp':ts[:,None],'policy':{'joint_pos':q,'ee_state':as_pose7(ee)},
+                'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
+                    'object_pose':objects,'subtask_term_signals':{'grasp':np.array([r['grasp'] for r in self.rows],dtype=np.uint8)[:,None]}},
+                'camera_timestamps':{name:ts for name in a.camera_names}},'initial_state':self.initial}
+        events={key:np.array([r[key] for r in self.rows],dtype=np.uint8)[:,None] for key in ('grasp','place')}
+        if a.check_success():events['place'][-1]=1
+        values['obs']['events']=events
+        indices={key:int(np.flatnonzero(signal)[0]) for key,signal in events.items() if np.any(signal)}
+        if not np.any(events['grasp']):
+            values['obs']['datagen_info']['subtask_term_signals']={}
+        if 'grasp' in indices and 'place' in indices:
+            attrs={**attrs,'annotation':json.dumps({'schema':'so101.common-subtasks/1','frame_count':n,**indices,
+                'method':attrs.get('annotation_method','stable_contact_replay'),
+                'timing':'first pre-step observation with event; final post-step placement mapped to last action'})}
+        else:
+            attrs={k:v for k,v in attrs.items() if k!='annotation'}
+        t=time.perf_counter();specs=self.video.finish(n);self.metrics['video_finalize_s']+=time.perf_counter()-t
+        videos={name:{**spec,'file':str((self.video.folder/spec['file']).resolve())} for name,spec in specs.items()}
+        return values,attrs,videos
+
+
+class _RecorderProtocol:
+    def __init__(self,adapter):self.adapter=adapter;self.success=False
+    def reset(self,env_ids):self.adapter.buffer.abort();self.success=False
+    def set_success_to_episodes(self,ids,flags):self.success=bool(flags[0,0])
+    def export_episodes(self,ids):raise RuntimeError('Only the central DatasetWriter may commit episodes')
+
+
+class SimulationAdapter:
+    def __init__(self,workspace,hz,output,seed,stop):
+        self.workspace=workspace;self.hz=hz;self.device='cpu';self.num_envs=1;self.seed=seed;self.stop=stop
+        self.camera_names=workspace['task'].get('observation_cameras',['side','wrist'])
+        if self.camera_names!=['side','wrist']:raise ValueError('Common collection requires Side and Wrist')
+        self.cfg=configuration(workspace['task']['pick'],workspace['task']['place'],seed)
+        self.base_world=np.asarray(workspace['profile']['robot_base']['T_world'])
+        self.buffer=EpisodeBuffer(self,output);self.recorder_manager=_RecorderProtocol(self)
+        self.scene=SimpleNamespace(get_state=lambda is_relative=True:self.initial_state())
+        self.obs_buf={};self.reset_count=0;self.step_index=0;self.pending_pose=None;self.metrics=defaultdict(float)
+        self.tracker=StableGrasp(1/hz,workspace['profile']['objects'][workspace['task']['pick']]['dimensions_m'])
+
+    def _check_stop(self):
+        if self.stop.is_set():raise GenerationStopped()
+
+    def _check_step_limit(self):
+        if self.step_index>=getattr(self,'max_episode_steps',2000):raise TimeoutError('Episode control step limit exceeded')
+
+    def actions_to_gripper_actions(self,actions):return {'tool0':actions[:,-1:]}
+    def get_robot_eef_pose(self,eef_name='tool0',env_ids=None):
+        return torch.as_tensor(self.state()['eef_pose'],dtype=torch.float32)[None]
+    def get_object_poses(self,env_ids=None):
+        return {k:torch.as_tensor(v,dtype=torch.float32)[None] for k,v in self.state()['object_poses'].items()}
+
+    def initial_state(self):
+        s=self.state();world={k:as_pose7(self.base_world@v) for k,v in s['object_poses'].items()}
+        return {'articulation':{'robot':{'root_pose':as_pose7(self.base_world)[None],'root_velocity':np.zeros((1,6)),
+            'joint_position':s['joint_pos'][None],'joint_velocity':s.get('joint_vel',np.zeros(6))[None]}},
+            'rigid_object':{k:{'root_pose':v[None],'root_velocity':s.get('object_velocities_world',{}).get(k,np.zeros(6))[None]} for k,v in world.items()}}
+
+    def update_grasp(self):
+        from scipy.spatial.transform import Rotation
+        s=self.state();ee=s['eef_pose'];obj=s['object_poses'][self.workspace['task']['pick']]
+        rel=np.linalg.inv(ee)@obj;left,right=self.contacts()
+        self.tracker.update(self.step_index,rel[:3,3],Rotation.from_matrix(rel[:3,:3]).as_quat(),ee[:3,3],obj[:3,3],left,right)
+        self.step_index+=1
+
+    def check_success(self):return bool(self.place_success() and self.tracker.completed)
+    def failure_category(self):return 'grasp_failure' if not self.tracker.completed else 'place_failure'
+    def after_reset(self):
+        self.reset_count+=1;self.step_index=0;self.pending_pose=None
+        self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.workspace['task']['pick']]['dimensions_m'])
+        self.buffer.begin();self.obs_buf={}
+        state=self.state()
+        self.initial_configuration={'joint_rad':state['joint_pos'].tolist(),
+            'object_poses_base':{k:v.tolist() for k,v in state['object_poses'].items()}}
+
+    def resolve_target(self,target,noise):
+        """SO101 reference action noise is applied to command-relative pose deltas."""
+        from scipy.spatial.transform import Rotation
+        pose=target.detach().cpu().numpy().astype(float)
+        if not noise:return pose
+        previous=self.pending_pose if self.pending_pose is not None else self.state()['eef_pose']
+        delta=np.r_[pose[:3,3]-previous[:3,3],Rotation.from_matrix(pose[:3,:3]@previous[:3,:3].T).as_rotvec()]
+        with self.random.active():delta+=torch.randn(6).numpy()*noise
+        result=np.eye(4);result[:3,3]=previous[:3,3]+delta[:3]
+        result[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@previous[:3,:3]
+        return result
+
+    def close(self):self.buffer.abort()
+
+
+class MujocoAdapter(SimulationAdapter):
+    def __init__(self,backend,hz,output,seed,stop):
+        super().__init__(backend.workspace,hz,output,seed,stop);self.backend=backend
+        self.base_workspace=np.linalg.inv(backend.world_from_workspace)@self.base_world
+        self.previous=backend.home.copy();self.rng=np.random.default_rng(seed)
+
+    def reset(self,env_id=0):
+        self._check_stop();self.backend.reset(seed=int(self.rng.integers(2**32)))
+        self.previous=self.backend.home.copy();self.after_reset()
+
+    def restore(self,values,attrs):
+        if attrs.get('simulation_backend','mujoco')=='mujoco' and attrs.get('legacy_initial_state') and self.backend.metadata['model_sha256']==json.loads(attrs['legacy_initial_state'])['model_sha256']:
+            self.backend.restore_state(json.loads(attrs['legacy_initial_state']))
+        else:
+            self.backend.reset();self.backend.set_joint_state(values['initial_state']['articulation']['robot']['joint_position'][0])
+            self.backend.data.qvel[self.backend.v_indices]=values['initial_state']['articulation']['robot']['joint_velocity'][0]
+            for name in self.backend.metadata['dynamic_objects']:
+                pose=values['obs']['datagen_info']['object_pose'][name][0]
+                self.backend.set_object_pose(name,self.base_workspace@pose)
+                velocity=values['initial_state']['rigid_object'][name]['root_velocity'][0]
+                _,index=self.backend.object_indices[name]
+                world_pose=self.base_world@pose
+                self.backend.data.qvel[index:index+3]=velocity[:3]
+                self.backend.data.qvel[index+3:index+6]=world_pose[:3,:3].T@velocity[3:]
+            self.backend.mj.mj_forward(self.backend.model,self.backend.data)
+        self.previous=self.backend.data.ctrl[self.backend.actuator_ids].copy();self.after_reset()
+
+    def state(self):
+        s=self.backend.get_state();s['eef_pose']=np.linalg.inv(self.base_workspace)@s['eef_pose']
+        s['object_poses']={k:np.linalg.inv(self.base_workspace)@v for k,v in s['object_poses'].items()}
+        velocities={}
+        for name in self.backend.metadata['dynamic_objects']:
+            body=self.backend._id(self.backend.mj.mjtObj.mjOBJ_BODY,name);twist=np.empty(6)
+            self.backend.mj.mj_objectVelocity(self.backend.model,self.backend.data,self.backend.mj.mjtObj.mjOBJ_BODY,body,twist,0)
+            velocities[name]=np.r_[twist[3:],twist[:3]]
+        s['object_velocities_world']=velocities;return s
+    def images(self):return {name:self.backend.get_rgb(name) for name in self.camera_names}
+    def contacts(self):return self.backend.finger_contacts()
+    def place_success(self):return self.backend.is_success()
+
+    def target_eef_pose_to_action(self,target_eef_pose_dict,gripper_action_dict,action_noise_dict=None,env_id=0):
+        self._check_stop();self._check_step_limit()
+        noise=float((action_noise_dict or {}).get('tool0',0.))
+        pose=self.resolve_target(target_eef_pose_dict['tool0'],noise)
+        grip=float(gripper_action_dict['tool0'].reshape(-1)[0]);self.pending_pose=pose
+        t=time.perf_counter();command=self.backend.solve_pose(self.base_workspace@pose,np.r_[self.previous[:5],grip])
+        self.metrics['ik_s']+=time.perf_counter()-t
+        return torch.as_tensor(command,dtype=torch.float64)
+
+    def step(self,actions):
+        self._check_stop();q=actions[0].detach().cpu().numpy()
+        if hasattr(self,'control'):self.control.before_step(self.worker_index,self.stop)
+        self.buffer.append(q,self.pending_pose)
+        t=time.perf_counter();self.backend.step(q);self.metrics['physics_s']+=time.perf_counter()-t
+        self.previous=q.copy();self.update_grasp();self.obs_buf={}
+        if getattr(self,'preview',None):self.preview(self)
+        return self.obs_buf,None,None,None,None
+
+    def close(self):super().close();self.backend.close()
+
+
+class IsaacAdapter(SimulationAdapter):
+    """One independent episode slot in an Isaac vector scene, stepped by its coordinator."""
+    def __init__(self,native,index,output,seed,stop):
+        super().__init__(native.cfg.workflow_workspace,1/native.step_dt,output,seed,stop)
+        self.native=native;self.index=index
+        from ..utils.so101_kinematics import SO101Kinematics
+        self.kinematics=SO101Kinematics(str(self.workspace['root']/native.cfg.simulation_configuration['robot_model']['urdf']),
+            target_frame_name='tool0',joint_names=list(JOINTS[:5]))
+        robot=native.scene['robot'];self.ids=[robot.joint_names.index(n) for n in JOINTS]
+        self.previous=np.array([self.workspace['task']['robot_initial_joint_rad'][n] for n in JOINTS])
+        self.limits=robot.data.joint_pos_limits[0,self.ids].detach().cpu().numpy()
+        self.last_ik=None;self.action_queue=None
+
+    def reset(self,env_id=0):
+        self._check_stop()
+        others=[i for i in range(self.native.num_envs) if i!=self.index]
+        robot=self.native.scene['robot'];before=robot.data.joint_pos[others].clone()
+        object_before={n:self.native.scene[n].data.root_state_w[others].clone() for n in self.workspace['task']['dynamic']}
+        self.native.reset(env_ids=torch.tensor([self.index],device=self.native.device))
+        if others:
+            if not torch.equal(before,robot.data.joint_pos[others]):raise RuntimeError('Reset changed another environment joint state')
+            if any(not torch.equal(v,self.native.scene[n].data.root_state_w[others]) for n,v in object_before.items()):
+                raise RuntimeError('Reset changed another environment rigid-body state')
+            self.metrics['independent_reset_checks']+=1
+        self.previous=np.array([self.workspace['task']['robot_initial_joint_rad'][n] for n in JOINTS]);self.after_reset()
+
+    def restore(self,values,attrs):
+        self.reset();robot=self.native.scene['robot'];device=self.native.device;ids=torch.tensor([self.index],device=device)
+        q=torch.as_tensor(values['initial_state']['articulation']['robot']['joint_position'],dtype=torch.float32,device=device)
+        velocity=torch.as_tensor(values['initial_state']['articulation']['robot']['joint_velocity'],dtype=torch.float32,device=device)
+        robot.write_joint_state_to_sim(q,velocity,joint_ids=self.ids,env_ids=ids);robot.set_joint_position_target(q,joint_ids=self.ids,env_ids=ids)
+        for name in self.workspace['task']['dynamic']:
+            root=np.array(values['initial_state']['rigid_object'][name]['root_pose'],copy=True)
+            root[:,:3]+=self.native.scene.env_origins[self.index].cpu().numpy()
+            obj=self.native.scene[name];obj.write_root_pose_to_sim(torch.as_tensor(root,dtype=torch.float32,device=device),env_ids=ids)
+            vel=values['initial_state']['rigid_object'][name]['root_velocity']
+            obj.write_root_velocity_to_sim(torch.as_tensor(vel,dtype=torch.float32,device=device),env_ids=ids)
+        self.native.scene.write_data_to_sim();self.native.sim.forward();self.native.scene.update(self.native.physics_dt)
+        self.native.obs_buf=self.native.observation_manager.compute();self.previous=q[0].cpu().numpy().copy();self.after_reset()
+
+    def state(self):
+        from .robot_preview import pose_matrix
+        robot=self.native.scene['robot'];i=self.index
+        root=robot.data.root_pose_w[i].detach().cpu().numpy();base=pose_matrix(root)
+        tool=robot.body_names.index('tool0');ee=pose_matrix(torch.cat([robot.data.body_link_pos_w[i,tool],robot.data.body_link_quat_w[i,tool]]).cpu().numpy())
+        names=self.workspace['task']['dynamic']+list(self.workspace['task']['targets'])
+        objects={n:np.linalg.inv(base)@pose_matrix(self.native.scene[n].data.root_pose_w[i].cpu().numpy()) for n in names}
+        return {'joint_pos':robot.data.joint_pos[i,self.ids].cpu().numpy().copy(),
+            'joint_vel':robot.data.joint_vel[i,self.ids].cpu().numpy().copy(),'eef_pose':np.linalg.inv(base)@ee,'object_poses':objects,
+            'object_velocities_world':{n:torch.cat([self.native.scene[n].data.root_lin_vel_w[i],self.native.scene[n].data.root_ang_vel_w[i]]).cpu().numpy().copy() for n in names}}
+
+    def images(self):
+        return {n:self.native.scene['camera_'+n+'view'].data.output['rgb'][self.index,...,:3].cpu().numpy().copy() for n in self.camera_names}
+    def contacts(self):
+        return [bool(torch.linalg.vector_norm(self.native.scene[n].data.force_matrix_w[self.index,0,0])>1e-4)
+                for n in ('grasp_fixed_contact','grasp_moving_contact')]
+    def place_success(self):
+        from ..real2sim.workspaces.environment import task_success
+        return bool(task_success(self.native,self.workspace)[self.index])
+
+    def target_eef_pose_to_action(self,target_eef_pose_dict,gripper_action_dict,action_noise_dict=None,env_id=0):
+        self._check_stop();self._check_step_limit();pose=self.resolve_target(target_eef_pose_dict['tool0'],float((action_noise_dict or {}).get('tool0',0.)));self.pending_pose=pose
+        from ..simulation.ik import solve_pose,IKFailure
+        t=time.perf_counter();grip=float(gripper_action_dict['tool0'].reshape(-1)[0])
+        try:command,self.last_ik=solve_pose(self.kinematics.forward_kinematics,pose,np.r_[self.previous[:5],grip],self.limits)
+        except IKFailure as exc:self.last_ik=exc.details;raise
+        finally:self.metrics['ik_s']+=time.perf_counter()-t
+        return torch.as_tensor(command,dtype=torch.float64)
+
+    def before_batch_step(self,command):self.buffer.append(command,self.pending_pose)
+    def after_batch_step(self,command):self.previous=np.array(command,copy=True);self.update_grasp();self.obs_buf={}

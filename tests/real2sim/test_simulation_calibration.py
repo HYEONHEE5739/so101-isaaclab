@@ -127,7 +127,7 @@ def test_source_replay_contract_and_fake_hardware_preserve_bound_geometry(bound_
     from soarm101_lab.workflow import mujoco as worker
     from soarm101_lab.real2sim import hardware
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-    monkeypatch.setattr(MujocoBackend,'get_rgb',lambda *args:np.zeros((24,32,3),np.uint8))
+    monkeypatch.setattr(MujocoBackend,'get_rgb',lambda *args:np.zeros((480,640,3),np.uint8))
     w,mappings=bound_workspace
     mapper=precision.mapper_from_metadata(mappings['leader'])
     native=mapper.urdf_to_calibrated(dict(zip(JOINTS,[0,-.2,.3,.1,0,.4])))
@@ -150,20 +150,30 @@ def test_source_replay_contract_and_fake_hardware_preserve_bound_geometry(bound_
     monkeypatch.setattr(hardware,'Leader',Leader)
     monkeypatch.setattr(worker.time,'sleep',lambda *args:None)
     request={'workspace':str(w['root']),'renderer':'none','options':{'port':'FAKE','instruction':'fixture pick',
-        'episodes':1,'episode_time_s':10,'active_object_ids':['cube_red'],'width':32,'height':24}}
+        'episodes':1,'episode_time_s':10,'active_object_ids':['cube_red'],'width':640,'height':480}}
     source=tmp_path/'source';source.mkdir()
     worker.source(request,source,lambda *args:None,Bridge())
-    p=json.loads((source/'dataset/project_provenance.json').read_text())
-    c=p['coordinate_contract']
+    from soarm101_lab.workflow.dataset import EpisodeDataset,validate_dataset
+    reader=EpisodeDataset(source/'dataset.hdf5')
+    validate_dataset(reader)
+    p=reader.args['legacy_provenance'];c=reader.contract
     assert c['hardware_mapping']['profile']['role']=='leader'
     assert c['simulation_model']['simulation_residual']['binding']['role']=='follower'
     assert c['simulation_model']['model_mode']=='precision_bound_residual'
     assert p['scene']['simulation_configuration']==c['simulation_model']
     assert calls==['connect','activate','close']
     monkeypatch.setattr(precision,'active_precision',lambda *args:pytest.fail('Replay consulted active calibration'))
-    replay=tmp_path/'replay';replay.mkdir()
-    result=worker.replay({'workspace':str(w['root']),'input':str(source/'dataset'),'renderer':'none','options':{'realtime':False}},replay,lambda *args:None,None)
-    assert result['passed']
+    from soarm101_lab.workflow.adapters import MujocoAdapter
+    import threading
+    values,attrs,_=reader.episode(reader.names[0])
+    request={'workspace':str(w['root']),'input':str(reader.path),'renderer':'none','options':{'active_object_ids':reader.args['scene_configuration']['active_object_ids']}}
+    with worker._environment(request,tmp_path/'replay',hz=reader.hz) as env:
+        adapter=MujocoAdapter(env.backend,reader.hz,tmp_path/'replay',1,threading.Event())
+        adapter.restore(values,attrs)
+        for index,target in enumerate(values['joint_targets']):
+            np.testing.assert_allclose(adapter.state()['joint_pos'],values['obs']['policy']['joint_pos'][index],atol=1e-9)
+            env.backend.step(target)
+        adapter.close()
 
 
 @pytest.mark.parametrize('complete',[False,True])

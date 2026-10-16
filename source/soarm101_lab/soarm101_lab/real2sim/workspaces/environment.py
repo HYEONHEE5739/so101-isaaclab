@@ -114,7 +114,7 @@ def task_success_details(env, workspace):
 
 
 def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None, simulation=None, coordinates=None):
-    if num_envs!=1:raise ValueError('Workspace Phase 1 supports num_envs=1')
+    if type(num_envs) is not int or num_envs<1:raise ValueError('Positive num_envs required')
     from isaaclab.utils import configclass
     from isaaclab.envs import ManagerBasedEnvCfg
     from isaaclab.scene import InteractiveSceneCfg
@@ -162,7 +162,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     @configclass
     class TaskObservations(ObservationGroupCfg):
         success=ObservationTermCfg(func=task_success,params={'workspace':w})
-    cfg=ManagerBasedEnvCfg();cfg.scene=InteractiveSceneCfg(num_envs=1,env_spacing=2.)
+    cfg=ManagerBasedEnvCfg();cfg.scene=InteractiveSceneCfg(num_envs=num_envs,env_spacing=2.)
     cfg.simulation_configuration=simulation
     scene=cfg.scene
     scene.robot=SO101_FOLLOWER_CFG.copy();scene.robot.prim_path='{ENV_REGEX_NS}/Robot'

@@ -150,3 +150,13 @@ def test_dashboard_navigation_selects_existing_stage(tmp_path, monkeypatch):
     assert panel.navigation.count() == panel.stage.count()
     assert panel.stage.currentData() == 'real_eval'
     panel.close()
+
+
+def test_common_mimic_log_summary_keeps_diagnostic_values():
+    import json
+    line='[MIMIC] '+json.dumps({'env_id':2,'attempt':7,'category':'ik_failure','steps':3,
+        'reason':'long raw diagnostics','ik':{'position_error_m':.001,'position_tolerance_m':.003,
+            'rotation_error_rad':.14,'rotation_tolerance_rad':.12}})
+    summary=LogTail.summary(line)
+    assert 'Env 2' in summary and 'IK 계산 탈락' in summary and '0.140/0.12 rad' in summary
+    assert 'long raw diagnostics' not in summary and LogTail().relevant(line)

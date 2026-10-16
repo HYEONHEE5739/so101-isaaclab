@@ -2,11 +2,12 @@
 import json
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
-                             QLineEdit, QSpinBox, QToolButton, QPushButton, QTableWidget,
+                             QLineEdit, QSpinBox, QComboBox, QToolButton, QPushButton, QTableWidget,
                              QTableWidgetItem, QHeaderView)
 from .option_help import FIELDS, KEYS
 
 LABELS = {'steps': '총 학습 step', 'batch_size': 'Batch 크기', 'num_workers': '데이터 로더 workers',
+          'num_envs': '동시 생성 환경 수', 'max_attempts': '전체 최대 시도 수',
           'save_freq': '체크포인트 저장 간격', 'num_successful_demos': '목표 성공 데이터 수',
           'episodes': 'Task당 평가 에피소드', 'max_steps': '에피소드 최대 step',
           'output': '저장 경로', 'base_model': 'Pretrained 모델', 'generation_seed': '고정 생성 seed',
@@ -59,7 +60,12 @@ class SettingsForm(QWidget):
             help_label = QLabel(description); help_label.setWordWrap(True); help_label.hide()
             help_button.toggled.connect(help_label.setVisible)
             value = values.get(key, default)
-            if kind == '정수':
+            if kind == '환경 수':
+                editor = QComboBox()
+                for count in (1, 2, 4, 8): editor.addItem(str(count), count)
+                editor.setCurrentIndex(editor.findData(value))
+                editor.currentIndexChanged.connect(self.textChanged)
+            elif kind == '정수':
                 editor = QSpinBox()
                 editor.setRange(0 if key in ('num_workers', 'generation_seed') else 1, 2147483647)
                 editor.setValue(value if value is not None else 0)
@@ -105,7 +111,9 @@ class SettingsForm(QWidget):
         for key, (enabled, editor, kind) in self.editors.items():
             if not enabled.isChecked():
                 continue
-            if kind == '정수':
+            if kind == '환경 수':
+                value = editor.currentData()
+            elif kind == '정수':
                 value = editor.value()
             elif kind == 'true/false':
                 value = editor.isChecked()

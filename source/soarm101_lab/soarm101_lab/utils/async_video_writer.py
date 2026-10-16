@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import queue
+import time
 import shutil
 import threading
 import uuid
@@ -23,6 +24,7 @@ class AsyncVideoWriter:
         if self.fps<=0 or not 0<=self.crf<=51 or queue_size<1:
             raise ValueError('Invalid video FPS/CRF/queue size')
         self._queue=queue.Queue(maxsize=queue_size);self._error=None
+        self.encoding_seconds=0.;self.queue_peak=0
         self._frame_index=0;self.frames=0;self._closed=False;self._cancel=threading.Event()
         self._thread=threading.Thread(target=self._worker,name='video-'+self.video_path.stem,daemon=True)
         self._thread.start()
@@ -66,12 +68,16 @@ class AsyncVideoWriter:
                     try:image=self._queue.get(timeout=.05)
                     except queue.Empty:continue
                     if image is None:break
+                    begin=time.perf_counter();self.queue_peak=max(self.queue_peak,self._queue.qsize()+1)
                     frame=av.VideoFrame.from_ndarray(image,format='rgb24')
                     frame.pts=self._frame_index;frame.time_base=1/self.fps
                     for packet in stream.encode(frame):container.mux(packet)
+                    self.encoding_seconds+=time.perf_counter()-begin
                     self._frame_index+=1
                 if not self._cancel.is_set():
+                    begin=time.perf_counter()
                     for packet in stream.encode():container.mux(packet)
+                    self.encoding_seconds+=time.perf_counter()-begin
         except Exception as exc:self._error=exc
 
     def _raise_if_failed(self):

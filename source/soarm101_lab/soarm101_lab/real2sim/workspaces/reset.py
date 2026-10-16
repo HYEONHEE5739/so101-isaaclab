@@ -4,13 +4,13 @@ import numpy as np
 
 
 def source_workspace(workspace, resume=None):
-    """New collection uses continuous XY; resumed collection keeps its recorded policy."""
+    """New collection allows edge-touching XY; resumed collection keeps its recorded policy."""
     from ...workflow.tasks import configured, recorded_scene
     if resume:
         from ...workflow.artifacts import inspect_artifact
         reset = recorded_scene(inspect_artifact('source',resume),workspace)['reset']
     else:
-        reset = {**workspace['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.}
+        reset = {**workspace['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.,'margin_m':0.}
     return configured(workspace,reset=reset)
 
 
@@ -75,12 +75,22 @@ def reset_workspace(env,env_ids,workspace,random_state=None,randomization_seed=N
     from ..profile import pose
     from ..scene import apply_robot_appearance
     from isaaclab.sim import get_current_stage
-    if env.num_envs!=1:raise ValueError('Workspace Phase 1 supports one environment')
     ids=torch.arange(env.num_envs,device=env.device) if env_ids is None else env_ids
     if len(ids)==0:return
+    if random_state is None and len(ids)>1:
+        for index in ids:reset_workspace(env,ids[ids==index],workspace,randomization_seed=randomization_seed)
+        return
     if random_state is None:
-        if not hasattr(env,'_workspace_randomizer'):env._workspace_randomizer=WorkspaceRandomizer(workspace, seed=randomization_seed)
+        index=int(ids[0])
+        if not hasattr(env,'_workspace_randomizers'):env._workspace_randomizers={}
+        if index not in env._workspace_randomizers:
+            seed=workspace['task']['reset']['seed'] if randomization_seed is None else randomization_seed
+            if env.num_envs>1:seed=int(np.random.SeedSequence([seed,index]).generate_state(1)[0])
+            env._workspace_randomizers[index]=WorkspaceRandomizer(workspace,seed=seed)
+        env._workspace_randomizer=env._workspace_randomizers[index]
         random_state=env._workspace_randomizer.sample()
+    elif len(ids)!=1:
+        raise ValueError('An explicit reset state applies to one environment only')
     if not isinstance(random_state,dict) or random_state.get('frame')!='workspace':
         raise ValueError('Expected workspace-local reset state; legacy world reset state is not compatible')
     if set(random_state['cube_positions']) != set(workspace['task']['dynamic']):
@@ -93,7 +103,8 @@ def reset_workspace(env,env_ids,workspace,random_state=None,randomization_seed=N
         obj.write_root_velocity_to_sim(torch.zeros((len(ids),6),device=env.device),env_ids=ids)
     robot=env.scene['robot'];q=torch.tensor([[random_state['joint_positions'][n] for n in robot.joint_names]],device=env.device)
     robot.write_joint_state_to_sim(q,torch.zeros_like(q),env_ids=ids);robot.set_joint_position_target(q,env_ids=ids)
-    apply_robot_appearance(get_current_stage(),workspace['profile'])
+    if not getattr(env,'_workspace_appearance_applied',False):
+        apply_robot_appearance(get_current_stage(),workspace['profile']);env._workspace_appearance_applied=True
 
 
 def datagen_seed(source_seed, requested=None):

@@ -9,6 +9,82 @@ from ..real2sim.workspaces.demo import coordinate_contract
 from .policy import load_policy, observation
 
 
+class EvaluationRecorder:
+    """Completed policy rollouts use the same numeric/video writer as collection."""
+    def __init__(self, native, workspace, backend, checkpoint, output, hz, seed):
+        import threading
+        from .adapters import IsaacAdapter, MujocoAdapter
+        from .dataset import DatasetWriter, recording_args
+        from ..so101_dataset_contract import read_contract, MIMIC_SPACE
+        from .tasks import configured, selected
+        self.backend = backend
+        if backend == 'isaac':
+            self.adapter = IsaacAdapter(native, 0, Path(output).parent, seed, threading.Event())
+        else:
+            self.adapter = MujocoAdapter(native, hz, Path(output).parent, seed, threading.Event())
+        self.adapter.workspace = workspace
+        contract = {**read_contract(checkpoint), 'action_space': MIMIC_SPACE}
+        definition = selected(workspace)
+        scene = configured(workspace, definition, workspace['task']['dynamic'], backend)['scene_configuration']
+        provenance = {'backend': backend, 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
+            'coordinate_contract': contract, 'scene_configuration': scene,
+            'scene': {'task_definition': definition, 'pick': workspace['task']['pick'],
+                'target': workspace['task']['place'], 'dynamic_objects': workspace['task']['dynamic']}}
+        args = recording_args(provenance, {'control_hz': hz})
+        args.update(evaluation_schema='so101.evaluation-episode/1', policy_checkpoint=str(checkpoint), seed=seed)
+        self.writer = DatasetWriter(output, args, contract)
+        self.adapter.buffer.begin()
+
+    def append(self, target, tracker):
+        a = self.adapter
+        a.tracker = tracker
+        if self.backend == 'mujoco':
+            goal = np.linalg.inv(a.base_workspace) @ a.backend.target_pose(target)
+        else:
+            goal = a.kinematics.forward_kinematics(target[:5])
+        a.buffer.append(target, goal)
+
+    def finish(self, row, tracker, max_steps):
+        a = self.adapter
+        a.tracker = tracker
+        grasp = bool(tracker.completed)
+        place = bool(a.place_success())
+        row.update(evaluation_schema='so101.evaluation-episode/1', backend=self.backend,
+            episode_id='demo_0', policy_checkpoint=self.writer.args['policy_checkpoint'],
+            grasp_success=grasp, place_success=place, timeout=bool(not row['success'] and row['steps'] >= max_steps),
+            ik_failure=False, controller_failure=False, episode_duration_s=row['steps'] / a.hz)
+        row['initial_object_configuration'] = {k:v['root_pose'][0].tolist()
+            for k,v in a.buffer.initial['rigid_object'].items()}
+        row['failure_reason'] = '' if row['success'] else 'timeout' if row['timeout'] else 'grasp_failure' if not grasp else 'place_failure'
+        row['success_condition'] = 'backend placement geometry and rest; stable grasp recorded separately'
+        row['episode_dataset'] = str(self.writer.path)
+        attrs = {'success':bool(row['success']), 'success_source':'simulation_place_condition',
+            'failure_reason':row['failure_reason'], 'evaluation':json.dumps(row), 'source_group':'evaluation',
+            'task_definition':json.dumps(self.writer.args['task_definitions'][0]),
+            'scene_configuration':json.dumps(self.writer.args['scene_configuration'])}
+        try:
+            self.writer.commit(*a.buffer.finish(attrs))
+            self.writer.close()
+        finally:
+            a.buffer.abort()
+            self.writer.close(False)
+        return row
+
+    def close(self):
+        self.adapter.buffer.abort()
+        self.writer.close(False)
+
+
+def evaluation_recorder(native, workspace, backend, checkpoint, output, hz, seed, stack):
+    """Legacy one-camera/review workspaces keep their existing evaluation records."""
+    cameras = workspace['task'].get('observation_cameras', [])
+    if cameras != ['side', 'wrist'] or any(workspace['profile']['cameras'][c]['resolution'] != [640,480] for c in cameras):
+        return None
+    recorder = EvaluationRecorder(native,workspace,backend,checkpoint,output,hz,seed)
+    stack.callback(recorder.close)
+    return recorder
+
+
 
 def evaluation_seed(options):
     mode = options.get('eval_seed_mode', 'fixed')
@@ -84,6 +160,8 @@ def evaluate(request):
             atomic(str(request['output']) + '.seed.json', {'seed': used_seed, 'mode': opts.get('eval_seed_mode', 'fixed')})
             env = ManagerBasedEnv(cfg=cfg)
             attach(env)
+            from contextlib import ExitStack
+            recordings = ExitStack()
             try:
                 for definition, ep in [(d, e) for d in definitions for e in range(int(opts.get('episodes', 1)))]:
                     task = definition['language_instruction']
@@ -100,6 +178,9 @@ def evaluate(request):
                         '/World/envs/env_0/Robot/'+link,['/World/envs/env_0/'+pick]) for link in ('gripper','jaw')}
                     from ..real2sim.workspaces.grasp import StableGrasp
                     grasp_tracker=StableGrasp(env.step_dt,w['profile']['objects'][pick]['dimensions_m'])
+                    recorder=evaluation_recorder(env, env._workflow_task_workspace, 'isaac', path,
+                        Path(request['output']).with_suffix('') / f'{definition["task_id"]}_{ep:04d}.hdf5',
+                        1/env.step_dt, used_seed, recordings)
                     from scipy.spatial.transform import Rotation
                     metric_trace=[];latencies=[];inference_latencies=[]
                     for step in range(int(opts.get('max_steps', 300))):
@@ -114,6 +195,7 @@ def evaluate(request):
                         if inference and inference.get('latency_s') is not None:inference_latencies.append(inference['latency_s'])
                         if not torch.isfinite(action).all():
                             raise ValueError('Nonfinite policy action')
+                        if recorder:recorder.append(action[0].detach().cpu().numpy(), grasp_tracker)
                         obs, _ = env.step(action.to(env.device))
                         result, details = task_success_details(env, w)
                         success = bool(result[0])
@@ -132,12 +214,14 @@ def evaluate(request):
                     rows.append({**episode_result(definition, ep, step + 1, success, details),**metric_trace[-1],
                         'inference_latency_s':inference_latencies or None,'action_call_latency_s':latencies,
                         'object_metric_trace':metric_trace})
+                    if recorder:recorder.finish(rows[-1], grasp_tracker, int(opts.get('max_steps',300)))
                     log_evaluation(rows, definition['task_id'])
                     from ..real2sim.workspaces.diagnostics import report_place
                     report_place(env, w)
                     if bridge:
                         bridge.details.update(episode_outcome='성공' if success else '실패', outcome_reason=rows[-1]['outcome_reason']); bridge.status()
             finally:
+                recordings.close()
                 env.close()
         else:
             from ..real2sim.hardware import Follower

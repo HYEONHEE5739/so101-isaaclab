@@ -348,22 +348,14 @@ def test_canonical_curation_preserves_lineage_and_rejects_bad_annotation(tmp_pat
     with pytest.raises(ValueError, match='ordered'): inspect_artifact('annotated', subset)
 
 
-def test_datagen_rejects_unsuccessful_physical_attempt(tmp_path, env, monkeypatch):
-    from soarm101_lab.workflow import episodes, mujoco as worker
-    writer = make_dataset(tmp_path / 'source', env)
-    for entry in writer.manifest['episodes']:
-        (writer.root / entry['path'] / 'annotation.json').write_text(json.dumps({
-            'schema': 'so101.mujoco-subtasks/1', 'frame_count': 4, 'grasp': 1, 'place': 3}))
-    monkeypatch.setattr(episodes, 'load', lambda *args: env.backend.workspace)
-    monkeypatch.setattr(episodes, 'metadata', lambda *args: writer.provenance['workspace'])
-    output = tmp_path / 'generated'; output.mkdir()
-    request = {'input': str(writer.root), 'workspace': 'fixture', 'options': {
-        'instruction': writer.instruction, 'num_successful_demos': 1, 'max_attempts': 1, 'generation_seed': 2027}}
-    report = episodes.datagen(request, output, lambda *args: None, None,
-                             lambda *args: env, worker._preview)
-    assert not report['passed'] and report['successes'] == 0
-    assert report['attempts'] == 1 and not report['is_isaac_mimicgen']
-    assert not json.loads((output / 'dataset/manifest.json').read_text())['episodes']
+def test_datagen_rejects_unsuccessful_physical_attempt():
+    from soarm101_lab.workflow.mimic import GenerationScheduler
+    scheduler=GenerationScheduler(1,1,1);commits=[]
+    attempt=scheduler.claim(0)
+    scheduler.finish(0,attempt,'grasp_failure',{'steps':30},lambda:commits.append(True))
+    assert scheduler.successes==0 and not commits
+    assert scheduler.progress()['failure_breakdown']=={'grasp_failure':1}
+    assert scheduler.claim(0) is None
 
 
 def test_canonical_hub_upload_has_lerobot_at_repository_root(tmp_path):

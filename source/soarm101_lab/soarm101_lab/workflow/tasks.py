@@ -98,7 +98,8 @@ def configured(workspace, definition=None, active_object_ids=None, backend=None,
     reset = reset or workspace.get('scene_configuration',{}).get('reset')
     if reset is not None:
         uniform = {**original,'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.}
-        if reset != original and reset != uniform:
+        edge_uniform = {**uniform,'margin_m':0.}
+        if reset != original and reset != uniform and reset != edge_uniform:
             raise ValueError('Unsupported runtime reset policy')
         w['original_reset'] = original
         w['task']['reset'] = copy.deepcopy(reset)

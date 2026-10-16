@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import os
 import sys
+import threading
+import time
 from collections.abc import Mapping
 
 import numpy as np
@@ -14,6 +16,9 @@ from .base import SimBackend
 from .mjcf import build_scene, transform
 from ..so101_joint_mapping import JOINTS, POLICY_UNITS, RobotCoordinates
 from ..real2sim.workspaces.reset import WorkspaceRandomizer
+from .ik import IKFailure
+
+_RENDER_LOCK=threading.Lock()
 
 
 def configure_rendering(backend):
@@ -41,7 +46,8 @@ def configure_rendering(backend):
 class MujocoBackend(SimBackend):
     def __init__(self, output_dir, workspace=None, *, render_backend='none', width=320, height=240,
                  timestep=.002, decimation=10, task_definition=None, full_workspace=False,
-                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None):
+                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None,
+                 shared_backend=None):
         if any(n.split('.')[0] in ('isaaclab', 'omni', 'pxr') for n in sys.modules):
             raise RuntimeError('Run MuJoCo in an independent worker without Isaac/Omniverse/USD imports')
         configure_rendering(render_backend)
@@ -53,13 +59,22 @@ class MujocoBackend(SimBackend):
         self.closed = False
         self.width, self.height = width, height
         if simulation_configuration is not None:identity_sim=simulation_configuration['identity_sim']
-        self.scene_path, self.workspace, self.metadata = build_scene(
-            output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
-            reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'))
-        if identity_sim: self.metadata['simulation_joint_frame'] = 'urdf'
-        if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
-        self.model = mujoco.MjModel.from_xml_path(str(self.scene_path))
+        if shared_backend is None:
+            self.scene_path, self.workspace, self.metadata = build_scene(
+                output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
+                reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'))
+            if identity_sim:self.metadata['simulation_joint_frame']='urdf'
+            if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
+            self.model = mujoco.MjModel.from_xml_path(str(self.scene_path))
+        else:
+            self.scene_path=shared_backend.scene_path;self.workspace=copy.deepcopy(shared_backend.workspace)
+            self.metadata=copy.deepcopy(shared_backend.metadata);self.model=shared_backend.model
+            self.width,self.height=shared_backend.width,shared_backend.height
+            decimation=shared_backend.decimation
         self.data = mujoco.MjData(self.model)
+        self._fk_data=mujoco.MjData(self.model);self._ik_data=mujoco.MjData(self.model)
+        self._render_thread=None;self.last_ik=None
+        self.render_metrics={'render_execute_s':0.,'render_wait_s':0.}
         self.decimation = decimation
         self.limits = np.asarray(self.metadata['joint_limits_rad'])
         self.home = np.array([self.workspace['task']['robot_initial_joint_rad'][n] for n in JOINTS])
@@ -246,7 +261,7 @@ class MujocoBackend(SimBackend):
 
     def target_pose(self, joints):
         """FK on scratch data; never modifies the running physical state."""
-        scratch = self.mj.MjData(self.model)
+        scratch = self._fk_data
         scratch.qpos[:] = self.data.qpos
         scratch.qpos[self.q_indices] = self._target(joints)
         self.mj.mj_forward(self.model, scratch)
@@ -254,23 +269,18 @@ class MujocoBackend(SimBackend):
 
     def solve_pose(self, pose, seed, position_tolerance=.003, rotation_tolerance=.12):
         """Bounded 5-axis IK. Unreachable 6D poses are rejected, never silently accepted."""
-        from scipy.optimize import least_squares
+        from .ik import solve_pose
         goal = self.world_from_workspace @ transform(pose)
-        scratch = self.mj.MjData(self.model)
+        scratch = self._ik_data
         scratch.qpos[:] = self.data.qpos
         q = self._target(seed).copy()
-        def residual(arm):
+        def forward(arm):
             scratch.qpos[self.q_indices] = np.r_[arm, q[5]]
             self.mj.mj_forward(self.model, scratch)
-            position = scratch.site_xpos[self.eef_id] - goal[:3, 3]
-            rotation = Rotation.from_matrix(goal[:3, :3] @ scratch.site_xmat[self.eef_id].reshape(3, 3).T).as_rotvec()
-            return np.r_[position, .04 * rotation]
-        fitted = least_squares(residual, q[:5], bounds=(self.limits[:5, 0], self.limits[:5, 1]),
-                               max_nfev=80, ftol=1e-8, xtol=1e-8, gtol=1e-8)
-        error = residual(fitted.x)
-        if np.linalg.norm(error[:3]) > position_tolerance or np.linalg.norm(error[3:]) / .04 > rotation_tolerance:
-            raise ValueError('Unreachable target pose: position/rotation IK residual exceeded')
-        q[:5] = fitted.x
+            actual=np.eye(4);actual[:3,3]=scratch.site_xpos[self.eef_id];actual[:3,:3]=scratch.site_xmat[self.eef_id].reshape(3,3)
+            return actual
+        try:q,self.last_ik=solve_pose(forward,goal,q,self.limits,position_tolerance,rotation_tolerance,frame='world')
+        except IKFailure as exc:self.last_ik=exc.details;raise
         return self._target(q)
 
     def _snapshot(self):
@@ -299,6 +309,17 @@ class MujocoBackend(SimBackend):
         return self.get_state()
 
     def get_rgb(self, camera_name=None):
+        owner=threading.get_ident()
+        if self._render_thread is not None and self._render_thread!=owner:raise RuntimeError('Renderer used outside its owning thread')
+        self._render_thread=owner
+        started=time.perf_counter()
+        with _RENDER_LOCK:
+            self.render_metrics['render_wait_s']+=time.perf_counter()-started
+            started=time.perf_counter()
+            try:return self._get_rgb(camera_name)
+            finally:self.render_metrics['render_execute_s']+=time.perf_counter()-started
+
+    def _get_rgb(self, camera_name=None):
         self._open()
         camera_name = camera_name or self.metadata.get('primary_camera','side')
         if camera_name != self.metadata.get('primary_camera','side') and camera_name not in self.metadata.get('cameras', {}):
@@ -309,25 +330,20 @@ class MujocoBackend(SimBackend):
             self.renderer = self.mj.Renderer(self.model, height=self.height, width=self.width)
             # Refresh after construction before querying context-specific GL metadata.
             self.renderer._gl_context.make_current()
-            from OpenGL.GL import GL_RENDERER, GL_VENDOR, glGetString
-            vendor, renderer = glGetString(GL_VENDOR), glGetString(GL_RENDERER)
-            if vendor is None or renderer is None:
-                # Some PyOpenGL wrappers select GLX entry points even with EGL.
-                # Query through the platform's GL library for the current context.
-                import ctypes
-                library = ctypes.CDLL(ctypes.util.find_library('OpenGL') or 'libGL.so.1')
-                query = library.glGetString
-                query.argtypes = [ctypes.c_uint]
-                query.restype = ctypes.c_char_p
-                vendor, renderer = query(GL_VENDOR), query(GL_RENDERER)
-                if vendor is None and self.render_backend in ('egl', 'software-egl'):
-                    egl = ctypes.CDLL(ctypes.util.find_library('EGL') or 'libEGL.so.1')
-                    egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
-                    egl.eglGetProcAddress.restype = ctypes.c_void_p
-                    address = egl.eglGetProcAddress(b'glGetString')
-                    if address:
-                        query = ctypes.CFUNCTYPE(ctypes.c_char_p, ctypes.c_uint)(address)
-                        vendor, renderer = query(GL_VENDOR), query(GL_RENDERER)
+            # PyOpenGL's cached GLX wrapper can segfault in an EGL worker thread.
+            # Resolve the function from this context's EGL dispatch instead.
+            if self.render_backend in ('egl','software-egl'):
+                library=ctypes.CDLL(ctypes.util.find_library('EGL') or 'libEGL.so.1')
+                library.eglGetProcAddress.argtypes=[ctypes.c_char_p]
+                library.eglGetProcAddress.restype=ctypes.c_void_p
+                address=library.eglGetProcAddress(b'glGetString')
+                if not address:raise RuntimeError('EGL glGetString unavailable')
+                query=ctypes.CFUNCTYPE(ctypes.c_char_p,ctypes.c_uint)(address)
+            else:
+                library=ctypes.CDLL(ctypes.util.find_library('OSMesa'))
+                query=library.glGetString
+                query.argtypes=[ctypes.c_uint];query.restype=ctypes.c_char_p
+            vendor,renderer=query(0x1F00),query(0x1F01)
             if vendor is None or renderer is None:
                 raise RuntimeError('Active renderer did not provide GL vendor/renderer metadata')
             self.metadata['render_context'] = {
@@ -339,6 +355,7 @@ class MujocoBackend(SimBackend):
                 name in renderer_name for name in ('llvmpipe', 'softpipe', 'software', 'swrast'))
             if self.render_backend == 'software-egl' and not self.metadata['render_context']['software']:
                 raise RuntimeError('Software rendering requested but GL renderer is not recognized as software')
+        self.renderer._gl_context.make_current()
         self.renderer.update_scene(self.data, camera=camera_name)
         rgb = self.renderer.render().copy()
         if self.metadata.get('render_profile') == 'so101.mujoco-rgb/2':
@@ -352,11 +369,12 @@ class MujocoBackend(SimBackend):
         return rgb
 
     def close(self):
+        if self.renderer is not None and self._render_thread!=threading.get_ident():raise RuntimeError('Close renderer on its owning thread')
         if self.viewer is not None:
             self.viewer.close()
             self.viewer = None
         if self.renderer is not None:
-            self.renderer.close()
+            with _RENDER_LOCK:self.renderer.close()
             self.renderer = None
         self.closed = True
 

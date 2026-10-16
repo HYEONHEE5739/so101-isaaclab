@@ -32,6 +32,10 @@ def combine(previous, segment):
     if read_contract(previous)!=read_contract(segment):
         raise ValueError('Resume calibration/robot/coordinate contract differs; refusing to mix episode models')
     segment = Path(segment)
+    with h5py.File(segment,'r') as recorded:
+        common=json.loads(recorded['data'].attrs.get('env_args','{}')).get('dataset_schema')=='so101.common-episode/2'
+    if common:
+        return _combine_common(previous,segment)
     temporary = segment.with_suffix('.merging.hdf5')
     try:
         with h5py.File(previous, 'r') as old, h5py.File(segment, 'r') as new, h5py.File(temporary, 'w') as out:
@@ -63,6 +67,42 @@ def combine(previous, segment):
         os.replace(temporary, segment)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _combine_common(previous, segment):
+    """Normalize legacy inputs before appending them to a new common recording."""
+    import uuid
+    from .dataset import DatasetWriter, EpisodeDataset, migrate
+    from ..so101_dataset_contract import sidecar
+    old=EpisodeDataset(previous);new=EpisodeDataset(segment)
+    if old.args.get('source_partition')!=new.args.get('source_partition'):
+        raise ValueError('Resume Source Partition differs; refusing Train/Validation mixture')
+    scenes=[r.args.get('scene_configuration') for r in (old,new)]
+    if any(scenes) and (not all(scenes) or scenes[0]['active_object_ids']!=scenes[1]['active_object_ids']):
+        raise ValueError('Resume active object set differs or is unknown')
+    temporary=segment.with_name(segment.stem+'.resume-'+uuid.uuid4().hex+'.hdf5')
+    imported=segment.with_name(segment.stem+'.import-'+uuid.uuid4().hex+'.hdf5')
+    writer=None
+    try:
+        if not old.common:old=EpisodeDataset(migrate(previous,imported))
+        args={**new.args,'resume_lineage':{'previous':str(Path(previous).resolve()),'new_segment':str(segment.resolve())}}
+        writer=DatasetWriter(temporary,args,new.contract)
+        for reader in (old,new):
+            from .episodes import source_catalog
+            records=source_catalog(reader.path,allow_unknown=True)[0]
+            for name in reader.names:
+                values,attrs,videos=reader.episode(name)
+                if not attrs.get('source_lineage') and name in records:attrs['source_lineage']=json.dumps(records[name])
+                videos={key:{**spec,'file':str(reader.path.parent/spec['file'])} for key,spec in videos.items()}
+                writer.commit(values,attrs,videos)
+        writer.close();os.replace(temporary,segment)
+    finally:
+        if writer:writer.close(False)
+        sidecar(temporary).unlink(missing_ok=True)
+        # Only these newly created import intermediates belong to this operation.
+        imported.unlink(missing_ok=True);sidecar(imported).unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(imported.parent/(imported.stem+'.videos'),ignore_errors=True)
 
 
 def deferred_interrupt():

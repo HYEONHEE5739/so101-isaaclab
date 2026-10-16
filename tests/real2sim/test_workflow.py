@@ -33,12 +33,14 @@ def test_source_uniform_reset_resume_and_isaac_dataset_binding(published,tmp_pat
     from soarm101_lab.real2sim.workspaces.demo import verify_dataset
     from soarm101_lab.workflow.tasks import configured
     original=load(published[3]);new=source_workspace(configured(original))
-    for name,w in [('old',configured(original)),('new',new)]:
+    legacy=configured(original,reset={**original['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.})
+    for name,w in [('old',configured(original)),('legacy_uniform',legacy),('new',new)]:
         path=tmp_path/(name+'.hdf5');source_fixture(path,4,w)
         bound,_=verify_dataset(path,published[3])
         resumed=source_workspace(original,path)
         assert bound['task']['reset']==w['task']['reset']==resumed['task']['reset']
     assert original['task']['reset']['mode']=='four_anchors' and new['task']['reset']['mode']=='uniform'
+    assert new['task']['reset']['margin_m']==0. and legacy['task']['reset']['margin_m']==original['task']['reset']['margin_m']
 
 
 def test_contract_semantics_and_mapping_rejection(published):

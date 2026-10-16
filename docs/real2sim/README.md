@@ -1,5 +1,11 @@
 # SO-101 Real2Sim Documentation
 
+2026-10-16: Workspace Source/Annotation/DataGen은 두 엔진 모두 공통 HDF5 + Side/Wrist640×480 H.264
+형식이며, DataGen은 공식 Isaac Lab Mimic1.0.15 공통 core를 사용한다. Backend를 바꾸면 자동 Import와
+물리 replay 검증을 거친다. 환경 수1/2/4/8, 실패 종류별 통계, 완료 데이터 중지/Resume을 지원한다.
+계약·실행 흐름·이전 형식 지원은 [DATA_FLOW.md](DATA_FLOW.md#통합-episode-계약--2026-10-16)를 참조한다.
+
+
 이 폴더는 현재 `so101-isaaclab`의 Real2Sim / Workspace / imitation-learning workflow를 설명하는 **living documentation**이다.
 
 과거 Phase별 작업지시서와 audit 보고서는 현재 구조에 흡수했다. 세부 과거 기록이 필요하면 Git history를 본다.
@@ -30,6 +36,14 @@
 ## 실행 진입점
 
 ### Real2Sim UI
+
+GUI는 `lerobot-arena`와 별도인 `.venv-real2sim-ui` 패키지를 사용한다.
+Dataset Curation의 Builder 모델 계약 확인에는 PyYAML, MP4 재생에는 PyAV(`av`)가 필요하다.
+GUI 의존성을 설치·보완할 때는 아래 Python을 명시한다. conda 환경에 설치해도 GUI 환경에는 적용되지 않는다.
+
+```bash
+.venv-real2sim-ui/bin/python -m pip install -r scripts/real2sim/requirements-ui.txt
+```
 
 ```bash
 .venv-real2sim-ui/bin/python scripts/real2sim/real2sim_ui.py

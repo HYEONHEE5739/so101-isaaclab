@@ -14,9 +14,13 @@ from ..so101_joint_mapping import JOINTS, POLICY_UNITS
 
 
 class EpisodeWriter:
-    def __init__(self, root, env, instruction, video_crf=None):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=False)
+    def __init__(self, root, env, instruction, video_crf=None,storage='legacy'):
+        self.common=storage=='common';self.dataset_writer=None
+        self.root = Path(root).with_suffix('.hdf5') if self.common else Path(root)
+        if self.common:
+            if self.root.exists():raise FileExistsError(self.root)
+            self.root.parent.mkdir(parents=True,exist_ok=True)
+        else:self.root.mkdir(parents=True, exist_ok=False)
         self.env = env
         self.rows = []
         self.video = None
@@ -48,6 +52,21 @@ class EpisodeWriter:
 
     def resume(self, source):
         source = Path(source).resolve()
+        if self.common:
+            from .dataset import EpisodeDataset,DatasetWriter,recording_args
+            previous=EpisodeDataset(source)
+            if previous.args['workspace']!=self.provenance['workspace'] or previous.contract!=self.provenance['coordinate_contract']:
+                raise ValueError('Resume Workspace/calibration/model differs')
+            if previous.args.get('source_partition'):raise ValueError('Cannot append new Source to an immutable partition')
+            self.dataset_writer=DatasetWriter(self.root,recording_args(self.provenance,self.manifest),self.provenance['coordinate_contract'])
+            records=source_catalog(source,allow_unknown=True)[0]
+            for old in previous.names:
+                values,attrs,videos=previous.episode(old)
+                if not attrs.get('source_lineage') and old in records:attrs['source_lineage']=json.dumps(records[old])
+                if not previous.legacy:videos={k:{**v,'file':str(previous.path.parent/v['file'])} for k,v in videos.items()}
+                name=self.dataset_writer.commit(values,attrs,videos)
+                self.manifest['episodes'].append({'id':name,'path':name})
+            self.provenance['resumed_from']=str(source);return
         manifest = json.loads((source / 'manifest.json').read_text())
         provenance = json.loads((source / 'project_provenance.json').read_text())
         from .tasks import recorded_scene
@@ -77,17 +96,21 @@ class EpisodeWriter:
         self.flush_manifest()
 
     def close(self):
+        self._close_video()
+        if self.dataset_writer is not None:self.dataset_writer.close()
+
+    def _close_video(self):
         if self.video is not None:
             self.video.abort(); self.video = None
 
     def begin(self):
-        self.close()
+        self._close_video()
         self.rows = []
         self.initial = self.env.backend.get_initial_state()
 
     def append(self, observation, model_target, requested_target=None):
         from ..utils.async_video_writer import VideoEpisode
-        if self.video is None:self.video=VideoEpisode(self.root,self.env.hz,self.video_crf)
+        if self.video is None:self.video=VideoEpisode(self.root.parent if self.common else self.root,self.env.hz,self.video_crf)
         images=observation.get('camera_images')
         if images is None:images={'side':observation['images'][0]}
         if set(images)!=set(self.manifest['cameras']):raise ValueError('Recorded camera set differs')
@@ -107,6 +130,20 @@ class EpisodeWriter:
     def save(self, success, validation_only=False, success_source='unknown'):
         if not self.rows:
             raise ValueError('Cannot save an empty episode')
+        if self.common:
+            from .dataset import DatasetWriter,recording_args,recorded_mujoco_episode
+            args=recording_args(self.provenance,self.manifest)
+            if self.dataset_writer is None:self.dataset_writer=DatasetWriter(self.root,args,self.provenance['coordinate_contract'])
+            else:self.dataset_writer.args.update(args)
+            specs=self.video.finish(len(self.rows));videos={name+'_cam':{**s,'file':str((self.video.folder/s['file']).resolve())} for name,s in specs.items()}
+            values=recorded_mujoco_episode(self.env,self.rows)
+            logical=f'episode_{len(self.manifest["episodes"]):04d}'
+            attrs={'episode_id':logical,'source_group':self.provenance['source_group_prefix']+'/'+logical,
+                'success':bool(success),'validation_only':validation_only,'success_source':success_source,
+                'legacy_initial_state':json.dumps(self.initial),'task_definition':json.dumps(self.provenance['scene']['task_definition']),
+                'scene_configuration':json.dumps(self.provenance['scene_configuration'])}
+            name=self.dataset_writer.commit(values,attrs,videos)
+            self.manifest['episodes'].append({'id':name,'path':name});self._close_video();self.begin();return name
         name = f'episode_{len(self.manifest["episodes"]):04d}'
         folder = self.video.folder
         try:videos=self.video.finish(len(self.rows))
@@ -150,6 +187,7 @@ class EpisodeWriter:
 
     def flush_manifest(self):
         self.provenance['coordinates'] = self.env.coordinates.metadata()
+        if self.common:return
         atomic(self.root / 'project_provenance.json', self.provenance)
         # Publish the episode index last, after finalized videos, numeric arrays and provenance.
         atomic(self.root / 'manifest.json', self.manifest)
@@ -190,6 +228,13 @@ def validate_partition_episode(partition,lineage,input_evidence=None):
                 or proof.get('verification')!='source_only_input' or not proof.get('sha256') or not ids or not set(ids).issubset(p['source_ids'])
                 or proof.get('evidence_sha256')!=fingerprint({k:v for k,v in proof.items() if k!='evidence_sha256'})):
             raise ValueError('Generated Source Partition input/lineage is unverifiable')
+    elif lineage.get('kind')=='mimic_segments':
+        segments=lineage.get('segments',[])
+        if not segments or lineage.get('partition_sha256')!=p['sha256']:raise ValueError('Mimic segment evidence missing')
+        for segment in segments:
+            original=segment.get('source',{})
+            if original.get('kind')!='source_episode':raise ValueError('Unknown Mimic subtask Source')
+            validate_partition_episode(p,original)
     else:raise ValueError('Unknown Source lineage kind')
 
 
@@ -328,6 +373,29 @@ def split_episodes(eligible,splits=None,require_validation=True):
         recorded={e['id']:e['split'] for e in eligible}
         if splits is not None and splits!=recorded:raise ValueError('Explicit Source split cannot be overwritten')
         splits=recorded
+    elif any((e.get('source_lineage') or {}).get('kind')=='mimic_segments' for e in eligible):
+        # Different subtask combinations may share one original demonstration.
+        # Assign connected Source components together before any train/val split.
+        parent=list(range(len(eligible)));owner={}
+        def find(index):
+            while parent[index]!=index:
+                parent[index]=parent[parent[index]];index=parent[index]
+            return index
+        for index,entry in enumerate(eligible):
+            lineage=entry.get('source_lineage') or {}
+            sources=[s.get('source',{}) for s in lineage.get('segments',[])] if lineage.get('kind')=='mimic_segments' else [lineage]
+            if not sources or any(s.get('kind')!='source_episode' for s in sources):
+                raise ValueError('Unknown original Source lineage cannot be split independently')
+            keys={entry['group_id']}
+            for source in sources:
+                keys.add(source['source_id']);keys.update('group:'+g for g in source['source'].get('groups',[]))
+            for key in keys:
+                if key in owner:parent[find(index)]=find(owner[key])
+                owner[key]=index
+        components={}
+        for index,entry in enumerate(eligible):components.setdefault(find(index),[]).append(entry['group_id'])
+        for index,entry in enumerate(eligible):
+            entry['source_group']=entry['group_id'];entry['group_id']='sources:'+min(components[find(index)])
     groups = sorted({e['group_id'] for e in eligible})
     if splits is None:
         if require_validation and len(groups) < 2:
@@ -569,93 +637,10 @@ def annotate(request, output, publish, bridge, environment_factory, preview):
     return {'passed': bool(accepted), 'dataset': str(destination), 'accepted': len(accepted), 'rejected': rejected}
 
 
-def datagen(request, output, publish, bridge, environment_factory, preview):
-    """Object-relative retargeting with bounded IK and physical success filtering."""
-    from ..learning.minivla.data import load_manifest
-    from ..real2sim.workspaces.reset import datagen_seed
-    source = Path(request['input']); provenance = json.loads((source / 'project_provenance.json').read_text())
-    if request.get('workspace') and provenance['workspace'] != metadata(load(request['workspace'])):
-        raise ValueError('Dataset workspace identity differs')
-    from .tasks import recorded_scene
-    inherited = recorded_scene({'provenance':provenance},load(request['workspace']))
-    request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids'],
-        'task_definition':inherited['task_definition'], 'physics_profile':provenance['scene'].get('physics_profile','legacy_urdf'),
-        'full_workspace':provenance['scene'].get('full_workspace',False),
-        'width':provenance['scene']['camera']['resolution'][0], 'height':provenance['scene']['camera']['resolution'][1],
-        'instruction':inherited['task_definition']['language_instruction']}}
-    manifest = load_manifest(source / 'manifest.json')
-    options = request['options']
-    count = int(options.get('num_successful_demos', 10))
-    seed = datagen_seed(load(request['workspace'])['task']['reset']['seed'], options.get('generation_seed'))
-    rng = np.random.default_rng(seed)
-    attempts = []
-    with environment_factory(request, output, provenance['coordinates'], manifest['control_hz']) as env:
-        emit = preview(env, request, publish)
-        writer = EpisodeWriter(output / 'dataset', env, options['instruction'])
-        if 'coordinate_contract' in provenance:
-            writer.provenance['coordinate_contract'] = copy.deepcopy(provenance['coordinate_contract'])
-        if options.get('resume_data'):
-            resumed = json.loads((Path(options['resume_data']) / 'project_provenance.json').read_text())
-            if resumed.get('source_dataset') != str(source.resolve()) or resumed.get('generation_method') != 'object_relative_bounded_ik':
-                raise ValueError('Resume Datagen requires the same annotated source and generation method')
-            writer.resume(options['resume_data'])
-        if len(writer.manifest['episodes']) >= count:
-            raise ValueError('Datagen target must exceed resumed episode count')
-        writer.provenance.update(generation_method='object_relative_bounded_ik', source_dataset=str(source.resolve()), generation_seed=seed)
-        if provenance.get('source_partition'):writer.provenance['source_partition']=provenance['source_partition']
-        stopped = False
-        try:
-            for attempt in range(int(options.get('max_attempts', max(100, count * 100)))):
-                if len(writer.manifest['episodes']) >= count: break
-                entry = manifest['episodes'][int(rng.integers(len(manifest['episodes'])))]
-                folder = Path(entry['_path'])
-                annotation = json.loads((folder / 'annotation.json').read_text())
-                if annotation.get('schema') != 'so101.mujoco-subtasks/1':
-                    raise ValueError('Run workflow Annotation before Datagen')
-                actions = np.load(folder / 'raw_action.npy', allow_pickle=False)
-                original_object = np.load(folder / 'object_pose.npy', allow_pickle=False)[0]
-                env.reset(int(rng.integers(2**31)))
-                writer.begin(); tracker = grasp_tracker(env)
-                moved_object = env.backend.get_object_pose(env.backend.metadata['pick'])
-                transform_pick = moved_object @ np.linalg.inv(original_object)
-                previous = env.backend.home.copy(); reason = ''
-                try:
-                    for i, raw_target in enumerate(actions):
-                        if bridge: bridge.before_step()
-                        goal = env.backend.target_pose(raw_target)
-                        # Blend object-relative pick displacement back to the fixed destination.
-                        blend = np.clip((i - annotation['grasp']) / max(1, annotation['place'] - annotation['grasp']), 0., 1.)
-                        shifted = transform_pick @ goal
-                        goal[:3, 3] = (1 - blend) * shifted[:3, 3] + blend * goal[:3, 3]
-                        command = env.backend.solve_pose(goal, np.r_[previous[:5], raw_target[5]])
-                        observation = env.observe()
-                        writer.append(observation, command)
-                        env.backend.step(command); previous = command
-                        signals = subtask_signals(env, tracker, i)
-                        emit(observation['images'][0], {'steps': i + 1, 'attempts': attempt + 1,
-                             'successes': len(writer.manifest['episodes']), 'failures': attempt - len(writer.manifest['episodes']),
-                             'task_signals': signals})
-                    success = env.backend.is_success() and tracker.completed
-                    if not success: reason = 'physical grasp/place validation failed'
-                except ValueError as exc:
-                    success = False; reason = str(exc)
-                if success:
-                    name = writer.save(True,success_source='simulation_stable_grasp_and_place')
-                    writer.manifest['episodes'][-1]['group_id'] = entry['group_id']
-                    for key in ('source_partition','source_lineage','split'):
-                        if key in entry:writer.manifest['episodes'][-1][key]=copy.deepcopy(entry[key])
-                    writer.flush_manifest()
-                    print('[WORKFLOW] Generated ' + name, flush=True)
-                attempts.append({'attempt': attempt + 1, 'source': entry['id'], 'success': bool(success), 'reason': reason})
-        except KeyboardInterrupt:
-            stopped = True
-            print("[WORKFLOW] Datagen 중지: 완료된 episode를 보존합니다.", flush=True)
-        finally:
-            writer.close()
-        atomic(output / 'attempts.json', attempts)
-        return {'passed': len(writer.manifest['episodes']) == count or (stopped and bool(writer.manifest['episodes'])), 'dataset': str(writer.root),
-                'successes': len(writer.manifest['episodes']), 'requested': count, 'attempts': len(attempts),
-                'stopped': stopped, 'generation_seed': seed, 'method': 'object_relative_bounded_ik', 'is_isaac_mimicgen': False}
+def datagen(request, output, publish=None, bridge=None, environment_factory=None, preview=None):
+    """Compatibility entrypoint; every new DataGen uses the official common core."""
+    from .unified import execute
+    return execute({**request,'backend':request.get('backend','mujoco'),'stage':'datagen','output':str(output)})
 
 
 def convert_hdf5(recipe_file, output):

@@ -20,7 +20,7 @@ DEFAULTS = {'profile': 'outputs/real2sim', 'workspace': 'outputs/real2sim/enviro
 
 
 def fingerprint(path):
-    p = Path(path)
+    p = Path(path).expanduser().resolve()
     files = [p] if p.is_file() else sorted(f for f in p.rglob('*') if f.is_file() and '.cache' not in f.parts)
     if p.is_file() and p.suffix in ('.hdf5','.h5'):
         import h5py
@@ -71,6 +71,7 @@ def inspect_artifact(kind, path):
                         raise ValueError('Expected six model joints')
             if args.get('validation_only'):
                 raise ValueError('Smoke data cannot enter the training workflow')
+            if any(g.attrs.get('validation_only',False) for g in episodes):raise ValueError('Smoke episodes cannot enter the training workflow')
             if kind == 'annotated' and any('obs/datagen_info/subtask_term_signals/grasp' not in g for g in episodes):
                 raise ValueError('Missing Mimic annotation')
             from .tasks import episode_definition
@@ -79,12 +80,19 @@ def inspect_artifact(kind, path):
             if unique and any(d is None for d in definitions):
                 raise ValueError('Some episodes have no task definition')
             result.update(workspace=args.get('workspace'), episode_count=len(episodes), env_args=args, tasks=list(unique.values()))
+            if args.get('dataset_schema'):
+                from .dataset import SCHEMA
+                if args['dataset_schema']!=SCHEMA:raise ValueError('Unknown episode dataset schema')
+                result.update(format=SCHEMA,backend=args.get('backend'),scene_configuration=args.get('scene_configuration'))
             if args.get('source_partition'):
                 from .episodes import validate_partition,validate_partition_episode
                 partition=validate_partition(args['source_partition'])
                 for g in episodes:validate_partition_episode(partition,json.loads(g.attrs.get('source_lineage','null')),args.get('source_partition_input'))
                 result.update(source_partition=partition,lineage_status='verified_partition',source_count=len(partition['source_ids']))
         coordinates = read_contract(p)
+        if result.get('format')=='so101.common-episode/2':
+            from .dataset import EpisodeDataset,validate_dataset
+            validate_dataset(EpisodeDataset(p),require_annotations=kind in ('annotated','datagen'))
     elif kind in ('dataset', 'policy'):
         marker = p / ('meta/info.json' if kind == 'dataset' else 'config.json')
         result['format'] = json.loads(marker.read_text())

@@ -44,7 +44,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input_file", required=True)
 parser.add_argument("--repo_id", required=True)
 parser.add_argument("--root", required=True)
-parser.add_argument("--fps", type=int, default=30)
+parser.add_argument("--fps", type=int, default=None)
 parser.add_argument("--task", default="", help="Legacy-only instruction; explicit episode Task Definition takes precedence")
 parser.add_argument("--robot_type", default="so101_follower_sim")
 
@@ -163,6 +163,16 @@ if not input_file.exists():
 
 from soarm101_lab.so101_dataset_contract import read_contract, write_contract, JOINT_SPACE, MIMIC_SPACE
 source_coordinates = read_contract(input_file)
+with h5py.File(input_file,'r') as source:
+    common=json.loads(source['data'].attrs.get('env_args','{}')).get('dataset_schema')=='so101.common-episode/2'
+if common:
+    from soarm101_lab.workflow.dataset import EpisodeDataset,validate_dataset
+    reader=EpisodeDataset(input_file);validate_dataset(reader)
+    if abs(reader.hz-round(reader.hz))>1e-8:raise ValueError('This LeRobot version requires integer FPS; refusing to resample')
+    recorded_fps=round(reader.hz)
+    if args.fps is not None and args.fps!=recorded_fps:raise ValueError('Requested FPS differs from common dataset')
+    args.fps=recorded_fps
+elif args.fps is None:args.fps=30
 with h5py.File(input_file, "r") as h5:
     if "data" not in h5:
         raise KeyError("Input HDF5 has no 'data' group.")
@@ -388,6 +398,7 @@ with h5py.File(input_file,"r") as source_h5:
             review['pose_reference']={'source_dataset':str(input_file),'episode':name,'object_telemetry':review['object_telemetry']}
 from soarm101_lab.so101_joint_mapping import RobotCoordinates
 provenance = {"scene_configuration":source_args.get('scene_configuration'),
+              "backend":source_args.get('backend','isaac'),"episode_schema":source_args.get('dataset_schema'),
               "source_partition":source_args.get('source_partition'),"source_partition_input":source_args.get('source_partition_input'),
               "episode_source_lineage":episode_lineage,
               "canonical_coordinates":source_args.get('canonical_coordinates') or RobotCoordinates().metadata(),

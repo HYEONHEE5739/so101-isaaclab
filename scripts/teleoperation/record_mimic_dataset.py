@@ -707,6 +707,8 @@ def main():
                 f"Failed to close environment: {exc}",
                 flush=True,
             )
+        if args_cli.workspace:
+            writer.finalize_common()
 
 
 if __name__ == "__main__":

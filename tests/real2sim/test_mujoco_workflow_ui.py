@@ -42,6 +42,10 @@ def test_backend_changes_only_execution_engine(panel):
         assert panel.service is service and isinstance(service, Operations)
         assert [panel.stage.itemText(i) for i in range(panel.stage.count())] == before
         assert panel.workspace.text() == path and panel.port.text() == port
+        from PyQt6.QtTest import QTest
+        for _ in range(200):
+            if panel.run.isEnabled():break
+            QTest.qWait(10)
         assert panel.run.isEnabled(), panel.status.text()
         assert panel.inputs.currentData() == 'workspace'
         assert panel.stage_options()['backend'] == backend
@@ -244,3 +248,58 @@ def test_one_camera_scene_configures_pipeline_and_real_sim(tmp_path, monkeypatch
     assert 'front_camera' in window.fields
     assert 'sim_front' in window.views and window.views['sim_wrist'].parentWidget().isHidden()
     window.close();app.processEvents()
+
+
+def test_settings_validation_is_debounced_off_main_thread_and_latest_only(panel,monkeypatch):
+    import threading,time
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtTest import QTest
+    main_thread=threading.get_ident();started=threading.Event();release=threading.Event();calls=[];ticks=[]
+    def readiness(stage,artifact,workspace,options):
+        calls.append((options['port'],threading.get_ident()))
+        if len(calls)==1:
+            started.set();release.wait(3)
+            return 'READY','old result'
+        return 'NOT_READY','latest setting rejected'
+    monkeypatch.setattr(panel.service,'readiness',readiness)
+    timer=QTimer(panel);timer.timeout.connect(lambda:ticks.append(time.monotonic()));timer.start(10)
+    try:
+        before=time.monotonic()
+        for text in ['/dev/a','/dev/ab','/dev/abc']:panel.port.setText(text)
+        assert time.monotonic()-before<.15
+        assert not calls and not panel.run.isEnabled()
+        for _ in range(100):
+            if started.is_set():break
+            QTest.qWait(10)
+        assert started.is_set() and len(calls)==1 and calls[0][0]=='/dev/abc'
+        panel.port.setText('/dev/new')
+        QTest.qWait(250)
+        assert len(ticks)>10 and len(calls)==1 and not panel.run.isEnabled()
+        release.set()
+        for _ in range(200):
+            if 'latest setting rejected' in panel.status.text():break
+            QTest.qWait(10)
+        assert panel.status.text()=='NOT_READY — latest setting rejected'
+        assert [c[0] for c in calls]==['/dev/abc','/dev/new']
+        assert all(c[1]!=main_thread for c in calls)
+        assert not panel.run.isEnabled()
+    finally:release.set();timer.stop()
+
+
+def test_background_ready_result_cannot_enable_run_during_workflow(panel,monkeypatch):
+    import threading
+    from PyQt6.QtTest import QTest
+    started=threading.Event();release=threading.Event()
+    def readiness(*args):
+        started.set();release.wait(3);return 'READY',''
+    monkeypatch.setattr(panel.service,'readiness',readiness)
+    panel.update_ready()
+    try:
+        for _ in range(100):
+            if started.is_set():break
+            QTest.qWait(10)
+        assert started.is_set()
+        panel.busy=True;panel.update_ready();release.set()
+        QTest.qWait(150)
+        assert panel.status.text().startswith('RUNNING') and not panel.run.isEnabled()
+    finally:release.set();panel.busy=False

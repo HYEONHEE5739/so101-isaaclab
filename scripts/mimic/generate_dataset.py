@@ -25,6 +25,8 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac Lab environments.")
 parser.add_argument("--generation_seed", type=int, default=None, help="Workspace Datagen seed; default: fresh seed per run")
 parser.add_argument("--workspace", help="Published workspace ID/path")
+parser.add_argument("--max_attempts", type=int, default=10000, help="Global attempt limit for Workspace common Mimic")
+parser.add_argument("--resume_data", help="Common DataGen dataset to continue in a new output")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
 parser.add_argument(
@@ -59,7 +61,17 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
 if args_cli.workspace:
-    args_cli.enable_cameras = True
+    if args_cli.use_skillgen or args_cli.pause_subtask:
+        raise ValueError('Workspace common Mimic supports the SO101 two-subtask configuration; SkillGen/pause_subtask are separate native modes')
+    from pathlib import Path
+    from soarm101_lab.workflow.unified import execute
+    destination=Path(args_cli.output_file).with_suffix('.workflow')
+    result=execute({'backend':'isaac','stage':'datagen','workspace':args_cli.workspace,'input':args_cli.input_file,
+        'output':str(destination),'dataset_output':args_cli.output_file,'options':{'num_envs':args_cli.num_envs,'generation_seed':args_cli.generation_seed,
+            'num_successful_demos':args_cli.generation_num_trials or 10,'max_attempts':args_cli.max_attempts,
+            'resume_data':args_cli.resume_data,'device':args_cli.device,'mode':'operator' if args_cli.headless else 'developer'}})
+    print('Common Mimic dataset:',result['dataset'])
+    raise SystemExit(0)
 
 if args_cli.enable_pinocchio:
     # Import pinocchio before AppLauncher to force the use of the version installed by IsaacLab and not the one installed by Isaac Sim

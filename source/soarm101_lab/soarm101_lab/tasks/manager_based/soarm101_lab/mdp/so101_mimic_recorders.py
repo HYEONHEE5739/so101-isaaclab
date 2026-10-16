@@ -73,7 +73,14 @@ class VideoHDF5DatasetFileHandler(HDF5DatasetFileHandler):
         file_path=str(file_path)
         target=Path(file_path if file_path.endswith('.hdf5') else file_path+'.hdf5')
         if target.exists():raise FileExistsError('Choose a new dataset output: '+str(target))
-        return super().create(str(target),env_name=env_name)
+        result=super().create(str(target),env_name=env_name)
+        self._created_here=target.resolve()
+        return result
+
+    def finalize_common(self):
+        if not getattr(self,'_created_here',None):raise RuntimeError('Only a new writer-owned recording may be finalized')
+        from soarm101_lab.workflow.dataset import finalize_owned_isaac_recording
+        return finalize_owned_isaac_recording(self._created_here)
 
     def write_episode(self,episode):
         from pathlib import Path

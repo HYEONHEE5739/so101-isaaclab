@@ -45,6 +45,7 @@ def test_source_uniform_xy_preserves_original_and_recorded_policy(workspace,tmp_
     original=copy.deepcopy(workspace)
     run=source_workspace(configured(workspace,definition(workspace)))
     assert workspace==original and run['task']['reset']['mode']=='uniform'
+    assert run['task']['reset']['margin_m']==0.
     assert run['task']['reset']['yaw_rad']==[0.,0.]
     assert configured(run)['scene_configuration']==run['scene_configuration']
     assert recorded_scene({'scene_configuration':run['scene_configuration']},workspace)==run['scene_configuration']
@@ -63,6 +64,9 @@ def test_source_uniform_xy_preserves_original_and_recorded_policy(workspace,tmp_
                 other_size=np.array(run['profile']['objects'][other]['dimensions_m'])[:2]
                 assert np.any(abs(xy-np.array(sample[other][:2]))>(size+other_size)/2+run['task']['reset']['separation_m'])
     assert np.any(np.linalg.norm(points,axis=1)<.01) # The center gap of four-anchor sampling is populated.
+    # Real uniform draws now reach the band that the old 10 mm margin excluded.
+    size=np.array(run['profile']['objects'][run['task']['dynamic'][0]]['dimensions_m'])[:2]
+    assert np.any(np.abs(points)>half-size/2-original['task']['reset']['margin_m'])
     simulation=simulation_configuration(run,backend='mujoco',scene_configuration=run['scene_configuration'])
     with MujocoBackend(tmp_path/'uniform_model',workspace['root'],render_backend='none',task_definition=run['task_definition'],
                        simulation_configuration=simulation) as backend:
@@ -73,6 +77,26 @@ def test_source_uniform_xy_preserves_original_and_recorded_policy(workspace,tmp_
         for name in run['task']['dynamic']:
             pose=backend.get_state()['object_poses'][name]
             np.testing.assert_allclose(np.array(pose)[:3,:3],np.eye(3),atol=1e-7)
+
+
+@pytest.mark.parametrize('corner',[[0.,0.],[0.,1.],[1.,0.],[1.,1.]])
+def test_source_random_bounds_allow_edge_touch_without_overhang(workspace,corner):
+    from soarm101_lab.real2sim.workspaces.reset import source_workspace
+    run=source_workspace(configured(workspace,definition(workspace),['cube_red']))
+    randomizer=WorkspaceRandomizer(run)
+    class EndpointDraw:
+        def uniform(self,low,high,size=None):return low+(high-low)*np.array(corner)
+    randomizer.rng=EndpointDraw()
+    position=np.array(randomizer.sample()['cube_positions']['cube_red'])[:2]
+    support=run['profile']['objects'][run['task']['reset']['support_object']]
+    center=np.array(support['T_workspace'])[:2,3]
+    size=np.array(run['profile']['objects']['cube_red']['dimensions_m'])[:2]
+    # At each allowed corner, the object's outer faces meet the support edges exactly.
+    np.testing.assert_allclose(np.abs(position-center)+size/2,np.array(support['dimensions_m'])[:2]/2,atol=1e-12)
+    legacy={**workspace['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.}
+    assert configured(workspace,reset=legacy)['task']['reset']['margin_m']==workspace['task']['reset']['margin_m']
+    with pytest.raises(ValueError,match='Unsupported runtime reset policy'):
+        configured(workspace,reset={**legacy,'margin_m':.004})
 
 
 @pytest.mark.parametrize('ids',[['cube_red'],['cube_red','cube_blue'],['cube_red','cube_green','cube_blue'],['cube_green','cube_red']])
@@ -214,11 +238,13 @@ def test_source_replay_annotation_datagen_inherit(workspace,tmp_path,monkeypatch
     (writer.root/entry['path']/'annotation.json').write_text(json.dumps({'schema':'so101.mujoco-subtasks/1','grasp':1,'place':3,'frame_count':4}))
     original_after_label=fingerprint(writer.root)
     request['options'].update(instruction=writer.instruction,num_successful_demos=1,max_attempts=1)
-    generated=episodes.datagen(request,tmp_path/'generated',lambda *args:None,None,factory,worker._preview)
-    assert generated['attempts']==1 and generated['successes']==0
+    # Legacy clips remain readable. Unverified coordinates and 32x24 images
+    # cannot enter the new common generation contract.
+    with pytest.raises(ValueError,match='coordinate/action contract'):
+        episodes.datagen(request,tmp_path/'generated')
     assert all(s['active_object_ids']==['cube_red'] for s in seen)
     assert fingerprint(writer.root)==original_after_label and before!=original_after_label
-    assert json.loads((Path(generated['dataset'])/'project_provenance.json').read_text())['scene_configuration']['active_object_ids']==['cube_red']
+
 
 
 def test_resume_and_curated_mixed_compositions(workspace,tmp_path):

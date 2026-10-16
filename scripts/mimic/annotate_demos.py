@@ -61,6 +61,15 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 if args_cli.workspace:
     args_cli.enable_cameras = True
+    if args_cli.auto:
+        from pathlib import Path
+        from soarm101_lab.workflow.unified import execute
+        result=execute({'backend':'isaac','stage':'annotate','workspace':args_cli.workspace,'input':args_cli.input_file,
+            'include':args_cli.include,'output':str(Path(args_cli.output_file).with_suffix('.workflow')),
+            'dataset_output':args_cli.output_file,'options':{'device':args_cli.device,'auto':True,
+                'mode':'operator' if args_cli.headless else 'developer'}})
+        print('Common annotated dataset:',result['dataset'])
+        raise SystemExit(0)
 
 if args_cli.enable_pinocchio:
     import pinocchio  # noqa: F401
@@ -644,6 +653,7 @@ def main():
         from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
         preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace,
                           expected_source_sha256=source_input_sha256, annotation_sources=exported_source_names)
+        env.recorder_manager._dataset_file_handler.finalize_common()
 
     if not exported_episode_count:
         raise RuntimeError('Annotation exported 0 episodes: see task/subtask failure above; no annotated artifact was created')

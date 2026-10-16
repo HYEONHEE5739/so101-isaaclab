@@ -1,6 +1,7 @@
 """One guided/independent workflow panel backed by Operations, not shell strings."""
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from PyQt6.QtCore import QUrl, QTimer, Qt
 from PyQt6.QtGui import QDesktopServices, QPixmap, QShortcut, QKeySequence
@@ -25,6 +26,14 @@ class WorkflowPanel(QWidget):
         self.setStyleSheet(STYLE)
         self.run_worker = run_worker; self.registry = Registry(); self.service = Operations(self.registry)
         self.busy = False
+        self._ready_generation = 0
+        self._ready_future = None
+        self._ready_request = None
+        self._ready_executor = None
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setSingleShot(True)
+        self._ready_timer.setInterval(200)
+        self._ready_timer.timeout.connect(self._start_ready_check)
         self.saved_stage_options = {}
         self.options_context = None
         self.configured_stage = None
@@ -182,7 +191,9 @@ class WorkflowPanel(QWidget):
             self.feeds[name] = label
         grid.setRowStretch(1, 1)
         self.stage_summary = QLabel(); self.stage_summary.setWordWrap(True); display.insertWidget(3, self.stage_summary)
-        self.task_state = QLabel(); self.task_state.setWordWrap(True); display.insertWidget(4, self.task_state)
+        self.task_state = QLabel(); self.task_state.setWordWrap(True)
+        self.task_state.setSizePolicy(QSizePolicy.Policy.Preferred,QSizePolicy.Policy.Minimum)
+        display.insertWidget(4, self.task_state)
         log_panel = QWidget(); log_layout = QVBoxLayout(log_panel); self.media_splitter.addWidget(log_panel)
         log_tools = QHBoxLayout(); log_layout.addLayout(log_tools)
         log_tools.addWidget(QLabel('진행 / 오류 로그'))
@@ -300,7 +311,9 @@ class WorkflowPanel(QWidget):
 
     def open_curation(self):
         from .curation_ui import CurationDialog
-        dialog = CurationDialog(self.registry, self)
+        workspace = self.task_selector.workspace_identity if self.task_selector.workspace is not None else None
+        dialog = CurationDialog(self.registry, self, workspace=workspace)
+        QTimer.singleShot(0, dialog.open_latest)
         dialog.exec()
         self.refresh()
 
@@ -364,6 +377,8 @@ class WorkflowPanel(QWidget):
             if a['type']=='dataset' and partition and partition['split']=='val' and (not workspace or a.get('workspace')==workspace):
                 self.validation_input.addItem(f'Val Source {len(partition["source_ids"])} · {Path(a["path"]).name}',a['id'])
             engine_match = a.get('backend', 'isaac') == self.backend.currentData() if hasattr(self, 'backend') else True
+            if self.stage.currentData() in ('replay','annotate','datagen') and (a.get('format') in ('so101.common-episode/2','so101.canonical/1') or a.get('env_args',{}).get('workspace_path')):
+                engine_match=True
             if a['type'] in allowed and (a['type'] == 'workspace' or engine_match or self.stage.currentData() in ('train', 'sim_eval', 'hf_dataset', 'hf_policy')) and (a['type'] == 'workspace' or not workspace or not a.get('workspace') or a['workspace'] == workspace):
                 path = Path(a['path'])
                 tasks = ','.join(t['task_id'] for t in a.get('tasks', []))
@@ -398,8 +413,13 @@ class WorkflowPanel(QWidget):
         if artifact['type']=='workspace':self.select_workspace(artifact['path'])
 
     def update_ready(self):
+        """Snapshot widgets cheaply; file/asset validation never runs in the input signal."""
+        self._ready_generation += 1
+        self._ready_timer.stop()
+        self._ready_request = None
+        self.run.setEnabled(False)
         if self.busy:
-            self.status.setText('RUNNING — 완료 후 output 검증 및 등록'); self.run.setEnabled(False); return
+            self.status.setText('RUNNING — 완료 후 output 검증 및 등록'); return
         try:
             live = getattr(self.window(), 'bus', None)
             if self.stage.currentData() in ('source', 'real_eval') and live and live.owner_alive() and live.status().get('backend')=='calibration':
@@ -408,10 +428,46 @@ class WorkflowPanel(QWidget):
                 raise ValueError('입력 데이터를 선택하세요.')
             artifact = self.registry.get(self.inputs.currentData())
             opts = self.stage_options()
-            state, reason = self.service.readiness(self.stage.currentData(), artifact, self.workspace.text(), opts)
+            self._ready_request = (self._ready_generation, self.stage.currentData(), artifact, self.workspace.text(), opts)
         except Exception as exc:
-            state, reason = 'NOT_READY', str(exc)
-        self.status.setText(state + (' — ' + reason if reason else '')); self.run.setEnabled(state == 'READY')
+            self.status.setText('NOT_READY — '+str(exc)); return
+        self.status.setText('CHECKING — 실행 설정 확인 중')
+        self._ready_timer.start()
+
+    def _start_ready_check(self):
+        if self.busy or self._ready_future is not None or self._ready_request is None:return
+        generation,stage,artifact,workspace,options = self._ready_request
+        self._ready_request = None
+        if self._ready_executor is None:
+            self._ready_executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='workflow-readiness')
+            executor = self._ready_executor
+            self.destroyed.connect(lambda:executor.shutdown(wait=False,cancel_futures=True))
+        # The worker receives only plain data, and calls the same unchanged read-only validation.
+        future = self._ready_executor.submit(self.service.readiness,stage,artifact,workspace,options)
+        self._ready_future = (generation,future)
+
+    def _poll_ready_check(self):
+        if self._ready_future is None:return
+        generation,future = self._ready_future
+        if not future.done():return
+        self._ready_future = None
+        try:state,reason = future.result()
+        except Exception as exc:state,reason = 'NOT_READY',str(exc)
+        if generation == self._ready_generation and not self.busy:
+            self.status.setText(state+(' — '+reason if reason else ''))
+            self.run.setEnabled(state=='READY')
+        # A newer edit replaces the pending snapshot; never queue every intermediate keystroke.
+        if self._ready_request is not None and not self._ready_timer.isActive():self._ready_timer.start(0)
+
+    def closeEvent(self,event):
+        self._ready_generation += 1
+        self._ready_request = None
+        self._ready_timer.stop()
+        if self._ready_executor is not None:
+            self._ready_executor.shutdown(wait=False,cancel_futures=True)
+            self._ready_executor = None
+        self._ready_future = None
+        super().closeEvent(event)
 
     def browse(self):
         kind = self.kind.currentText(); directory = browse_directory(kind, registry=self.registry)
@@ -494,6 +550,7 @@ class WorkflowPanel(QWidget):
             send(self.service.session, command)
 
     def poll_preview(self):
+        self._poll_ready_check()
         self.poll_log()
         root = self.service.session
         if getattr(self, 'active_stage', None) != self.stage.currentData(): root = None
@@ -528,7 +585,9 @@ class WorkflowPanel(QWidget):
                 + '   |   Grasp (휴리스틱): ' + word(signals.get('grasp')) + '   |   작업 성공 조건: ' + word(signals.get('place'))
                 + '\nEpisode 결과: ' + status.get('episode_outcome', '진행 중' if active else '대기')
                 + '   ' + status.get('outcome_reason', '')
-                + (f" · 시도 {status['attempts']} / 성공 {status['successes']} / 실패 {status['failures']} · 성공률 " + (f"{status['success_rate'] * 100:.1f}%" if status.get('success_rate') is not None else "—") if 'attempts' in status else ''))
+                + (f" · 시도 {status['attempts']} / 성공 {status['successes']} / 실패 {status['failures']} · 성공률 " + (f"{status['success_rate'] * 100:.1f}%" if status.get('success_rate') is not None else "—") if 'attempts' in status else '')
+                + ('\n' + ' · '.join(f"{dict(ik_failure='IK 계산 탈락',planning_failure='계획 실패',simulation_failure='시뮬레이션 실패',grasp_failure='집기 실패',place_failure='배치 실패',timeout='시간 초과').get(key,key)}: {value}" for key,value in status['failure_breakdown'].items()) if status.get('failure_breakdown') else '')
+                + ('\n' + ' | '.join(f"Env {key}: {value['state']} · 성공 {value['successes']}" for key,value in status['env_status'].items()) if status.get('env_status') else ''))
             outcome = status.get('episode_outcome', '')
             color = '#dff3e3' if outcome.startswith('성공') else '#ffe4d9' if outcome.startswith('실패') else '#e9eef5'
             self.task_state.setStyleSheet(f'QLabel {{ background: {color}; color: #17202a; padding: 8px; }}')
@@ -680,7 +739,7 @@ class WorkflowPanel(QWidget):
         path = self.service.session.parent / 'process.log'
         for line in self.log_tail.read(path):
             if self.raw_log.isChecked() or self.log_tail.relevant(line):
-                self.result.appendPlainText(line)
+                self.result.appendPlainText(line if self.raw_log.isChecked() else self.log_tail.summary(line))
 
     def open_log(self):
         if self.service.session:

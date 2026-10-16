@@ -31,3 +31,13 @@ def test_map_rows_preserve_string_camera_keys():
     table.setItem(0,1,QTableWidgetItem('observation.images.camera1'))
     assert json.loads(form.toPlainText())['rename_map']=={'observation.images.side_cam':'observation.images.camera1'}
     form.close()
+
+def test_datagen_environment_choices_roundtrip():
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.settings_form import SettingsForm
+    app=QApplication.instance() or QApplication([])
+    form=SettingsForm();form.set_stage('datagen');form.setPlainText('{"num_envs":4}')
+    enabled,choice,kind=form.editors['num_envs']
+    assert [choice.itemData(i) for i in range(choice.count())]==[1,2,4,8]
+    assert json.loads(form.toPlainText())['num_envs']==4
+    form.close()

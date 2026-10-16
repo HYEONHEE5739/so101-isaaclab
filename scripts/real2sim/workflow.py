@@ -37,6 +37,8 @@ def main():
     importer = commands.add_parser('import-hdf5', help='Convert an explicit HDF5 recipe to canonical NPY episodes')
     importer.add_argument('recipe')
     importer.add_argument('output')
+    migration=commands.add_parser('migrate',help='Import legacy episodes into common HDF5 + relative MP4 without modifying the source')
+    migration.add_argument('source');migration.add_argument('output')
     builder = commands.add_parser('import-builder', help='Import a Builder export as an actionable workspace')
     builder.add_argument('source')
     builder.add_argument('--workspace-id')
@@ -51,6 +53,9 @@ def main():
         Registry().register('workspace', destination)
         print(destination, flush=True)
         return
+    if args.command=='migrate':
+        from soarm101_lab.workflow.dataset import migrate
+        print(migrate(args.source,args.output));return
     if args.command == 'worker':
         if args.request:
             request = json.loads(Path(args.request).read_text())

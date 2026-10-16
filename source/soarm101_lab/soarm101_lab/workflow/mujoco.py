@@ -21,8 +21,11 @@ def _environment(request, output, coordinates=None, hz=None):
     recorded_contract = None
     source = options.get('resume_data') or request.get('input') or request.get('checkpoint')
     if isinstance(source, (str, Path)):
-        path = Path(source); path = path.parent if path.is_file() else path
-        if (path/'project_provenance.json').is_file():
+        path = Path(source)
+        if path.is_file() and path.suffix in ('.hdf5','.h5'):
+            from ..so101_dataset_contract import read_contract
+            recorded_contract=read_contract(path)
+        elif (path/'project_provenance.json').is_file():
             recorded_contract = _provenance(path).get('coordinate_contract')
         elif (path/'so101_coordinates.json').is_file():
             from ..so101_dataset_contract import read_contract
@@ -57,6 +60,10 @@ def _environment(request, output, coordinates=None, hz=None):
 
 
 def _provenance(dataset):
+    if Path(dataset).is_file():
+        from .dataset import EpisodeDataset
+        reader=EpisodeDataset(dataset)
+        return reader.args.get('legacy_provenance') or reader.args
     return json.loads((Path(dataset) / 'project_provenance.json').read_text())
 
 
@@ -143,7 +150,8 @@ def source(request, output, publish, bridge):
             if selected_precision and mapper.metadata()['sha256']!=options['_collection_mappings']['leader']['sha256']:
                 raise ValueError('Leader mapping changed before Source activation')
             leader.activate()
-            writer = EpisodeWriter(output / 'dataset', env, options['instruction'])
+            storage='common' if env.backend.workspace['task'].get('observation_cameras')==['side','wrist'] else 'legacy'
+            writer = EpisodeWriter(output / 'dataset', env, options['instruction'],storage=storage)
             from ..real2sim.workspaces.demo import coordinate_contract
             from ..so101_dataset_contract import current_contract, MIMIC_SPACE
             contract = coordinate_contract(request['workspace']) if request.get('workspace') else current_contract(MIMIC_SPACE)
@@ -390,7 +398,8 @@ def _lerobot_index(artifact,options,prefix=''):
             'group_id': source_groups.get(str(index),'UNKNOWN'),
             'task_definition':source_tasks.get(str(index)) or (scene_configuration or {}).get('task_definition'),
             'scene_configuration':scene_configuration,'recorded_review':review,
-            **({'source_partition':partition,'source_lineage':provenance.get('episode_source_lineage',{}).get(str(index)),
+            'source_lineage':provenance.get('episode_source_lineage',{}).get(str(index)),
+            **({'source_partition':partition,
                 'source_partition_input':provenance.get('source_partition_input')} if partition else {})})
     return manifest,coords
 
@@ -483,7 +492,9 @@ def rollout(request, output, publish, bridge, policy_factory=None):
     from .tasks import object_metrics,evaluation_distribution
     if int(options.get('episodes', 1)) < 1 or int(options.get('max_steps', 300)) < 1:
         raise ValueError('Positive rollout episodes/max_steps required')
-    with _environment(request, output, provenance['coordinates'], policy.control_hz) as env:
+    from contextlib import ExitStack
+    from .evaluation import evaluation_recorder
+    with _environment(request, output, provenance['coordinates'], policy.control_hz) as env, ExitStack() as recordings:
         cameras = tuple(env.backend.workspace['task'].get('observation_cameras', ['side']))
         if not set(policy.cfg.cameras).issubset(cameras):
             raise ValueError('Checkpoint camera contract differs from workspace: '+str(policy.cfg.cameras)+' vs '+str(cameras))
@@ -493,6 +504,8 @@ def rollout(request, output, publish, bridge, policy_factory=None):
             env.reset(options.get('seed', 0) + episode)
             guard.reset()
             tracker = grasp_tracker(env)
+            recorder=evaluation_recorder(env.backend,env.backend.workspace,'mujoco',checkpoint.parent,
+                output/f'evaluation_{episode:04d}.hdf5',env.hz,options.get('seed',0)+episode,recordings)
             remaining, trace = [], []
             metric_state = {};active=env.backend.workspace['task']['dynamic'];pick=env.backend.metadata['pick']
             initial_positions={n:env.backend.get_object_pose(n)[:3,3].copy() for n in active}
@@ -512,6 +525,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                         raise RuntimeError('Simulator advanced during prediction; discard stale action chunk')
                     remaining = list(chunk[:policy.cfg.replan_steps])
                 action = guard.apply(remaining.pop(0), observed['state'])
+                if recorder:recorder.append(env.coordinates.to_model(action),tracker)
                 result = env.step(action)
                 trace.append({'timestamp_s': result['timestamp_s'], 'model_joint_rad': result['joint_pos'].tolist(),
                               'canonical_action': action.tolist(), 'success': result['success'], 'policy_metrics': metrics, 'replan':replanning})
@@ -528,6 +542,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                    'limit_violations': guard.violations, 'rate_limited': guard.rate_limited,**measured,
                    'inference_latency_s':[r['policy_metrics'].get('latency_s') for r in trace if r.get('replan')]}
             rows.append(row)
+            if recorder:recorder.finish(row,tracker,int(options.get('max_steps',300)))
             if bridge:
                 bridge.details.update(episode_outcome='성공' if row['success'] else '실패',
                     outcome_reason='컵 안 정지 조건 충족' if row['success'] else '최대 step 도달 · 컵 안 정지 조건 미충족')
@@ -550,11 +565,15 @@ def rollout_lerobot(request, output, publish, bridge):
     device = options.get('device', 'cuda:0')
     policy, pre, post = load_policy(request['checkpoint'], coordinate_contract(w), device)
     rows = []
-    with _environment(request, output) as env:
+    from contextlib import ExitStack
+    from .evaluation import evaluation_recorder
+    with _environment(request, output) as env, ExitStack() as recordings:
         emit = _preview(env, request, publish)
         guard = ActionGuard(env.backend.limits[:, 0], env.backend.limits[:, 1], [2.] * 6, env.hz)
         for episode in range(int(options.get('episodes', 1))):
             env.reset(options.get('seed', 0) + episode); policy.reset(); guard.reset(); tracker = grasp_tracker(env)
+            recorder=evaluation_recorder(env.backend,env.backend.workspace,'mujoco',request['checkpoint'],
+                output/f'evaluation_{episode:04d}.hdf5',env.hz,options.get('seed',0)+episode,recordings)
             trace = [];metric_state={};latencies=[];inference_latencies=[];active=env.backend.workspace['task']['dynamic'];pick=env.backend.metadata['pick']
             initial_positions={n:env.backend.get_object_pose(n)[:3,3].copy() for n in active}
             for i in range(int(options.get('max_steps', 300))):
@@ -569,6 +588,7 @@ def rollout_lerobot(request, output, publish, bridge):
                 inference=getattr(policy,'last_inference_metrics',None)
                 if inference and inference.get('latency_s') is not None:inference_latencies.append(inference['latency_s'])
                 action = guard.apply(action, state['joint_pos'])
+                if recorder:recorder.append(action,tracker)
                 env.backend.step(action)
                 signals = subtask_signals(env, tracker, i)
                 measured=object_metrics(active,pick,{n:env.backend.get_object_pose(n)[:3,3] for n in active},
@@ -579,6 +599,7 @@ def rollout_lerobot(request, output, publish, bridge):
                 if signals['place']: break
             rows.append({'episode': episode, 'steps': len(trace), 'success': trace[-1]['success'],**measured,
                          'inference_latency_s':inference_latencies or None,'action_call_latency_s':latencies})
+            if recorder:recorder.finish(rows[-1],tracker,int(options.get('max_steps',300)))
             if bridge:
                 bridge.details.update(episode_outcome='성공' if rows[-1]['success'] else '실패',
                     outcome_reason='컵 안 정지 조건 충족' if rows[-1]['success'] else '최대 step 도달 · 컵 안 정지 조건 미충족')
@@ -590,6 +611,9 @@ def rollout_lerobot(request, output, publish, bridge):
 
 
 def execute(request):
+    if request['stage'] == 'datagen':
+        from .unified import execute as execute_common
+        return execute_common(request)
     request = {**request, 'options': dict(request['options'])}
     if request['options'].get('remote_policy'):
         from huggingface_hub import snapshot_download

@@ -65,9 +65,10 @@ def object_triangles(spec, transform):
 
 
 class RobotPreview:
-    def __init__(self,path):
+    def __init__(self,path,load_visuals=True):
         path=Path(path);root=ET.parse(path).getroot()
         self.joints=root.findall('joint');self.visuals=[]
+        if not load_visuals:return
         for link in root.findall('link'):
             for visual in link.findall('visual'):
                 mesh=visual.find('geometry/mesh')

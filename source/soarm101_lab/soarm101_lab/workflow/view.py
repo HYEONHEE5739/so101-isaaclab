@@ -1,5 +1,6 @@
 """Presentation-only widgets and incremental process-log reader."""
 import codecs
+import json
 import re
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter, QPixmap
@@ -58,3 +59,16 @@ class LogTail:
         return bool(re.search(r'\[WORKFLOW\]|error|exception|out of memory|failed|failure|✅|❌|🛑|'
                               r'episode|annotat|exported|processed|subtask|final task|reset|saving|saved|replay|'
                               r'success|generation|trial|step:|loss|checkpoint|learning.rate', line, re.I)) and not line.startswith(('|', '+'))
+
+    @staticmethod
+    def summary(line):
+        if not line.startswith('[MIMIC] {'):return line
+        try:row=json.loads(line[len('[MIMIC] '):])
+        except ValueError:return line
+        labels={'success':'성공','ik_failure':'IK 계산 탈락','planning_failure':'계획 실패',
+            'simulation_failure':'시뮬레이션 실패','grasp_failure':'집기 실패','place_failure':'배치 실패',
+            'timeout':'시간 초과','interrupted':'중단','target_already_reached':'목표 수 도달'}
+        reason=row.get('reason','')
+        if row.get('category')=='ik_failure' and row.get('ik'):
+            ik=row['ik'];reason=f"위치 {ik['position_error_m']*1000:.2f}/{ik['position_tolerance_m']*1000:g} mm · 방향 {ik['rotation_error_rad']:.3f}/{ik['rotation_tolerance_rad']:g} rad"
+        return f"Env {row['env_id']} · 시도 {row['attempt']} · {labels.get(row['category'],row['category'])} · {row.get('steps',0)} step"+(' · '+reason[:300] if reason else '')

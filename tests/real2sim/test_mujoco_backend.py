@@ -362,3 +362,42 @@ def test_simulation_offset_contract_rejects_unknown_or_nonfinite():
             simulation_joint_offsets({'value':values,'provenance':'optimized','evidence':['test']},JOINTS)
     with pytest.raises(ValueError):
         simulation_joint_offsets({'value':[0]*6,'provenance':'calibrated','evidence':['unsupported physical assertion']},JOINTS)
+
+
+def test_shared_model_threaded_state_and_scratch_independence(env,tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from soarm101_lab.simulation.mujoco_backend import MujocoBackend
+    clones=[MujocoBackend(tmp_path/str(i),render_backend='none',shared_backend=env) for i in range(4)]
+    try:
+        assert len({id(c.model) for c in clones+[env]})==1
+        assert len({id(d) for c in clones for d in (c.data,c._fk_data,c._ik_data)})==12
+        original=env.data.qpos.copy();snapshots=[c.data.qpos.copy() for c in clones]
+        def run(i):
+            q=clones[i].home.copy();q[0]+=.03*i
+            for _ in range(25):clones[i].step(q)
+            return clones[i].get_state()['joint_pos'].copy()
+        with ThreadPoolExecutor(4) as executor:results=list(executor.map(run,range(4)))
+        assert not np.allclose(results[0],results[3])
+        np.testing.assert_array_equal(env.data.qpos,original)
+        other=clones[3].data.qpos.copy();clones[0].reset(seed=19)
+        np.testing.assert_array_equal(clones[3].data.qpos,other)
+    finally:
+        for clone in clones:clone.close()
+
+
+def test_portable_initial_velocities_roundtrip(env,tmp_path):
+    import threading
+    from soarm101_lab.workflow.adapters import MujocoAdapter
+    # This storage-independent adapter test needs the standard Side/Wrist facade.
+    env.workspace['task']['observation_cameras']=['side','wrist']
+    adapter=MujocoAdapter(env,30,tmp_path,1,threading.Event())
+    env.data.qvel[env.v_indices]=np.linspace(.01,.06,6)
+    pick=env.metadata['pick'];_,index=env.object_indices[pick]
+    env.data.qvel[index:index+6]=[.02,-.01,.03,.1,.2,-.1]
+    env.mj.mj_forward(env.model,env.data)
+    state=adapter.state();initial=adapter.initial_state()
+    expected_q=env.data.qvel.copy()
+    values={'initial_state':initial,'obs':{'datagen_info':{'object_pose':{k:v[None] for k,v in state['object_poses'].items()}}}}
+    adapter.restore(values,{'simulation_backend':'isaac'})
+    np.testing.assert_allclose(env.data.qvel,expected_q,atol=1e-9)
+    adapter.buffer.abort()

@@ -135,13 +135,16 @@ class Operations:
         if backend not in ('isaac', 'mujoco'):
             raise ValueError('Unknown simulation backend')
         opts.setdefault('python', default_python())
+        if stage in ('replay','annotate','datagen') and (artifact.get('format') in ('so101.common-episode/2','so101.canonical/1') or artifact.get('env_args',{}).get('workspace_path')):
+            return unified_plan(stage,artifact,workspace,opts,dry,run_dir)
         if stage in ('source', 'replay', 'annotate', 'datagen') and artifact.get('backend', backend) != backend:
             raise ValueError('Artifact simulation backend differs from selected backend')
         if stage in ('source','replay','annotate','datagen','sim_eval','real_eval'):
             from .tasks import bind_scene_options
             opts = bind_scene_options(stage, artifact, load(artifact['path'] if stage=='source' else workspace), opts)
         canonical = artifact.get('format') in ('so101.canonical/1', 'so101.minivla-policy/1')
-        if (backend == 'mujoco' and stage in ('source', 'replay', 'annotate', 'datagen', 'convert', 'sim_eval')) or (canonical and stage in ('train', 'convert')):
+        common_conversion = stage == 'convert' and artifact.get('format') == 'so101.common-episode/2'
+        if (backend == 'mujoco' and stage in ('source', 'replay', 'annotate', 'datagen', 'convert', 'sim_eval') and not common_conversion) or (canonical and stage in ('train', 'convert')):
             if stage == 'datagen':
                 opts['num_successful_demos'] = successful_demo_target(opts)
             return mujoco_plan(stage, artifact, workspace, opts, dry, run_dir)
@@ -278,6 +281,10 @@ class Operations:
         elif stage == 'convert':
             cli += ['scripts/tools/convert_isaac2lerobot.py', '--input_file', path, '--root', str(output),
                     '--repo_id', opts['repo_id'], '--task', opts.get('task', ''), '--action_source', 'joint_targets']
+            if artifact.get('format')=='so101.common-episode/2':
+                fps=1/float(artifact['env_args']['control_dt'])
+                if abs(fps-round(fps))>1e-8:raise ValueError('This LeRobot version requires integer FPS; refusing to change recorded timing')
+                cli+=['--fps',str(round(fps))]
         else:
             spec = {'stage': stage, 'input': artifact, 'workspace': ws, 'options': opts, 'output': str(output)}
             atomic(run_dir / 'request.json', spec)
@@ -352,6 +359,9 @@ class Operations:
                 raise RuntimeError(f'Process exit {code}; log: {run_dir / "process.log"}')
             if plan.get('worker_report'):
                 report_path = target / 'report.json'
+                if not report_path.exists() and (target/'failure.json').is_file():
+                    failure=json.loads((target/'failure.json').read_text())
+                    raise ValueError(f"{failure['error']} · {target/'failure.json'}")
                 report = json.loads(report_path.read_text())
                 if not report.get('passed'):
                     raise ValueError('Worker validation failed: ' + str(report_path))
@@ -516,8 +526,38 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
             'worker_report': True, 'result_key': result_key}
 
 
+def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
+    """Plan common episode stages without importing a simulation or Torch in the GUI."""
+    from .tasks import bind_scene_options,from_artifact,validate
+    if any(k.lower() in ('token','api_key','password','hf_token') for k in options):
+        raise ValueError('Do not store credentials in workflow options')
+    w=load(workspace)
+    if artifact.get('workspace')!=metadata(w):raise ValueError('Input Workspace identity differs')
+    opts=bind_scene_options(stage,artifact,w,options)
+    definitions=[validate(t,w) for t in from_artifact(artifact,w)]
+    if len(definitions)!=1:raise ValueError('Select one homogeneous task')
+    opts.update(tasks=definitions,task_definition=definitions[0],instruction=definitions[0]['language_instruction'])
+    opts.setdefault('mode','operator');opts['headless']=opts['mode']=='operator'
+    if opts['mode'] not in ('operator','developer'):raise ValueError('Unknown execution mode')
+    opts.setdefault('num_envs',1);opts.setdefault('max_attempts',10000)
+    if type(opts['num_envs']) is not int or opts['num_envs'] not in (1,2,4,8):raise ValueError('Number of environments must be 1,2,4 or 8')
+    if type(opts['max_attempts']) is not int or opts['max_attempts']<1:raise ValueError('Positive max_attempts required')
+    if stage=='datagen':opts['num_successful_demos']=successful_demo_target(opts)
+    if dry:return {'stage':stage}
+    run_dir=Path(run_dir);output=Path(opts['output']).expanduser().resolve() if opts.get('output') else run_dir/stage
+    request={'backend':opts['backend'],'stage':stage,'workspace':str(w['root']),'input':artifact['path'],
+        'options':opts,'output':str(output),'renderer':opts.get('renderer','egl'),'episode_schema':'so101.common-episode/2'}
+    atomic(run_dir/'request.json',request)
+    return {'argv':[opts['python'],'-u','scripts/real2sim/workflow.py','worker','--request',str(run_dir/'request.json')],
+        'output':str(output),'type':'annotated' if stage=='annotate' else stage,'workspace':str(w['root']),
+        'options':opts,'worker_report':True,'result_key':'dataset' if stage!='replay' else None}
+
+
 def execute_request(request):
     """Worker dispatch; GUI planning does not load engines or policy libraries."""
+    if request.get('episode_schema')=='so101.common-episode/2':
+        from .unified import execute
+        return execute(request)
     backend = request.get('backend', 'common')
     if backend == 'mujoco':
         from .mujoco import execute

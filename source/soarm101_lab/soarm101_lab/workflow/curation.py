@@ -106,7 +106,9 @@ class EpisodeReader:
                 'action':self.read(self.row['action_key'],index),'action_timestamp':float(self.action_timestamp(index)[0]),
                 'ee':self.ee(index),'object_poses':{n:(v[0] if v is not None and v.ndim==3 else v) for n,v in poses.items()},
                 'initial_object_poses':{n:self.initial_pose(n) for n,v in poses.items() if v is None},'rgb':None}
-        if camera:
+        cameras=[camera] if isinstance(camera,str) else list(camera or [])
+        result['rgb_frames']={};result['rgb_timestamps']={}
+        for camera in cameras:
             spec=self.row['cameras'][camera];key=(camera,index)
             if key not in self.cache:
                 if spec.get('file') or spec['path'].endswith('.mp4'):
@@ -129,6 +131,7 @@ class EpisodeReader:
             else:self.cache.move_to_end(key);result['rgb']=self.cache[key]
             stamp=float(self.read(spec['timestamp_key'],index).reshape(-1)[0]) if spec.get('timestamp_key') else result['timestamp']
             result['rgb_timestamp']=stamp
+            result['rgb_frames'][camera]=result['rgb'];result['rgb_timestamps'][camera]=stamp
             age=result['timestamp']-stamp
             if age < -1e-7 or age > 2*self.dt+1e-7:raise ValueError('RGB frame is not aligned with the observation')
         return result
@@ -145,6 +148,20 @@ def _context(w,scene,canonical):
     else:
         display='workspace' if canonical else 'robot_base';transforms={display:np.eye(4).tolist()};up=np.array([0,0,1.])
     return display,transforms,up
+
+
+def placement_region(workspace, composition, pick, base_to_workspace):
+    """The same target-center envelope used by WorkspaceRandomizer.sample, in workspace XY."""
+    if not workspace or base_to_workspace is None:return None
+    reset=(composition or {}).get('reset') or workspace['task']['reset']
+    specs=workspace['profile']['objects'];support=specs.get(reset.get('support_object'));target=specs.get(pick)
+    if not support or not target:return None
+    center=np.asarray(support['T_workspace'])[:2,3];half=np.asarray(support['dimensions_m'])[:2]/2
+    limit=half-np.asarray(target['dimensions_m'])[:2]/2-reset['margin_m']
+    if np.any(limit<=0):return None
+    corners=np.array([[-1,-1],[1,-1],[1,1],[-1,1]])
+    return {'support':(center+corners*half).tolist(),'allowed':(center+corners*limit).tolist(),
+            'robot_xy':np.asarray(base_to_workspace)[:2,3].tolist(),'mode':reset.get('mode','uniform')}
 
 
 def _events(reader,annotation=None,signal_keys=None):
@@ -309,14 +326,18 @@ def analyze(path):
         from .episodes import validate_partition,validate_partition_episode
         partition=validate_partition(row['source_partition']) if row.get('source_partition') else None
         if partition:validate_partition_episode(partition,row.get('source_lineage'),args.get('source_partition_input'))
-        row.update(split=partition['split'] if partition else None,lineage_status='Verified Source Partition / exact subtask lineage UNKNOWN' if partition and (row.get('source_lineage') or {}).get('kind')!='source_episode' else 'Verified Source Partition' if partition else 'Not partitioned',leakage_status='checked at training' if partition else 'UNKNOWN')
+        kind=(row.get('source_lineage') or {}).get('kind')
+        lineage_status=('Verified Source Partition / exact subtask Source' if kind=='mimic_segments' else
+            'Verified Source Partition / exact subtask lineage UNKNOWN' if kind!='source_episode' else 'Verified Source Partition') if partition else 'Not partitioned'
+        row.update(split=partition['split'] if partition else None,lineage_status=lineage_status,leakage_status='checked at training' if partition else 'UNKNOWN')
         if row['frames']<3:raise ValueError('At least three frames required for motion quality metrics')
         ids=(composition or {}).get('active_object_ids',scene.get('dynamic_objects') if canonical else active_ids)
         geometry_ids=ids or list(telemetry)
         row.update(task_id=task['task_id'] if task else 'UNKNOWN',task_definition=task,pick_object_id=pick,scene_configuration=composition,
             active_object_ids=ids or None,recorded_object_ids=list(telemetry),active_object_count=len(ids) if ids else None,object_specs={n:specs[n] for n in geometry_ids if n in specs},
             robot_urdf=str(urdf) if urdf else None,display_frame=display,pose_transforms=transforms,up_axis=up.tolist(),
-            base_to_workspace=base_to_ws.tolist() if base_to_ws is not None else None,flags=[])
+            base_to_workspace=base_to_ws.tolist() if base_to_ws is not None else None,
+            placement_region=placement_region(w,composition,pick,base_to_ws),flags=[])
         if w and composition:
             from .tasks import recorded_scene
             recorded_scene({'scene_configuration':composition},w)
@@ -348,8 +369,12 @@ def flag_outliers(rows):
         for key,low_label,high_label in [('duration','짧은 시간','긴 시간'),('stop_fraction',None,'EE 정지 비율 높음'),('command_stop_fraction',None,'정지 명령 많음'),('jitter',None,'명령 jitter 높음')]:
             values=np.array([r[key] for r in group]);median=np.median(values);spread=max(1.4826*np.median(abs(values-median)),abs(median)*.1,1e-6)
             for r in group:
-                if len(group)>=5 and r[key]>median+3*spread:r['flags'].append(high_label)
-                if len(group)>=5 and low_label and r[key]<median-3*spread:r['flags'].append(low_label)
+                label=high_label if len(group)>=5 and r[key]>median+3*spread else low_label if len(group)>=5 and low_label and r[key]<median-3*spread else None
+                if label:
+                    r['flags'].append(label)
+                    r.setdefault('flag_details',[]).append(dict(label=label,metric=key,value=float(r[key]),
+                        median=float(median),threshold=float(median+3*spread if label==high_label else median-3*spread),
+                        direction='high' if label==high_label else 'low',group_size=len(group)))
     return rows
 
 

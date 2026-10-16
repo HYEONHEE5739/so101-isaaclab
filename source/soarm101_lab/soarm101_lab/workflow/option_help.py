@@ -8,6 +8,7 @@ from html import escape
 
 # key: (JSON type, suggested/default value, explanation)
 FIELDS = {
+    'num_envs': ('환경 수', 1, '동시에 생성할 환경 수: 1, 2, 4, 8. Isaac은 벡터 환경, MuJoCo는 공유 모델과 독립 상태를 사용합니다. 목표 성공 수와 최대 시도 수는 모든 환경을 합산합니다.'),
     'validation_dataset':('문자열',None,'선택: 검증된 val Source Partition에서 생성·변환한 Registry dataset ID. MiniVLA가 별도 MP4/Parquet를 직접 읽습니다.'),
     'identity_sim_for_validation':('true/false',False,'명시적 URDF 원형 검증: Scene 관절 잔차만 제외합니다. Hardware Precision은 유지합니다. 파생 단계는 원본 모델 계약을 상속합니다.'),
     'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
@@ -19,7 +20,7 @@ FIELDS = {
     'renderer': ('문자열', 'egl', 'MuJoCo RGB 렌더 경로: egl(GPU), software-egl(Mesa CPU), osmesa. Isaac은 기존 렌더러를 사용합니다.'),
     'model_config': ('문자열', None, 'MiniVLA Flow-DiT 학습 JSON 경로. 생략하면 configs/default.json을 사용합니다. Resume은 저장된 설정을 사용합니다.'),
     'include_failed': ('true/false', False, 'MuJoCo 변환에서 실패로 기록된 데모도 명시적으로 포함합니다. 기본값은 성공 데모만 포함합니다.'),
-    'max_attempts': ('정수', None, 'MuJoCo Datagen 최대 시도 수. 미달이면 실패 보고서를 저장하며 성공 수를 부풀리지 않습니다.'),
+    'max_attempts': ('정수', 10000, '두 엔진 공통 전체 최대 시도 수. IK·계획 탈락과 실제 집기·배치 실패를 별도로 기록합니다. 목표 미달이면 완료 데이터와 실패 보고서를 보존합니다.'),
     'source_groups': ('객체', None, 'MiniVLA용 generated LeRobot 데이터의 원본 group 매핑. 예: {"0":"source_a","1":"source_a","2":"source_b"}. 자동 기록된 매핑이 있으면 생략합니다.'),
     'steps': ('정수', 10000, '총 목표 학습 step 수. Resume에서 40000 → 100000이면 추가 60000 step 학습합니다.'),
     'batch_size': ('정수', 8, '학습 batch 크기. GPU 메모리가 부족하면 줄이세요.'),
@@ -48,7 +49,7 @@ KEYS = {
     'source': ['identity_sim_for_validation','device', 'renderer', 'output'],
     'replay': ['device', 'renderer', 'output'],
     'annotate': ['device', 'renderer', 'output'],
-    'datagen': ['num_successful_demos', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],
+    'datagen': ['num_successful_demos', 'num_envs', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],
     'convert': ['repo_id', 'include_failed', 'output'],
     'train': ['architecture', 'model_config', 'source_groups', 'validation_dataset', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
     'sim_eval': ['episodes', 'max_steps', 'device', 'renderer', 'output'],

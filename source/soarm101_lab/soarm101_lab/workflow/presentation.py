@@ -66,8 +66,11 @@ class Presentation:
             path.unlink()
 
     def before_step(self):
+        boundary=getattr(self,'interrupt_boundary',None)
+        if boundary:boundary()
         self.poll()
         while self.paused and not self.single_step:
+            if boundary:boundary()
             self.status('PAUSED')
             if self.idle_render:
                 self.idle_render()
