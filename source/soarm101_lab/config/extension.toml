@@ -7,20 +7,18 @@ version = "0.1.0"
 category = "isaaclab"
 readme  = "README.md"
 
-title = "Extension Template"
+title = "SO-101 Workflow"
 author = "Isaac Lab Project Developers"
 maintainer = "Isaac Lab Project Developers"
-description="Extension Template for Isaac Lab"
-repository = "https://github.com/isaac-sim/IsaacLab.git"
-keywords = ["extension", "template", "isaaclab"]
+description="SO-101 teleoperation, common Mimic datasets and Isaac/MuJoCo workflows"
+repository = "https://github.com/HYEONHEE5739/so101-isaaclab"
+keywords = ["so101", "mimic", "isaaclab", "mujoco"]
 
 [dependencies]
 "isaaclab" = {}
 "isaaclab_assets" = {}
 "isaaclab_mimic" = {}
-"isaaclab_rl" = {}
 "isaaclab_tasks" = {}
-# NOTE: Add additional dependencies here
 
 [[python.module]]
 name = "soarm101_lab"

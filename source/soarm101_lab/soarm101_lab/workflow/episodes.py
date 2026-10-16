@@ -4,12 +4,10 @@ import json
 from pathlib import Path
 import shutil
 import uuid
-import time
 
 import numpy as np
 
 from ..real2sim.storage import atomic
-from ..real2sim.workspaces.package import load, metadata
 from ..so101_joint_mapping import JOINTS, POLICY_UNITS
 
 
@@ -142,7 +140,7 @@ class EpisodeWriter:
                 'success':bool(success),'validation_only':validation_only,'success_source':success_source,
                 'legacy_initial_state':json.dumps(self.initial),'task_definition':json.dumps(self.provenance['scene']['task_definition']),
                 'scene_configuration':json.dumps(self.provenance['scene_configuration'])}
-            name=self.dataset_writer.commit(values,attrs,videos)
+            name=self.dataset_writer.commit(values,attrs,videos,video_staging=self.video)
             self.manifest['episodes'].append({'id':name,'path':name});self._close_video();self.begin();return name
         name = f'episode_{len(self.manifest["episodes"]):04d}'
         folder = self.video.folder
@@ -454,107 +452,18 @@ def prepare_dataset(source, output, splits=None, include_failed=False, require_v
     return {'dataset': str(output), 'episodes': len(entries), 'groups': grouped}
 
 
-def annotate_episode(dataset, episode, boundaries):
-    """Video/state index annotation only; never claims to produce MimicGen DatagenInfo."""
-    manifest = json.loads((Path(dataset) / 'manifest.json').read_text())
-    if episode not in {e['id'] for e in manifest['episodes']} or Path(episode).name != episode:
-        raise ValueError('Unknown episode ID')
-    path = Path(dataset) / episode
-    length = len(np.load(path / 'state.npy', mmap_mode='r', allow_pickle=False))
-    expected = ('approach', 'grasp', 'transport', 'place')
-    if list(boundaries) != list(expected):
-        raise ValueError('Boundary order must be approach, grasp, transport, place')
-    values = list(boundaries.values())
-    if any(type(v) is not int or not 0 <= v < length for v in values) or values != sorted(set(values)):
-        raise ValueError('Strictly increasing integer frame boundaries inside episode required')
-    destination = path / 'annotation.json'
-    if destination.exists():
-        raise FileExistsError('Annotation exists; keep originals and use a dataset copy for revisions')
-    atomic(destination, {'schema': 'so101.subtask-boundaries/1', 'frame_count': length,
-                         'boundaries': copy.deepcopy(boundaries), 'scope': 'manual dataset-only boundaries'})
-    return {'annotation': str(destination)}
-
-
 def convert_dataset(source, output, options):
-    """Read canonical input without RGB copies and reuse the existing LeRobot converter."""
-    import subprocess
-    import sys
-    import h5py
-    from ..real2sim.workspaces.package import ROOT, load
-    from ..real2sim.workspaces.demo import coordinate_contract
-    from ..so101_dataset_contract import write_contract, JOINT_SPACE
-    # Select read-only source entries without creating another canonical RGB dataset.
-    from ..learning.minivla.data import load_manifest,episode_arrays
-    dataset=Path(source).resolve();output=Path(output);output.mkdir(parents=True,exist_ok=True)
-    manifest=load_manifest(dataset/'manifest.json')
-    manifest.setdefault('cameras',['side'])
-    eligible=[]
-    for entry in manifest['episodes']:
-        outcome=json.loads((Path(entry['_path'])/'outcome.json').read_text())
-        if outcome.get('validation_only'):raise ValueError('Synthetic smoke episodes cannot enter training')
-        if outcome['success'] or options.get('include_failed',False):
-            episode_arrays(entry,manifest['cameras'],manifest['control_hz']);eligible.append(entry)
-    entries,groups=split_episodes(eligible,require_validation=False)
-    manifest={**manifest,'episodes':entries}
-    result={'episodes':len(entries),'groups':groups}
-    provenance = json.loads((dataset / 'project_provenance.json').read_text())
-    if manifest['control_hz'] != round(manifest['control_hz']):
-        raise ValueError('LeRobot conversion requires an integer camera/control FPS')
-    contract = provenance.get('coordinate_contract', coordinate_contract(load(options['workspace'])))
-    contract = {**contract, 'action_space': JOINT_SPACE}
-    intermediate = output / 'conversion_input.hdf5'
-    definition = provenance['scene']['task_definition']
-    definitions = list({e.get('task_definition',definition)['task_id']:e.get('task_definition',definition) for e in manifest['episodes']}.values())
-    with h5py.File(intermediate, 'w') as h:
-        data = h.create_group('data')
-        data.attrs['env_args'] = json.dumps({'workspace': provenance['workspace'], 'task_definitions': definitions,
-            'source_partition':provenance.get('source_partition'),'source_partition_input':provenance.get('source_partition_input'),
-            'scene_configuration':provenance.get('scene_configuration'),'canonical_coordinates':provenance['coordinates'],'control_dt':1/manifest['control_hz'],'observation_timestamp_path':'obs/timestamp'})
-        for i, entry in enumerate(manifest['episodes']):
-            folder = dataset / entry['path']; group = data.create_group(f'demo_{i}')
-            group.attrs['task_definition'] = json.dumps(entry.get('task_definition') or definition)
-            group.attrs['scene_configuration'] = json.dumps(entry.get('scene_configuration') or provenance.get('scene_configuration'))
-            outcome=json.loads((folder/'outcome.json').read_text())
-            group.attrs['success']=bool(outcome['success']);group.attrs['success_source']=outcome.get('success_source','unknown')
-            group.attrs['source_group']=entry.get('source_group',entry['group_id'])
-            if entry.get('source_lineage'):group.attrs['source_lineage']=json.dumps(entry['source_lineage'])
-            if (folder/'annotation.json').is_file():group.attrs['annotation']= (folder/'annotation.json').read_text()
-            group.attrs['pose_reference']=json.dumps({'source_dataset':str(dataset.resolve()),'episode':entry['path'],'object_telemetry':entry.get('object_telemetry')})
-            actions = np.load(folder / 'raw_action.npy', allow_pickle=False)
-            group.create_dataset('actions', data=actions)
-            group.create_dataset('joint_targets', data=actions)
-            group.create_dataset('obs/policy/joint_pos', data=np.load(folder / 'raw_state.npy', allow_pickle=False))
-            group.create_dataset('obs/timestamp',data=np.load(folder/'timestamp.npy',allow_pickle=False))
-            # Adapter contains numeric arrays and read-only camera references, never RGB copies.
-            from ..utils.async_video_writer import VideoFrames
-            refs={}
-            for view in manifest.get('cameras',['side','wrist']):
-                video=folder/(view+'.mp4');npy=folder/(view+'.npy')
-                path=video if video.exists() else npy
-                value=VideoFrames(path,len(actions),manifest['control_hz']) if video.exists() else np.load(path,mmap_mode='r')
-                refs[view+'_cam']={'file':str(path.resolve()),'source_reference':True,
-                    'format':'mp4' if video.exists() else 'npy','frames':len(actions),'fps':manifest['control_hz'],
-                    'shape':list(value.shape[1:])}
-            group.attrs['external_videos']=json.dumps(refs)
-    write_contract(intermediate, contract)
-    subprocess.run([sys.executable, str(ROOT / 'scripts/tools/convert_isaac2lerobot.py'),
-        '--input_file', str(intermediate), '--root', str(output / 'lerobot'),
-        '--repo_id', options['repo_id'], '--task', definition['language_instruction'],
-        '--fps', str(round(manifest['control_hz'])), '--action_source', 'joint_targets'], check=True)
-    converted_provenance = output / 'lerobot/workflow_provenance.json'
-    atomic(converted_provenance, {**json.loads(converted_provenance.read_text()), 'workspace': provenance['workspace'],
-        'task_definitions': definitions, 'backend': 'mujoco', 'source': str(Path(source).resolve()),
-        'canonical_episodes':manifest['episodes'],
-        'source_groups': {str(i): e.get('source_group',e['group_id']) for i, e in enumerate(manifest['episodes'])},
-        'generation_method': provenance.get('generation_method'),
-        'scene_configuration':provenance.get('scene_configuration'),
-        'scene_configurations':provenance.get('scene_configurations',[]),
-        'episode_scene_configurations':{str(i):e.get('scene_configuration') or provenance.get('scene_configuration') for i,e in enumerate(manifest['episodes'])}})
-    # Conversion adapter is temporary, never a registered artifact.
-    intermediate.unlink()
-    from ..so101_dataset_contract import sidecar
-    sidecar(intermediate).unlink(missing_ok=True)
-    return {**result, 'dataset': str(output / 'lerobot'), 'lerobot': str(output / 'lerobot')}
+    """Compatibility API for legacy training callers; one converter owns all mapping."""
+    import subprocess,sys
+    from ..real2sim.workspaces.package import ROOT
+    output=Path(output);output.mkdir(parents=True,exist_ok=True)
+    argv=[sys.executable,str(ROOT/'scripts/tools/convert_isaac2lerobot.py'),
+        '--input_file',str(Path(source).resolve()),'--root',str(output/'lerobot'),
+        '--repo_id',options['repo_id'],'--action_source','joint_targets']
+    if options.get('include_failed'):argv.append('--include_failed')
+    subprocess.run(argv,check=True)
+    info=json.loads((output/'lerobot/meta/info.json').read_text())
+    return {'dataset':str(output/'lerobot'),'lerobot':str(output/'lerobot'),'episodes':info['total_episodes']}
 
 def grasp_tracker(env):
     from ..real2sim.workspaces.grasp import StableGrasp
@@ -571,76 +480,6 @@ def subtask_signals(env, tracker, tick):
                            eef[:3, 3], obj[:3, 3], left, right)
     return {'grasp': bool(grasp), 'place': env.backend.is_success(),
             'tcp_distance_mm': float(np.linalg.norm(eef[:3, 3] - obj[:3, 3]) * 1000)}
-
-
-def annotate(request, output, publish, bridge, environment_factory, preview):
-    """Replay and annotate grasp/place, using the shared stable-grasp detector."""
-    import shutil
-    from ..learning.minivla.data import load_manifest
-    source = Path(request['input'])
-    provenance = json.loads((source / 'project_provenance.json').read_text())
-    if request.get('workspace') and provenance['workspace'] != metadata(load(request['workspace'])):
-        raise ValueError('Dataset workspace identity differs')
-    manifest = load_manifest(source / 'manifest.json')
-    destination = output / 'dataset'; destination.mkdir()
-    accepted, rejected = [], []
-    scene = provenance['scene']
-    from .tasks import recorded_scene
-    if request.get('workspace'):
-        inherited = recorded_scene({'provenance':provenance},load(request['workspace']))
-        request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids']}}
-    request = {**request, 'options': {**request['options'], 'task_definition': scene.get('task_definition'),
-        'physics_profile': scene.get('physics_profile', 'legacy_urdf'),
-        'full_workspace': scene.get('full_workspace', False),
-        'width': scene['camera']['resolution'][0], 'height': scene['camera']['resolution'][1]}}
-    with environment_factory(request, output, provenance['coordinates'], manifest['control_hz']) as env:
-        emit = preview(env, request, publish)
-        for episode_index, entry in enumerate(manifest['episodes']):
-            folder = Path(entry['_path'])
-            env.backend.restore_state(json.loads((folder / 'replay.json').read_text()))
-            actions = np.load(folder / 'raw_action.npy', allow_pickle=False)
-            raw = np.load(folder / 'raw_state.npy', allow_pickle=False)
-            tracker = grasp_tracker(env)
-            marks, skipped, position = [], [], [0]
-            if bridge:
-                bridge.callbacks['mark'] = lambda: marks.append(position[0])
-                bridge.callbacks['skip'] = lambda: skipped.append(True)
-                bridge.details['marks'] = marks
-            grasp_at = place_at = None
-            for i, target in enumerate(actions):
-                position[0] = i
-                if bridge: bridge.before_step()
-                if skipped: break
-                if not np.allclose(env.backend.get_state()['joint_pos'], raw[i], atol=1e-5):
-                    raise ValueError('Annotation replay diverged from recorded state')
-                env.backend.step(target)
-                signals = subtask_signals(env, tracker, i)
-                if signals['grasp'] and grasp_at is None: grasp_at = i
-                if signals['place'] and grasp_at is not None: place_at = i
-                emit(env.backend.get_rgb(), {'steps': i + 1, 'episode_index': episode_index + 1,
-                     'episode_total': len(manifest['episodes']), 'task_signals': signals, 'marks': list(marks)})
-                if request['options'].get('realtime', True): time.sleep(1 / env.hz)
-            if not request['options'].get('auto', True):
-                grasp_at = marks[0] if len(marks) == 1 else None
-                place_at = len(actions) - 1 if env.backend.is_success() else None
-            if skipped or not env.backend.is_success() or grasp_at is None or place_at is None or not 0 <= grasp_at < place_at < len(actions):
-                rejected.append({'episode': entry['id'], 'reason': 'ordered grasp/place boundaries or successful placement missing'})
-                continue
-            dest = destination / entry['path']
-            shutil.copytree(folder, dest)
-            atomic(dest / 'annotation.json', {'schema': 'so101.mujoco-subtasks/1', 'grasp': grasp_at,
-                'place': place_at, 'frame_count': len(actions),
-                'method': 'stable_contact_replay' if request['options'].get('auto', True) else 'manual_grasp_and_measured_place'})
-            accepted.append({k: v for k, v in entry.items() if k != '_path'})
-    atomic(destination / 'manifest.json', {**manifest, 'episodes': accepted})
-    atomic(destination / 'project_provenance.json', {**provenance, 'annotated_from': str(source.resolve())})
-    return {'passed': bool(accepted), 'dataset': str(destination), 'accepted': len(accepted), 'rejected': rejected}
-
-
-def datagen(request, output, publish=None, bridge=None, environment_factory=None, preview=None):
-    """Compatibility entrypoint; every new DataGen uses the official common core."""
-    from .unified import execute
-    return execute({**request,'backend':request.get('backend','mujoco'),'stage':'datagen','output':str(output)})
 
 
 def convert_hdf5(recipe_file, output):

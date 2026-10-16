@@ -146,9 +146,10 @@ class VideoEpisode:
     def __init__(self,parent,fps,crf=18):
         self.folder=Path(parent)/('.video-'+uuid.uuid4().hex)
         self.folder.mkdir(parents=True,exist_ok=False)
-        self.fps=fps;self.crf=crf;self.writers={}
+        self.fps=fps;self.crf=crf;self.writers={};self.finalized=False
 
     def append(self,images):
+        if self.finalized:raise RuntimeError('Video episode is already finalized')
         if self.writers and set(images)!=set(self.writers):raise ValueError('Episode camera set changed')
         for name,image in images.items():
             if not name or Path(name).name!=name:raise ValueError('Invalid camera ID')
@@ -165,6 +166,7 @@ class VideoEpisode:
             specs[name]={'file':name+'.mp4','frames':frames,'fps':self.fps,
                 'shape':list(video.shape[1:]),'codec':'h264','crf':self.crf,
                 'timestamp_semantics':'frame index maps to recorded observation timestamp'}
+        self.finalized=True
         return specs
 
     def abort(self):

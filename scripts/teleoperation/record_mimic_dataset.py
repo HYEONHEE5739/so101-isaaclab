@@ -237,7 +237,7 @@ def save_episode(writer, episode, episode_id):
                     json.loads(writer._hdf5_data_group.attrs['env_args']).get('scene_configuration'))
     writer._hdf5_data_group[f'demo_{episode_id}'].attrs['success_source']='operator_saved_unverified'
     group=writer._hdf5_data_group[f'demo_{episode_id}']
-    group.attrs['source_group']=str(Path(group.file.filename).resolve())+f'/demo_{episode_id}'
+    group.attrs['source_group']=str(getattr(writer,'_created_here',Path(group.file.filename).resolve()))+f'/demo_{episode_id}'
     writer.flush()
 
     print(
@@ -357,6 +357,7 @@ def main():
     writer.create(
         args_cli.dataset_file,
         env_name=args_cli.mimic_task,
+        common=bool(args_cli.workspace),
     )
     writer.add_env_args(
         {
@@ -707,8 +708,6 @@ def main():
                 f"Failed to close environment: {exc}",
                 flush=True,
             )
-        if args_cli.workspace:
-            writer.finalize_common()
 
 
 if __name__ == "__main__":

@@ -170,3 +170,45 @@ def test_generation_success_rate():
     g.num_attempts = 20; g.num_success = 8; g.num_failures = 12
     status = progress()
     assert status['success_rate'] == .4 and status['target_successes'] == 10
+
+
+def test_datagen_progress_distinguishes_source_validation_and_live_successes(tmp_path,monkeypatch):
+    from soarm101_lab.workflow.mimic import GenerationScheduler
+    root=session(tmp_path,monkeypatch,'datagen');bridge=module.current()
+    bridge.start_datagen(2,4);bridge.source_progress(1,14,'demo_1',88,440);bridge.status()
+    status=json.loads((root/'status.json').read_text());text=module.datagen_status_text(status)
+    assert status['successes']==status['attempts']==0 and len(status['env_status'])==4
+    assert 'Source 검증 완료 1/14' in text and 'frame 88/440' in text and '전체 성공 0/2' in text
+    scheduler=GenerationScheduler(2,20,4);bridge.bind_generation(scheduler)
+    attempt=scheduler.claim(2);scheduler.finish(2,attempt,'success',{'steps':400},lambda:'demo_0')
+    scheduler.set_state(0,'running',steps=12);bridge.status()
+    status=json.loads((root/'status.json').read_text());text=module.datagen_status_text(status)
+    assert '전체 성공 1/2' in text and '최근 결과: Env 2' in text
+    assert 'Env 2: 성공 · 시도 1 · 성공 1' in text and 'step 12' in text
+    pending=scheduler.claim(3)
+    attempt=scheduler.claim(1);scheduler.finish(1,attempt,'success',{'steps':401},lambda:'demo_1')
+    scheduler.finish(3,pending,'interrupted',{'steps':10})
+    bridge.close();final=json.loads((root/'status.json').read_text())
+    assert final['state']=='FINISHED' and final['successes']==2 and final['env_status']['1']['successes']==1
+    text=module.datagen_status_text(final)
+    assert text.startswith('목표 달성') and f'최근 결과: Env 3 · 시도 {pending} · 중단' in text
+    assert f'최근 결과: Env 3 · 시도 {pending} · 목표 달성' not in text
+
+
+@pytest.mark.parametrize('backend',['isaac','mujoco'])
+def test_datagen_ui_uses_identical_progress_for_both_backends(tmp_path,monkeypatch,backend):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    panel=ui.WorkflowPanel(lambda *args:None);panel.save_backend_settings=lambda:None
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+    panel.backend.setCurrentIndex(panel.backend.findData(backend))
+    panel.active_stage='datagen';panel.busy=True
+    root=session(tmp_path,monkeypatch,'datagen');bridge=module.current();panel.service.session=root
+    bridge.start_datagen(100,4);bridge.source_progress(1,14,'demo_1',88,440);bridge.status()
+    panel.show();app.processEvents();panel.poll_preview()
+    assert 'Source 검증 완료 1/14' in panel.task_state.text()
+    assert '전체 성공 0/100' in panel.task_state.text() and 'Env 3: 대기' in panel.task_state.text()
+    assert 'Source 사전 검증 중' in panel.status.text()
+    panel.busy=False;panel.close()

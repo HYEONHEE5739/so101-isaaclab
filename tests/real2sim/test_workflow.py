@@ -124,6 +124,24 @@ def test_failed_run_never_registers(published, tmp_path, monkeypatch):
     assert 'PYTHONHOME' not in environments[0] and environments[0]['PYTHONNOUSERSITE'] == '1'
 
 
+def test_cancelled_datagen_without_success_is_stopped_without_artifact(published,tmp_path,monkeypatch):
+    r=Registry(tmp_path/'registry');a=r.register('workspace',published[3]);op=Operations(r)
+    target=tmp_path/'output'
+    plan={'output':str(target),'argv':['fake-worker'],'options':{'mode':'operator','backend':'mujoco','headless':True},
+        'worker_report':True,'type':'datagen','result_key':'dataset'}
+    monkeypatch.setattr(op,'plan',lambda *args,**kwargs:plan)
+    class Process:
+        def __init__(self,*args,**kwargs):
+            target.mkdir();(target/'report.json').write_text(json.dumps({'passed':False,'stopped':True,'successes':0}))
+        def wait(self,**kwargs):op.cancelled=True;return 1
+    monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.Popen',Process)
+    monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.run',lambda *a,**k:SimpleNamespace(stdout='test'))
+    result=op.run('datagen',a,str(published[3]))
+    assert result=={'status':'STOPPED','no_artifact':True} and len(r.all())==1
+    state=json.loads(next((r.root/'runs').glob('*/state.json')).read_text())
+    assert state['status']=='STOPPED' and 'error' not in state
+
+
 def test_hub_metadata_no_live_upload(published, tmp_path):
     local = tmp_path / 'dataset'; local.mkdir(); (local / 'data.txt').write_text('test')
     artifact = {'id': 'test', 'type': 'dataset', 'path': str(local), 'workspace': metadata(load(published[3]))}
@@ -327,33 +345,6 @@ def test_partition_source_annotation_cannot_replace_original(published, tmp_path
     assert fingerprint(path)==before and registry.get(source['id'])['status']=='SUCCEEDED'
 
 
-def test_annotation_skips_and_reorders_keep_actual_source_identity(published,tmp_path,monkeypatch):
-    import h5py,sys
-    from test_source_partitions import source_fixture
-    from soarm101_lab.workflow.episodes import export_source_splits,source_catalog
-    from soarm101_lab.workflow.curation import export_subset
-    from soarm101_lab.workflow.artifacts import fingerprint
-    from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-    # Metadata adapter fixture only; no simulated grasp/annotation success is claimed.
-    monkeypatch.setitem(sys.modules,'soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders',
-        SimpleNamespace(telemetry_metadata=lambda names:{'object_telemetry':{},'observation_timestamp_path':'obs/timestamp'}))
-    original=tmp_path/'source.hdf5';source_fixture(original,4,load(published[3]))
-    source=Path(export_source_splits(original,tmp_path/'split')['outputs']['train'])
-    records,_=source_catalog(source);chosen=['demo_2','demo_0']
-    output=tmp_path/'partial.hdf5';export_subset(source,output,chosen)
-    with h5py.File(output,'a') as h:
-        for g in h['data'].values():
-            for key in ('source_lineage','source_group','split'):del g.attrs[key]
-    before=fingerprint(source);untouched=fingerprint(output)
-    with pytest.raises(ValueError,match='export order/count'):
-        preserve_metadata(source,output,published[3])
-    assert fingerprint(output)==untouched
-    preserve_metadata(source,output,published[3],expected_source_sha256=before,annotation_sources=chosen)
-    after,_=source_catalog(output)
-    assert after=={f'demo_{i}':records[name] for i,name in enumerate(chosen)}
-    assert fingerprint(source)==before
-    with h5py.File(output) as h:
-        assert [h['data'][f'demo_{i}'].attrs['annotation_source_episode'] for i in range(2)]==chosen
 
 
 def test_workspace_live_profile_updates_static_and_dynamic_layout(published, monkeypatch):

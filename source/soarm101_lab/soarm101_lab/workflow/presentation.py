@@ -45,6 +45,27 @@ class Presentation:
         atomic(self.root / 'status.json', dict(state=state, time=time.time(), steps=self.steps,
                stage=self.config['stage'], mode=self.config['mode'], frames=self.frames, **self.details))
 
+    def start_datagen(self,target,num_envs):
+        self.progress_provider=None
+        self.details.update(workflow_phase='preparing',target_successes=target,successes=0,attempts=0,failures=0,
+            success_rate=None,failure_breakdown={},episode_outcome='환경 준비 중',outcome_reason='',
+            env_status={i:{'state':'waiting','attempts':0,'successes':0,'failures':{},'steps':0} for i in range(num_envs)})
+        self.status()
+
+    def source_progress(self,completed,total,episode=None,frame=0,frames=0):
+        self.details.update(workflow_phase='source_validation',source_completed=completed,source_total=total,
+            source_episode=episode,source_frame=frame,source_frames=frames,
+            episode_outcome='Source 사전 검증 중',outcome_reason='검증 완료 후 병렬 생성을 시작합니다.')
+        for index,worker in self.details.get('env_status',{}).items():
+            worker.update(state='source_validation' if int(index)==0 and episode else 'waiting',
+                steps=frame if int(index)==0 else 0)
+
+    def bind_generation(self,scheduler):
+        for key in ('episode','episode_index','episode_total'):self.details.pop(key,None)
+        self.details['workflow_phase']='generation'
+        self.progress_provider=scheduler.progress
+        self.status()
+
     def poll(self):
         for path in sorted((self.root / 'commands').glob('*.json')):
             command = json.loads(path.read_text())['command']
@@ -170,6 +191,32 @@ def current():
 _current = None
 
 
+def datagen_status_text(status):
+    """One backend-independent summary for preparation, source validation and generation."""
+    phases={'preparing':'환경 준비 중','source_validation':'Source 사전 검증 중','generation':'데이터 생성 중'}
+    states={'waiting':'대기','idle':'대기','resetting':'초기화','running':'실행 중','saving':'저장 중',
+        'source_validation':'Source 검증','success':'성공','interrupted':'중단','target_already_reached':'목표 도달',
+        'ik_failure':'IK 계산 탈락','planning_failure':'계획 실패','simulation_failure':'시뮬레이션 실패',
+        'grasp_failure':'집기 실패','place_failure':'배치 실패','timeout':'시간 초과','storage_failure':'저장 실패'}
+    phase=status.get('workflow_phase','generation');title=phases.get(phase,phase)
+    if status.get('target_successes') and status.get('successes',0)>=status['target_successes']:title='목표 달성'
+    elif status.get('state')=='FINISHED':title='실행 종료'
+    lines=[title]
+    if phase=='source_validation':
+        lines.append(f"Source 검증 완료 {status.get('source_completed',0)}/{status.get('source_total',0)} · "
+            f"현재 {status.get('source_episode') or '준비 중'} · frame {status.get('source_frame',0)}/{status.get('source_frames',0)}")
+    rate=status.get('success_rate');rate=f'{rate*100:.1f}%' if rate is not None else '—'
+    lines.append(f"전체 성공 {status.get('successes',0)}/{status.get('target_successes','—')} · 시도 {status.get('attempts',0)} · 실패 {status.get('failures',0)} · 성공률 {rate}")
+    if status.get('latest_env_id') is not None:
+        category=states.get(status.get('latest_category'),status.get('episode_outcome',''))
+        lines.append(f"최근 결과: Env {status['latest_env_id']} · 시도 {status['latest_attempt']} · {category} {status.get('outcome_reason','')}")
+    for index,worker in sorted(status.get('env_status',{}).items(),key=lambda item:int(item[0])):
+        lines.append(f"Env {index}: {states.get(worker['state'],worker['state'])} · 시도 {worker['attempts']} · 성공 {worker['successes']} · 실패 {sum(worker.get('failures',{}).values())} · step {worker.get('steps',0)}")
+    if status.get('failure_breakdown'):
+        lines.append(' · '.join(f'{states.get(key,key)}: {value}' for key,value in status['failure_breakdown'].items()))
+    return '\n'.join(lines)
+
+
 def attach(env):
     """Preserve the environment's methods and returned observations in both modes."""
     bridge = current()
@@ -229,6 +276,20 @@ class RecorderControls:
         if self.keyboard:
             self.keyboard.destroy()
         self.bridge.close()
+
+
+def annotation_keyboard(adapter):
+    """Standalone Isaac CLI controls for the same common replay/annotation loop."""
+    from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
+    keyboard=Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=.1,rot_sensitivity=.1))
+    adapter.annotation_paused=True
+    keyboard.add_callback('N',lambda:setattr(adapter,'annotation_paused',False))
+    keyboard.add_callback('B',lambda:setattr(adapter,'annotation_paused',True))
+    keyboard.add_callback('S',lambda:adapter.annotation_marks.append(adapter.annotation_position[0]))
+    keyboard.add_callback('Q',lambda:adapter.annotation_skipped.append(True))
+    keyboard.reset()
+    print('[WORKFLOW] Annotation: N play, B pause, S grasp boundary, Q skip',flush=True)
+    return keyboard
 
 
 def framing(workspace):

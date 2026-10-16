@@ -13,7 +13,7 @@ class HDF5DatasetFileHandler:
     def open(self,path):self.reader=EpisodeDataset(path)
     def get_episode_names(self):return self.reader.mimic_names
     def load_episode(self,name,device):
-        values,_,_=self.reader.episode(name)
+        values=self.reader.mimic_episode(name)
         def tensor(value):
             if isinstance(value,dict):return {k:tensor(v) for k,v in value.items()}
             result=torch.as_tensor(value,device=device)

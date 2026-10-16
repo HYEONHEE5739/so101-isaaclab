@@ -24,7 +24,7 @@ def _lineage(reader,generator):
     if not hasattr(reader,'source_records'):reader.source_records=source_catalog(reader.path,allow_unknown=True)[0]
     segments=[]
     for segment in generator.selection_trace:
-        name=reader.mimic_names[segment['source_index']];_,attrs,_=reader.episode(name)
+        name=reader.mimic_names[segment['source_index']];attrs=reader.episode_attributes(name)
         original=json.loads(attrs.get('source_lineage','null')) or reader.source_records.get(name)
         segments.append({**segment,'episode':name,'source':original or {'kind':'UNKNOWN'}})
     partition=reader.args.get('source_partition')
@@ -78,7 +78,7 @@ def _save_trial(writer,reader,adapter,generator,seed):
     values,attrs,videos=adapter.buffer.finish(attrs)
     # Save exactly the pre-IK generated target trajectory and subtask transitions.
     values['mimic_plan']={str(i):{'target_eef_pose':t['poses'],'gripper_action':t['gripper'],'action_noise':t['noise']} for i,t in enumerate(generator.trace)}
-    return writer.commit(values,attrs,videos)
+    return writer.commit(values,attrs,videos,video_staging=adapter.buffer.video)
 
 
 def _attempt_details(adapter,generator,started):
@@ -87,8 +87,8 @@ def _attempt_details(adapter,generator,started):
         'selected_sources':generator.selection_trace,'ik':getattr(adapter,'last_ik',None) or getattr(getattr(adapter,'backend',None),'last_ik',None)}
 
 
-def _run_one(adapter,reader,writer,scheduler,index,attempt,seed):
-    generator=MimicGenerator(adapter,source_pool(adapter,reader.path),seed);adapter.random=generator.random
+def _run_one(adapter,reader,writer,scheduler,index,attempt,seed,pool):
+    generator=MimicGenerator(adapter,pool,seed);adapter.random=generator.random
     started=time.perf_counter();category='simulation_failure';reason=''
     try:
         scheduler.set_state(index,'running')
@@ -118,6 +118,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
         scheduler=GenerationScheduler(opts['num_successful_demos'],opts.get('max_attempts',10000),num_envs,resumed,history)
     except BaseException:
         writer.close(False);parent.close();raise
+    if bridge:bridge.bind_generation(scheduler)
     metrics={};model_ids=[];data_ids=[];state_lock=threading.Lock();previews=queue.Queue(maxsize=1)
     def worker(index):
         backend=MujocoBackend(output/'scene',render_backend=parent.backend.render_backend,shared_backend=parent.backend)
@@ -126,6 +127,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
         adapter.max_episode_steps=opts.get('max_episode_steps',2000)
         last_preview=[0.]
         def preview(a):
+            scheduler.set_state(index,'running',steps=a.step_index)
             if a.step_index%50==0:print(f'[MIMIC] Env {index} step {a.step_index}',flush=True)
             if index==0 and time.monotonic()-last_preview[0]>.1:
                 last_preview[0]=time.monotonic()
@@ -134,8 +136,11 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
         adapter.preview=preview
         with state_lock:model_ids.append(id(backend.model));data_ids.append(id(backend.data))
         try:
+            # Upstream generate() reads this pool; boundaries and RNG belong to each generator.
+            started=time.perf_counter();pool=source_pool(adapter,reader.path,reader.mimic_names)
+            adapter.metrics.update(source_pool_load_count=1,source_pool_load_s=time.perf_counter()-started)
             while (attempt:=scheduler.claim(index)) is not None:
-                _run_one(adapter,reader,writer,scheduler,index,attempt,_seed(seed,attempt))
+                _run_one(adapter,reader,writer,scheduler,index,attempt,_seed(seed,attempt),pool)
         finally:
             adapter.close()
             metrics[index]={**dict(adapter.metrics),**dict(adapter.buffer.metrics),**backend.render_metrics,'video_queue_peak':adapter.buffer.queue_peak,
@@ -152,7 +157,6 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
                     future.result()
             if bridge:
                 bridge.poll();scheduler.control.update(bridge.paused,bridge.single_step);bridge.single_step=False
-                bridge.details.update(scheduler.progress())
                 try:
                     steps,images=previews.get_nowait();bridge.steps=steps;bridge.publish({'sim_'+k:v for k,v in images.items()})
                 except queue.Empty:pass
@@ -194,8 +198,10 @@ def _isaac_loop(native,adapters,reader,writer,scheduler,seed,bridge,boundary=Non
     queue=asyncio.Queue();reset_queue=asyncio.Queue();loop=asyncio.new_event_loop()
     async def worker(index):
         adapter=adapters[index]
+        started=time.perf_counter();pool=source_pool(adapter,reader.path,reader.mimic_names)
+        adapter.metrics.update(source_pool_load_count=1,source_pool_load_s=time.perf_counter()-started)
         while (attempt:=scheduler.claim(index)) is not None:
-            trial_seed=_seed(seed,attempt);generator=MimicGenerator(adapter,source_pool(adapter,reader.path),trial_seed);adapter.random=generator.random
+            trial_seed=_seed(seed,attempt);generator=MimicGenerator(adapter,pool,trial_seed);adapter.random=generator.random
             started=time.perf_counter();category='simulation_failure';reason=''
             try:
                 result=await generator.generate(0,TerminationTermCfg(func=lambda env:torch.tensor([env.check_success()])),
@@ -213,7 +219,7 @@ def _isaac_loop(native,adapters,reader,writer,scheduler,seed,bridge,boundary=Non
     try:
         while not all(t.done() for t in tasks):
             if boundary:boundary()
-            if bridge:bridge.before_step();bridge.details.update(scheduler.progress());bridge.status()
+            if bridge:bridge.before_step();bridge.status()
             loop.run_until_complete(asyncio.sleep(0))
             # Kit updates its own asyncio loop during reset/step. Physics must run
             # outside a running generator event loop, as in upstream env_loop.
@@ -236,6 +242,7 @@ def _isaac_loop(native,adapters,reader,writer,scheduler,seed,bridge,boundary=Non
             for index,command,future in batch:
                 adapters[index].metrics['batch_step_wait_s']+=elapsed
                 adapters[index].after_batch_step(command.cpu().numpy());future.set_result(True)
+                scheduler.set_state(index,'running',steps=adapters[index].step_index)
             loop.run_until_complete(asyncio.sleep(0))
         for task in tasks:task.result()
     finally:
@@ -255,6 +262,7 @@ def run_isaac(native,request,reader,output,bridge=None,boundary=None):
         scheduler=GenerationScheduler(opts['num_successful_demos'],opts.get('max_attempts',10000),count,resumed,history)
     except BaseException:
         writer.close(False);raise
+    if bridge:bridge.bind_generation(scheduler)
     adapters=[IsaacAdapter(native,i,output,_seed(seed,i),scheduler.stop) for i in range(count)];stopped=False
     for adapter in adapters:adapter.max_episode_steps=opts.get('max_episode_steps',2000)
     profile={'physics_step_s':0.,'render_s':0.,'physics_steps':0,'render_calls':0}

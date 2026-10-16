@@ -279,11 +279,15 @@ def test_export_registry_convert_review_and_immutable_input(tmp_path,motion_work
     assert plan['options']['repo_id']=='local/review'
     def converter(argv,**kwargs):
         source=argv[argv.index('--input_file')+1];root=Path(argv[argv.index('--root')+1]);root.mkdir()
-        with h5py.File(source) as h:
-            g=h['data/demo_0'];assert json.loads(g.attrs['annotation'])['grasp']==1
-            assert g.attrs['source_group']==writer.manifest['episodes'][0]['group_id']
-            assert json.loads(g.attrs['scene_configuration'])['active_object_ids']==['cube_red','cube_blue']
-        (root/'workflow_provenance.json').write_text('{}')
+        # Legacy import and numeric mapping now belong to the single converter.
+        assert Path(source)==curated.resolve()
+        manifest=json.loads((Path(source)/'manifest.json').read_text())
+        entry=manifest['episodes'][0];folder=Path(source)/entry['path']
+        assert json.loads((folder/'annotation.json').read_text())['grasp']==1
+        assert entry['group_id']==writer.manifest['episodes'][0]['group_id']
+        assert entry['scene_configuration']['active_object_ids']==['cube_red','cube_blue']
+        (root/'meta').mkdir();(root/'meta/info.json').write_text(json.dumps({'total_episodes':1}))
+        (root/'workflow_provenance.json').write_text(json.dumps({'canonical_episodes':[entry]}))
     import subprocess
     monkeypatch.setattr(subprocess,'run',converter)
     output=tmp_path/'convert';output.mkdir();result=episodes.convert_dataset(curated,output,{'workspace':str(motion_workspace['root']),'repo_id':'local/review'})

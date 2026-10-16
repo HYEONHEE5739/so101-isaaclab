@@ -1,5 +1,236 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — DataGen 자동 Source 사전 재생 제거 (2026-10-16)
+
+사용자 요청: 실제 생성 전에 Source14개를 순차 물리 재생하지 말고 바로 병렬 생성할 것.
+unified.execute에서 `or reader.backend!=backend` 분기를 제거했다. 명시 Replay/Annotation만 replay를
+호출한다. DataGen은 계약 검사→엔진 준비→기존 run_isaac/run_mujoco로 직접 실행한다.
+자동 cached_replay와 cross_replay_cache 결과 필드도 실행 경로에서 제거했다. 캐시 helper는 개발 검사 전용이다.
+입력 계약/주석/영상 검사·전체 Isaac reset·Mimic/IK/새 생성의 실제 성공 판정·3뷰·통일 UI는 유지한다.
+이전 Source 사전 검증 phase를 설명한 아래 항목들은 당시 실행 기록이며 현재 DataGen 흐름과 다르다.
+
+실제 같은 사용자 Source14개로 WorkflowPanel→Operations→worker→Registry 실행 완료.
+양 엔진4환경 모두 자동 Replay0회/검증 phase0회, 준비→생성만 관측했다.
+Isaac22.23초 후 생성 시작→성공2/시도9/실패4, MuJoCo9.09초→성공2/시도6/실패1.
+이번 실행은 양쪽 모두 Env1·2가 각각1개 성공했다. 전체 환경100step 이상·실행 중 성공 증가·최종 UI=report,
+각 HDF52개/주석/MP4 계약·원본 hash 불변 통과. 시작 시간은 환경 준비를 포함한 단일 표본이다.
+common/MuJoCo/partition73PASS, UI/Workflow39PASS. 신규14개 Synthetic dispatch 검사는 엔진을 stub으로 대체한다.
+처음 fixture의 누락 backend 속성으로2실패한 로그는 보존하고 수정 후 전 suite 통과했다.
+
+보고서/화면/로그: outputs/workflow_validation/datagen_immediate/REPORT.md.
+실행 중인 이전 worker에는 코드가 자동 교체되지 않는다. 기존 작업을 중지하고 새 DataGen을 시작하면 적용된다.
+현재 변경은 worker 분기이므로 이 변경만 적용하기 위한 GUI 전체 재시작은 필요하지 않다.
+실물/새 정책 품질 검증·dependency 설치·commit/push 없음. 새 Production launcher/사용자 설정 없음.
+
+## 최신 — Isaac/MuJoCo DataGen 진행 UI 통일·사용자14 Source 실제 UI 검증 (2026-10-16)
+
+Presentation.start_datagen/source_progress/bind_generation으로 준비→Source 검증→생성을 구분한다.
+양 엔진 모두 Scheduler.progress provider를 status 저장·pause·close 때 읽는다. UI는 동일한
+datagen_status_text로 전체성공/목표, 시도/실패/성공률, Env별 상태/시도/성공/실패/step, 최근 결과 Env를 표시한다.
+Scheduler는 latest_env_id/latest_attempt/latest_category와 환경별 step을 전달한다. 전체 목표 달성과
+최근 개별 환경의 category는 분리했다. 각 poll에서 task_state 문구도 한 번만 갱신한다.
+
+성공0개에서 사용자 중지는 report.passed=false를 유지하되 정상 STOPPED로 처리하며 빈 artifact를
+Registry에 넣지 않는다. 생성 전 Source 검증 도중 중지에도 report.json을 남긴다. UI가 빈 결과의 path/id를
+읽으려던 경로도 막았다. 영상은 기존 Overall+Env0 Side/Wrist, 공식 알고리즘/모델/계약은 그대로다.
+
+이번에는 사용자 annotated Source14개를 private Registry에서 실제 WorkflowPanel.execute→Operations.run
+→worker→검증/등록까지 실행했다. Isaac4: Source14/14물리 통과→성공2/시도9(Env1=1/Env2=1),
+MuJoCo4: 성공2/시도6(Env1=1/Env3=1). 양 엔진 실행 중 성공 증가/전 환경100step 이상과 최종 status=report
+카운터 일치를 확인했다. 각 HDF5 공통 계약과 사용자 입력 hash 불변 통과. core69PASS, UI/Workflow39PASS.
+최종 문구 수정 뒤 실제 완료 status로 UI를 다시 렌더링했다. 원래 runtime 기록도 보존한다.
+보고서/화면/결과: outputs/workflow_validation/datagen_progress_parity/REPORT.md.
+열려 있던 GUI 프로세스에는 화면 코드가 자동 반영되지 않으므로 완전히 닫고 다시 열어야 한다.
+실물/새 정책 성능 검증, dependency 설치, commit/push 없음.
+
+## 최신 — Isaac 사전 재생의 전체 초기화·대기 관절 목표 수정 (2026-10-16)
+
+사용자 Isaac4환경 실행에서 Env0만 움직이고 나머지가 퍼진 원인 확인. 해당 실행은 Source14개
+교차 재생 중2/14·166step에서 끝났고 Mimic trial0개였다. 사전 재생은 원래 Env0에서 순차 수행한다.
+그러나 ManagerBasedEnv 생성 후 전체 reset이 없어서 나머지3개는 Task 초기 자세가 아닌 거의0rad였다.
+공통 physics는 전 환경을 step하며, 매 tick 측정 각도를 다시 목표로 삼아 중력 drift도 누적했다.
+
+unified._native_isaac은 생성 직후 전체 reset, replay는 최초 batch hold 목표를 고정하고 선택 행만
+교체하도록 수정했다. MuJoCo 경로·공식 생성/IK/계약은 유지한다. 전체 초기화로 첫 randomizer 샘플
+소비 순서는 과거 코드와 달라질 수 있다. 사용자 요청에 따라 시도했던4분할 미리보기/관련 테스트/
+전용 runner는 제거했다. 원래 Overall + Env0 Side/Wrist 유지; ui.py/test_presentation.py 추가 변경 없음.
+
+실제 PhysX4환경 생성 직후 q와 configured q를 측정하고, 이전 초기화 누락/명령 방식을 재현했다.
+Source1개401step에서 대기3개 최종 자세 오차2.26/2.72/2.56rad→모두0.01533rad,
+최대0.01547rad 미만/대기command변화0, 활성 Source replay는 전후 모두 성공했다.
+이후4환경412batch step, 전 환경 측정 관절 범위2.80–2.83rad/동시4행 명령변경315회/목표2 저장 확인.
+common/MuJoCo/partition68PASS, 입력 hash·HDF5검사·영상3뷰 크기 확인. 실물·정책 품질 검증 아님.
+사용자14개 전체의 최신 실행을 완료한 것으로 과장하지 않는다. Source1개 재현과 사용자 로그를 구분한다.
+
+보고서/실패 로그/관절 수치/전후 영상: outputs/workflow_validation/isaac_idle_hold/REPORT.md.
+최종 실제 결과는 initialized/result.json. 첫 probe는 사전 전체reset으로 초기화누락을 가렸으며,
+초기 검증스크립트 모듈 참조 실패도 보존했다. 신규 dependency/장치/commit/push 없음.
+
+## 최신 — 공통 Production 경로 정리 및 DataGen 병목 개선 (2026-10-16)
+
+중단 작업 재개 완료. 기준 HEAD8da97ca, commit/push 없음. 전체 보고서는
+`outputs/workflow_validation/architecture_cleanup/REPORT.md`, 파일 삭제/이동·A–G 판단은
+`STRUCTURE_AUDIT.md`, 원시 성능과 부하 제한은 `BENCHMARK.md`를 따른다.
+
+Operations.plan/execute_request가 Workspace replay/annotate/datagen을 형식·엔진과 무관하게
+unified.execute로 보낸다. 유효 common 입력은 그대로 사용하며 과거 입력만 별도 Import한다.
+MuJoCo legacy replay/annotation/datagen 및 episodes 중복 helper, Workspace CLI 조기 return 뒤
+native 중복 경로, Canonical 변환용 임시 mapping을 제거했다. 공개 고정 씬 --task CLI와
+개발용 물성/수치 replay 도구는 유지한다. 과거 reader/checkpoint/장치·보정 경계도 유지한다.
+
+Pool은 worker당1회, 시도별 Generator/RNG/trace다. Scheduler는 상태lock 예약→별도 Writerlock
+commit→성공 확정, 저장 실패는 rollback한다. private finalized MP4 staging은 검증 후 이동,
+기존 입력/Resume은 복사한다. Isaac native Source는 EpisodeData에서 공통 Writer에 직접 저장해
+중간 Legacy HDF5/final migration이 없다. 공식 Mimic 생성 본문/라이선스·6D모델 계약은 유지한다.
+
+Positive 교차 물리 재생 캐시는 Source/IDs/Workspace/Scene/모델·보정/물리·엔진버전/전체코드/판정/Hz
+identity를 검사한다. 실제401step/26.52초→hit0step/0.024초 확인, 실패 Source는 계속 차단·비캐시다.
+코드를 수정하는 동안 cache miss는 정상이다. 기존 실패 로그와 GPU OOM 표본은 보존했다.
+
+실제 양 엔진1/2/4환경 목표2 저장, SIGINT1개 보존→새출력2개 재개, 원래 numeric35배열/영상 보존,
+설치 공식14-Source 목표/선택/경계 parity0, UI/Registry worker 계획 확인. 기존Train14와 새Mu2/Isaac2/
+nativeSource1의 LeRobot 변환·state/target/정규화/계보·partition 비교 통과. 원본20/14/6/주석14와
+기존checkpoint4개 hash를 보호한다. core364PASS/6skip, USD68PASS, learning49PASS/1skip,
+common40PASS(중복 suite, 합산 금지). 최종 산출물은 final_audit.json/final_dataset_checks.json에 기록한다.
+
+Python194개 분석, Cartpole/PPO10파일(8py/2yaml) 삭제, 과거문서3개 archive 이동.
+새 Production 모듈/launcher 없음. 현재 구조는 ARCHITECTURE, 계약은 DATA_FLOW, 수정 위치는 PROJECT_MAP이다.
+SCENE_REFINEMENT_HANDOFF와 과거환경freeze는 원래 위치에 유지한다. 기존 dirty HANDOFF/로컬 로그 보존.
+
+성능은 각설정1회이며 초기 CPU검사·일부 사용자GPU부하가 섞였다. afterMu4는 깨끗한 GPU비교 표본이 아니다.
+wall감소 전체를 코드효과로 주장하거나 4환경의 일괄가속을 주장하지 않는다. NativeSource 검사는
+MuJoCo에서 파생된 scripted PhysX자료다. 독립 teleop/사람키보드주석/8환경/새정책품질/실물 미검증.
+의존성 설치/버전변경/실물 연결/자동commit 없음.
+
+## 최신 — Isaac / MuJoCo 공통 Episode·공식 Mimic·병렬 생성 (2026-10-16)
+
+`workflow.dataset`는 `so101.common-episode/2` HDF5+Side/Wrist640×480 H264, 원자적 저장·검증·Legacy Import를 담당한다.
+두 엔진의 새 Source/Annotation/DataGen은 공통 형식이고 기존 NPY/HDF5는 읽기만 한다. UI→operations.unified_plan
+→기존 workflow.py worker→unified.execute→계약/교차 physical replay→공통 Mimic→backend adapter→중앙 Writer다.
+새 production launcher는 없다. 기존 Isaac CLI도 Workspace 자동 Annotation/DataGen을 같은 core로 보낸다.
+
+`mimic_reference`는 설치된 공식 Isaac Lab Mimic1.0.15의 5생성 모듈/수학 함수 이식본(라이선스/UPSTREAM.json 보존)이다.
+생성 함수 본문을 변경하지 않았다. SO101 단일arm/두subtask/SkillGenfalse를 지원한다. nn_k3/interp5/fixed0/noise0,
+grasp offset(0,10)/마지막(0,0), 원본 재선택false/이전command에서 보간. Pool은 공식 HDF5 key 순서
+(demo_0, demo_1, demo_10…)를 유지한다. Curation 숫자 정렬과 혼동하지 말 것. trace→원본 이름도 이 순서로 매핑한다.
+실제14개 Pool에서 설치된 공식 클래스와 선택/경계/pose/gripper/noise 차이0을 확인했다.
+
+MuJoCo는 한 MjModel + 환경별 MjData/FK/IK scratch, 실제 ThreadPool이다. GL은 소유 thread에서
+생성·사용·종료하고 render만 lock으로 직렬화한다. PyOpenGL GLX glGetString이 EGL worker에서 segfault하던
+문제는 EGL proc lookup으로 수정했다. 실제4환경 모두 RTX4060/softwarefalse 확인. Isaac은 vector scene와
+환경별 coroutine/action/reset mailbox, 독립 RNG/reset/episode를 사용한다. Kit loop 안에서 physics를 돌리지 않는다.
+IK는 기존3mm/0.12rad 유지, 5축 제약/seed/limits/위치·각도 잔차를 기록하며 task 실패와 분리한다.
+
+Scheduler가 전체 목표 성공/max_attempts를 관리하며 Writer callback을 lock 안에서 호출한다. 목표 초과 등록 없음.
+시도 이력은 HDF5 root generation/attempts_json에도 넣어 bundle 이동 후 Resume한다. 원본 Pool byte/좌표/seed/엔진을
+검사한다. Isaac default SIGINT가 저장 전에 프로세스를 종료하므로 AppLauncher 뒤 기존 deferred_interrupt를 설치하고
+physics/pause 경계에서 종료한다. 양 엔진 실제 중지1→재개2 및 원래 numeric 보존 확인. incomplete는 등록하지 않는다.
+
+Source ID·Train14/Val6·594개 원본 numeric 배열·MP4 byte/hash 보존. 실제 Source20 Isaac Annotation은19통과/1배치실패.
+DataGen은 cross replay 실패 Source를 조용히 통과시키지 않는다. Annotation은 명시적으로 통과분만 별도 저장한다.
+생성은 mimic_segments의 subtask Source ID·경계를 저장한다. A+B / A+C 같은 공유 Source 조합은 split 전에 연결 성분으로
+묶어 누수를 막는다. UNKNOWN은 독립 split 불가. 초기 상태는 엔진 고유 blob을 다른 엔진에 적용하지 않고 portable pose/q/velocity로 복원한다.
+
+Curation 기존 bounded reader/export, 단일 LeRobot Converter, ACT/MiniVLA 정규화·H40/6D·모델 구조 유지.
+새 평가 summary는 evaluation-episode/1 + 공통 HDF5/두 MP4, 완료된 실패 episode도 보존. Legacy 단일카메라/Real Eval 유지.
+실제 ACT2step, MiniVLA2step(원본Train14/Val6 및 양 엔진 생성train1/Val6), 반대 엔진8step평가를 실행했다.
+짧은 연결 검사이며 정책 task 성공/실물 검증이 아니다. 원본20/14/6/주석14와 immutable Workspace는 수정하지 않았다.
+
+문서: docs/real2sim/DATA_FLOW.md 맨 위. 검증/벤치마크/실패 로그: outputs/workflow_validation/unified_mimic/REPORT.md.
+최종 회귀 수와 실행 한계는 보고서를 확인한다. 기존 dirty Curation 작업·로컬 로그 보존, dependency/하드웨어/commit 변경 없음.
+
+최종 확인: `unified_mimic/final_audit.json` PASS, 공통 데이터24개 전체 계약 검사 및 원본4개 hash 불변.
+최신 기존 Isaac CLI Annotation401step + DataGen2환경/목표1 성공(시도6, IK탈락4, 목표도달중단1)을 확인했다.
+core359PASS/6skip, 별도USD69PASS, runtime47PASS/1skip, 최신 계약·MuJoCo·분할46PASS(서로 중복, 합산 금지).
+보고서와 순차1/2/4 성능표 작성 완료. 4환경이 2환경보다 빠르다고 주장하지 않는다. 독립 Isaac teleop가 아닌
+MuJoCo에서 파생된 scripted PhysX Source를 역방향 검사에 사용했다는 범위도 보고서에 명시했다.
+
+
+## 최신 — Curation 저장 버튼 통합 (2026-10-16)
+
+고급 설정의 export_split 버튼을 제거하고 하단 export_button 하나를 사용한다.
+미리보기 split_plan이 있으면 Train / Val 저장 → save_source_split, 없으면 데이터 저장 → 기존 subset 저장이다.
+save가 기존 분할 저장 함수로 분기하며 export/Registry 알고리즘은 유지한다. 기록된 분할은 재분할하지 않는다.
+미리보기 취소·설정 변경 시 버튼도 데이터 저장으로 돌아온다. 설명 팝업·사용 문서도 같은 흐름으로 수정했다.
+합성 자료의 실제 버튼 클릭→파일/Registry 저장 3경로 및 회귀46 PASS,
+실제 Source20/저장 Train14의 읽기 전용 UI·원본 fingerprint 확인 완료.
+검증: outputs/workflow_validation/curation_single_save/REPORT.md.
+
+## 최신 — Curation 설정 설명을 팝업으로 이동 (2026-10-16)
+
+데이터셋 구성의 긴 설명 QLabel을 제거하고 설명 버튼→show_curation_help의 정보 팝업으로 이동.
+입력 이름은 사용할 데이터 수, 선별 버튼은 적용이다. auto_select 동작은 그대로다.
+기본 split_status는 숨기고, 미리보기/기록 분할이 있을 때 실제 Train/Val 개수만 간결히 표시한다.
+검증/화면: outputs/workflow_validation/curation_settings_compact/REPORT.md.
+
+## 최신 — Curation 확인 사유 / Train·Val 미리보기 설명 (2026-10-16)
+
+flag_outliers는 기존 비교 규칙 그대로 flag_details(value/threshold/median/group_size)를 분석 row에 추가한다.
+Curation 목록·영상 위·상세 분석에 이유를 표시한다. 원본 annotation/outcome이나 자동 제외는 바꾸지 않는다.
+분포 split fill은 Train초록/Val파랑, 확인은 주황 테두리, 선택은 흰 테두리, 제외는 회색이다.
+자동 선별(남길 개수)과 분할(학습비율/Seed)을 UI 1/2단계로 설명하고, 제외 취소·모두 포함으로 명칭 변경.
+미리보기를 만들면 분석 그림을 펼치고 저장 전 실제 개수를 표시한다. 같은 원본 그룹 수동 이동 유지.
+비율/Seed/포함 변경은 임시 split_plan을 지우고 generation으로 예전 비동기 결과를 폐기한다.
+기록 source_partition은 유지하며, 포함을 바꾼 뒤 오래된 plan으로 저장하던 누락/불일치 경로를 막는다.
+검증·실제 데이터 읽기 전용 미리보기: outputs/workflow_validation/curation_split_clarity/REPORT.md.
+
+## 최신 — Source 가장자리 배치 / 반듯한 분포와 로봇 위치 (2026-10-16)
+
+source_workspace의 새 수집 runtime reset만 margin_m=0으로 변경했다. uniform/yaw0/xy_jitter0,
+기존 크기 기반 limit·separation sampler 유지. Scene2 지지면150/물체24 mm → 중심 범위126 mm.
+configured는 original·과거 uniform(원래 margin)·새 uniform(margin0)만 허용한다. 원본 Task hash 유지.
+과거 Source Resume/Replay/Annotation/DataGen은 기록 reset을 상속, 새 Source 파생은 margin0을 상속한다.
+Curation 분포는 90도 단위 방향으로 테두리를 수평/수직 유지하고, base_to_workspace 원점 위치를
+보라색 네모로 표시한다. robot_xy를 fit에 포함, 같은 배율이며 네모 크기는 표시용이다. 화살표 제거.
+UI·MuJoCo 회귀76/별도 USD Workflow·Task31 PASS, 실제 Scene2 MuJoCo32reset·3물체 모서리접촉·10step,
+1000배치·기존9episode UI/hash 확인. Isaac 런타임/실물/작업 성공 검증은 미실행.
+outputs/workflow_validation/edge_touch_placement/REPORT.md 참조. 원본 Workspace/사용자 데이터 보존.
+
+## 최신 — Curation 최신 단계 자동 연결 / Annotation 시점 (2026-10-16)
+
+CurationDialog.open_latest는 현재 Workspace의 source/annotated/datagen을 한 번에 Registry.latest로
+비교한다. Source 우선 fallback 제거, 가장 최근 SUCCEEDED·존재하는 경로를 자동 로드한다.
+EventTimeline은 기존 QSlider를 확장해 기록 events만 표시한다. initStyleOption의 handle/groove와
+sliderPositionFromValue로 클릭 좌표를 맞추며, 주석 버튼에 경과 초·1-based frame을 표시한다.
+마커/버튼→jump_to_event→기존 seek/Job→두 RGB/로봇/관절 동기화, 재생 중에도 정확한 frame에서 정지.
+시각은 원본 timestamps[event]-timestamps[0], 없으면 frame*dt. Episode 교체 시 마커·버튼을 비운다.
+수집/주석/생성 원본이나 annotation 경계를 수정하지 않는다. 검증/미리보기:
+outputs/workflow_validation/curation_annotation_timeline/REPORT.md.
+
+## 최신 — Curation 검토 중심 화면 (2026-10-16)
+
+기존 workflow.curation_ui의 기본 화면을 목록 + Side/Wrist 동시 영상으로 정리했다.
+로봇 경로는 정사각형 탭, 필터/상세 분석/데이터셋 구성은 접힌 상태다. 기존 선별/분할/저장은 유지.
+WorkflowPanel.open_curation이 현재 TaskSelector Workspace identity를 넘기고 QTimer로
+Registry.latest의 완료 Source를 자동 로드한다. Source 없으면 Annotation/DataGen, 다른 Workspace는 제외.
+데이터 열기 하나에서 canonical 폴더/HDF5를 모두 선택한다. EpisodeReader.frame은 기존 단일 camera와
+복수 camera tuple을 받으며 같은 관측의 rgb_frames/rgb_timestamps를 반환한다. LRU/decoder 제한 유지.
+초기 분포의 XY min/max를 제거하고 WorkspaceRandomizer의 target-center envelope(크기/margin)를 표시,
+로봇→지지면 중심을 위로 맞춘다. 필터에 따른 자동 배율 변경 없음. 원본 Workspace/데이터 불변.
+검증/실제 9episode Source 화면과 원본 hash 확인: outputs/workflow_validation/curation_review_layout/REPORT.md.
+실물/엔진 신규 실행 없음. 기존 dirty ui.py/문서 변경을 보존했고 자동 commit/push하지 않았다.
+
+## 최신 — GUI Curation yaml/av 의존성 보완 (2026-10-16)
+
+GUI .venv-real2sim-ui는 include-system-site-packages=false여서 lerobot-arena에 설치한 패키지를 보지 않는다.
+실제 새 Source 분석→precision.simulation_configuration의 yaml import 실패를 재현했다.
+requirements-ui.txt에 PyYAML>=6,<7, av>=15,<16 추가. GUI venv에만 PyYAML6.0.2/av15.1.0을 --no-deps로 설치했다.
+conda/worker 패키지는 변경하지 않았다. 실제 GUI Python에서 사용자 Source9episode 분석,
+Side/Wrist first/middle/last 640x480 MP4 decode 및 offscreen CurationDialog load PASS.
+재현/결과: outputs/workflow_validation/curation_ui_dependencies/result.json. 원본은 읽기만 했다.
+GUI 의존성 설치는 .venv-real2sim-ui/bin/python -m pip install -r scripts/real2sim/requirements-ui.txt.
+
+## 최신 — Workflow 설정 입력 지연 제거 (2026-10-16)
+
+ui.WorkflowPanel.update_ready는 widget snapshot만 만들고 200ms singleShot 뒤 단일 ThreadPoolExecutor에서
+기존 Operations.readiness를 실행한다. poll_preview가 완료 future를 GUI thread에서 반영한다.
+검사 중 Run 비활성, generation으로 이전 입력/실행 중 결과 폐기, 대기 snapshot은 마지막 한 개만 유지.
+close에서 대기 취소, worker에는 plain data만 전달한다. 실행 시 service.run/plan/Registry.verify와 장치 검사 유지.
+새 Controller/서비스/설정/검사 생략이나 Workspace hash cache 없음. readiness 호출 자체는 원래 full 검증이다.
+실제 Scene2v8 입력5건: 이전0.56s/event(Workspace load20회), 이후0.24~0.40ms/event.
+상세/회귀76PASS/프로파일: outputs/workflow_validation/ui_responsiveness/REPORT.md.
+실물/worker 자동 연결/토크 없음. 이번 수정은 자동 commit/push하지 않음.
+
 ## 최신 — Dataset RGB MP4 Streaming (2026-10-15)
 
 새 MuJoCo Source/DataGen의 EpisodeWriter는 숫자만 RAM에 남기고 기존 AsyncVideoWriter로 H264/CRF18,

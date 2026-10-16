@@ -1,3 +1,5 @@
+> 과거 설계·실험 기록입니다. 현재 구조와 실행 경로는 [ARCHITECTURE](../../real2sim/ARCHITECTURE.md)와 [DATA_FLOW](../../real2sim/DATA_FLOW.md)를 따릅니다. 본문의 단계·제한·명령은 작성 당시 기준입니다.
+
 # Phase 2: SO-101 독립 MuJoCo 최소 환경
 
 2026-10-06 구현/검증. Phase 2.5 VLA gate는 **미실행**이며 UI 연결 조건은 아직 충족하지 않았다.

@@ -214,36 +214,19 @@ def record_fixture(path,w,ids,episodes=1):
     return writer
 
 
-def test_source_replay_annotation_datagen_inherit(workspace,tmp_path,monkeypatch):
-    from soarm101_lab.workflow import mujoco as worker,episodes
+def test_legacy_episode_stages_use_only_common_import_boundary(workspace,tmp_path,monkeypatch):
+    from soarm101_lab.workflow.operations import execute_request
+    from soarm101_lab.workflow import mujoco
     from soarm101_lab.workflow.artifacts import fingerprint
     writer=record_fixture(tmp_path/'source',workspace,['cube_red'])
-    before=fingerprint(writer.root);seen=[]
-    original=worker._environment
-    def factory(request,output,*args):
-        env=original(request,output,*args)
-        assert env.backend.workspace['task']['dynamic']==['cube_red']
-        seen.append(env.backend.metadata['scene_configuration'])
-        env.backend.get_rgb=lambda camera=None:np.zeros((24,32,3),np.uint8)
-        return env
-    monkeypatch.setattr(worker,'_environment',factory)
-    request={'workspace':str(workspace['root']),'input':str(writer.root),'renderer':'none',
-             'options':{'active_object_ids':workspace['task']['dynamic'],'realtime':False,'auto':True}}
-    report=worker.replay(request,tmp_path/'replay',lambda *args:None,None)
-    assert report['passed'] and report['max_joint_error_rad']<1e-10
-    (tmp_path/'annotation').mkdir()
-    report=episodes.annotate(request,tmp_path/'annotation',lambda *args:None,None,factory,worker._preview)
-    assert not report['passed'] # Holding home is not a valid manipulation.
-    entry=writer.manifest['episodes'][0]
-    (writer.root/entry['path']/'annotation.json').write_text(json.dumps({'schema':'so101.mujoco-subtasks/1','grasp':1,'place':3,'frame_count':4}))
-    original_after_label=fingerprint(writer.root)
-    request['options'].update(instruction=writer.instruction,num_successful_demos=1,max_attempts=1)
-    # Legacy clips remain readable. Unverified coordinates and 32x24 images
-    # cannot enter the new common generation contract.
-    with pytest.raises(ValueError,match='coordinate/action contract'):
-        episodes.datagen(request,tmp_path/'generated')
-    assert all(s['active_object_ids']==['cube_red'] for s in seen)
-    assert fingerprint(writer.root)==original_after_label and before!=original_after_label
+    before=fingerprint(writer.root)
+    monkeypatch.setattr(mujoco,'_environment',lambda *args,**kwargs:pytest.fail('Invalid input must fail before engine creation'))
+    for stage in ('replay','annotate','datagen'):
+        request={'backend':'mujoco','stage':stage,'workspace':str(workspace['root']),
+            'input':str(writer.root),'renderer':'none','output':str(tmp_path/stage),
+            'options':{'auto':True,'realtime':False,'num_successful_demos':1,'max_attempts':1}}
+        with pytest.raises(ValueError,match='coordinate/action contract'):execute_request(request)
+    assert fingerprint(writer.root)==before
 
 
 

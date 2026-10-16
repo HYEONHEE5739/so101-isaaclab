@@ -61,15 +61,16 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 if args_cli.workspace:
     args_cli.enable_cameras = True
-    if args_cli.auto:
-        from pathlib import Path
-        from soarm101_lab.workflow.unified import execute
-        result=execute({'backend':'isaac','stage':'annotate','workspace':args_cli.workspace,'input':args_cli.input_file,
-            'include':args_cli.include,'output':str(Path(args_cli.output_file).with_suffix('.workflow')),
-            'dataset_output':args_cli.output_file,'options':{'device':args_cli.device,'auto':True,
-                'mode':'operator' if args_cli.headless else 'developer'}})
-        print('Common annotated dataset:',result['dataset'])
-        raise SystemExit(0)
+    if args_cli.annotate_subtask_start_signals:
+        raise ValueError('Workspace SO101 uses sequential grasp/place annotations without SkillGen start signals')
+    from pathlib import Path
+    from soarm101_lab.workflow.unified import execute
+    result=execute({'backend':'isaac','stage':'annotate','workspace':args_cli.workspace,'input':args_cli.input_file,
+        'include':args_cli.include,'output':str(Path(args_cli.output_file).with_suffix('.workflow')),
+        'dataset_output':args_cli.output_file,'options':{'device':args_cli.device,'auto':args_cli.auto,
+            'mode':'operator' if args_cli.headless else 'developer'}})
+    print('Common annotated dataset:',result['dataset'])
+    raise SystemExit(0)
 
 if args_cli.enable_pinocchio:
     import pinocchio  # noqa: F401
@@ -236,17 +237,7 @@ def replay_episode(
 
     env.sim.reset()
     env.recorder_manager.reset()
-    if args_cli.workspace:
-        from soarm101_lab.real2sim.workspaces.demo import restore_initial_state
-        restore_initial_state(env, episode, env._workspace_source_quat_order)
-        if hasattr(env, '_stable_grasp_trackers'):
-            del env._stable_grasp_trackers
-        if hasattr(env, '_stable_grasp_diagnostics'):
-            del env._stable_grasp_diagnostics
-        if hasattr(env, '_grasp_completed'):
-            env._grasp_completed.zero_()
-    else:
-        env.reset_to(initial_state, None, is_relative=True)
+    env.reset_to(initial_state, None, is_relative=True)
 
     from soarm101_lab.real2sim.workspaces.diagnostics import GraspReport
     grasp_report = GraspReport()
@@ -278,18 +269,10 @@ def replay_episode(
                     return False
 
         action_tensor = torch.as_tensor(action, dtype=torch.float32, device=env.device).reshape(1, -1)
-        if args_cli.workspace:
-            target = episode.data['joint_targets'][action_index].to(env.device).reshape(1, 6)
-            env._workspace_recorded_arm_target = target[:, :5]
-            if not torch.allclose(action_tensor[:, -1], target[:, -1], atol=1e-5):
-                raise ValueError('Source gripper action differs from recorded joint target')
         env.step(action_tensor)
         grasp_report.observe(env)
 
     grasp_report.report(env)
-    if args_cli.workspace and success_term is not None:
-        from soarm101_lab.real2sim.workspaces.diagnostics import report_place
-        report_place(env, success_term.params["workspace"])
 
     if success_term is not None:
         if not bool(success_term.func(env, **success_term.params)[0]):
@@ -486,16 +469,7 @@ def main():
     if env_name is None:
         raise ValueError("Task/env name was not specified nor found in the dataset.")
 
-    if args_cli.workspace:
-        from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
-        workspace, source_args = validate_input(args_cli.input_file, args_cli.workspace)
-        from soarm101_lab.workflow.artifacts import fingerprint
-        source_input_sha256 = fingerprint(args_cli.input_file)
-        env_cfg = make_mimic_config(workspace, args_cli.device, annotation=True,
-                                   coordinates=source_args.get('so101_coordinates'))
-        env_name = env_cfg.env_name
-    else:
-        env_cfg = parse_env_cfg(env_name, device=args_cli.device, num_envs=1)
+    env_cfg = parse_env_cfg(env_name, device=args_cli.device, num_envs=1)
     env_cfg.env_name = env_name
 
     if env_cfg.terminations is not None and hasattr(env_cfg.terminations, "success"):
@@ -506,9 +480,6 @@ def main():
 
     env_cfg.terminations = None
     env_cfg.recorders = MimicRecorderManagerCfg()
-    if args_cli.workspace:
-        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import PreStepPolicyObservationsCpuRecorder
-        env_cfg.recorders.record_pre_step_flat_policy_observations = RecorderTermCfg(class_type=PreStepPolicyObservationsCpuRecorder)
 
     if not args_cli.auto:
         env_cfg.recorders.record_pre_step_subtask_term_signals = None
@@ -518,16 +489,8 @@ def main():
 
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
-    if args_cli.workspace:
-        from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import VideoHDF5DatasetFileHandler
-        env_cfg.recorders.dataset_file_handler_class_type=VideoHDF5DatasetFileHandler
 
-    if args_cli.workspace:
-        from soarm101_lab.tasks.manager_based.soarm101_lab.so101_mimic_env import SO101PickPlaceMimicEnv
-        env = SO101PickPlaceMimicEnv(cfg=env_cfg)
-        env._workspace_source_quat_order = source_args.get('root_quaternion_order', 'wxyz')
-    else:
-        env = gym.make(args_cli.task or env_name, cfg=env_cfg).unwrapped
+    env = gym.make(args_cli.task or env_name, cfg=env_cfg).unwrapped
 
     from soarm101_lab.workflow.presentation import attach
     bridge = attach(env)
@@ -649,11 +612,6 @@ def main():
     from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import close_video_recorders
     close_video_recorders(env)
     env.close()
-    if args_cli.workspace and exported_episode_count:
-        from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace,
-                          expected_source_sha256=source_input_sha256, annotation_sources=exported_source_names)
-        env.recorder_manager._dataset_file_handler.finalize_common()
 
     if not exported_episode_count:
         raise RuntimeError('Annotation exported 0 episodes: see task/subtask failure above; no annotated artifact was created')

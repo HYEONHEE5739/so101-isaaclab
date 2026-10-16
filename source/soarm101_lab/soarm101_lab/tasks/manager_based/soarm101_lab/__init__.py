@@ -5,7 +5,6 @@
 
 import gymnasium as gym
 
-from . import agents
 from .base_pick_place_teleop_env_cfg import SO101TeleopEnvCfg
 from .so101_mimic_env import SO101PickPlaceMimicEnv
 from .so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
@@ -17,9 +16,6 @@ __all__ = [
 ##
 # Register Gym environments.
 ##
-
-import gymnasium as gym
-
 
 gym.register(
     id="SO101-PickPlace-Mimic-v1",

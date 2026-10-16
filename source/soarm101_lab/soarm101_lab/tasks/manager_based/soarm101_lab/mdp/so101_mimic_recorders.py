@@ -67,25 +67,64 @@ from isaaclab.utils.datasets import HDF5DatasetFileHandler
 
 
 class VideoHDF5DatasetFileHandler(HDF5DatasetFileHandler):
-    """Isaac's numeric schema is unchanged; RGB is an episode-level external attribute."""
-    def create(self,file_path,env_name=None):
+    """Native recorder boundary; Workspace recordings commit directly to the common writer.
+
+    The original fixed-scene CLI remains an explicit compatibility mode without a Workspace.
+    """
+    def create(self,file_path,env_name=None,*,common=False):
         from pathlib import Path
         file_path=str(file_path)
         target=Path(file_path if file_path.endswith('.hdf5') else file_path+'.hdf5')
         if target.exists():raise FileExistsError('Choose a new dataset output: '+str(target))
-        result=super().create(str(target),env_name=env_name)
         self._created_here=target.resolve()
-        return result
+        self._common=common;self._common_writer=None;self._kinematics=None
+        if common:
+            self._env_args={'env_name':env_name,'type':2,'backend':'isaac'}
+        else:return super().create(str(target),env_name=env_name)
 
-    def finalize_common(self):
-        if not getattr(self,'_created_here',None):raise RuntimeError('Only a new writer-owned recording may be finalized')
-        from soarm101_lab.workflow.dataset import finalize_owned_isaac_recording
-        return finalize_owned_isaac_recording(self._created_here)
+    def add_env_args(self,env_args):
+        if not getattr(self,'_common',False):return super().add_env_args(env_args)
+        self._env_args.update(env_args)
+        if self._common_writer:
+            self._common_writer.args.update(env_args);self._common_writer.flush()
+
+    def flush(self):
+        if not getattr(self,'_common',False):return super().flush()
+        if self._common_writer:self._common_writer.flush()
+
+    def close(self):
+        if not getattr(self,'_common',False):return super().close()
+        if self._common_writer:
+            self._common_writer.close();self._common_writer=None
+        self._hdf5_file_stream=None
+
+    def _write_common(self,episode,video):
+        import json
+        from soarm101_lab.workflow.dataset import DatasetWriter,isaac_recording_episode
+        if video is None:raise ValueError('Common recording requires streamed Side and Wrist videos')
+        def numpy(value):
+            return {k:numpy(v) for k,v in value.items()} if isinstance(value,dict) else value.detach().cpu().numpy()
+        values=numpy(episode.data);specs=video.finish(len(values['actions']))
+        specs={key:{**spec,'file':str((video.folder/spec['file']).resolve())} for key,spec in specs.items()}
+        args=self._env_args;attrs={'success':bool(episode.success),'simulation_backend':'isaac',
+            'success_source':'operator_saved_unverified'}
+        if episode.seed is not None:attrs['seed']=episode.seed
+        values,attrs,specs,self._kinematics=isaac_recording_episode(
+            values,attrs,specs,args,args['so101_coordinates'],self._kinematics)
+        if self._common_writer is None:
+            common_args={**args,'root_quaternion_order':'wxyz','ee_frame':'robot_base'}
+            self._common_writer=DatasetWriter(self._created_here,common_args,args['so101_coordinates'])
+            self._hdf5_data_group=self._common_writer.data
+            self._hdf5_file_stream=self._common_writer.h
+        self._common_writer.commit(values,attrs,specs,video_staging=video)
+        self._demo_count=self._common_writer.count
+        video.abort();episode._rgb_video=None
 
     def write_episode(self,episode):
         from pathlib import Path
         import json,shutil,uuid
         video=getattr(episode,'_rgb_video',None)
+        if getattr(self,'_common',False):return self._write_common(episode,video)
         if video is None:return super().write_episode(episode)
         frames=len(episode.data['actions']);parent=Path(self._hdf5_data_group.file.filename).resolve().parent
         folder=parent/(Path(self._hdf5_data_group.file.filename).stem+'.videos')/uuid.uuid4().hex

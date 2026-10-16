@@ -31,12 +31,15 @@
 
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
 |---|---|
-| dataset representation contract | `so101_dataset_contract.py` |
-| Isaac HDF5 recording | `scripts/teleoperation/record_mimic_dataset.py` |
-| demo annotation | `scripts/mimic/annotate_demos.py` |
-| Mimic datagen | `scripts/mimic/generate_dataset.py` |
-| joint-target replay | `scripts/tools/replay_joint_targets.py` |
-| Isaac→LeRobot conversion | `scripts/tools/convert_isaac2lerobot.py` |
+| 공통 HDF5 Reader/Writer·Legacy Import·검증 | `workflow/dataset.py` |
+| Isaac Source 기록 | `scripts/teleoperation/record_mimic_dataset.py`, `mdp/so101_mimic_recorders.py` |
+| MuJoCo Source 기록 | `workflow/mujoco.py:source`, `workflow/episodes.py:EpisodeWriter` |
+| 두 엔진 명시 Replay·Annotation / 자동 재생 없는 DataGen 분기 | `workflow/unified.py` |
+| 공식 Mimic·Pool·RNG·성공 예약 | `workflow/mimic.py`, `workflow/mimic_reference/` |
+| 병렬 생성 실행·중단/재개 | `workflow/datagen.py` |
+| Source 계보와 Train/Val | `workflow/episodes.py` |
+| 공통/Legacy→LeRobot | `scripts/tools/convert_isaac2lerobot.py` |
+| 고정 씬 진단 replay | `scripts/tools/replay_joint_targets.py` (Developer Tool) |
 
 ## Workspace Environment
 
@@ -48,7 +51,7 @@
 | mass/friction/collision | `real2sim/workspaces/physics.py` |
 | reset/randomization | `real2sim/workspaces/reset.py` |
 | source-demo/replay contract | `real2sim/workspaces/demo.py` |
-| Mimic workspace adapter | `real2sim/workspaces/mimic.py` |
+| Mimic developer 물성 비교 설정 | `real2sim/workspaces/mimic.py` |
 
 ### Randomization을 수정할 때
 
@@ -76,8 +79,12 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 - Real/Sim runtime (Isaac/MuJoCo 선택): `scripts/real2sim/real2sim_sim.py`
 - Builder workspace import: `scripts/real2sim/workflow.py import-builder`
 - workspace tool: `scripts/real2sim/workspace.py`
-- workflow: `scripts/real2sim/workflow.py` (`list/register/ready/run/worker/publish/import-hdf5`)
+- workflow: `scripts/real2sim/workflow.py` (`list/register/ready/run/worker/import-builder/migrate/import-hdf5`)
 - physics check: `scripts/real2sim/check_workspace_physics.py`
+
+`inspect_isaac_hdf5.py`는 트리/shape, `inspect_annotate_mimic.py`는 주석 경계와 해당 영상,
+`test_so101_kinematics.py`는 FK/IK, `replay_joint_targets.py`는 고정 씬 관절 재생 도구다.
+서로 출력과 검증 목적이 달라 유지하며 Workspace Production 실행에서는 호출하지 않는다.
 
 ## 어디부터 읽어야 하나
 
@@ -98,8 +105,9 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 | 공통 backend 선택·stage UI | `workflow/ui.py` |
 | 실행 계획·취소·등록 | `workflow/operations.py` |
 | MuJoCo stage request | `workflow/operations.py::mujoco_request/mujoco_plan` |
-| MuJoCo worker source/replay/train/eval | `workflow/mujoco.py` |
-| canonical recording/annotation/datagen/convert | `workflow/episodes.py` |
+| MuJoCo worker source/train/eval | `workflow/mujoco.py` |
+| 두 엔진 replay/annotation/datagen 진입 | `workflow/unified.py` |
+| Source 기록·partition·과거 학습 호환 | `workflow/episodes.py` |
 | MJCF/CPU physics/RGB/FK/IK·명시적 MJCF adapter | `simulation/mjcf.py`, `simulation/mujoco_backend.py` |
 | policy gripper 좌표·joint 단위 변환 | `so101_joint_mapping.py::RobotCoordinates` |
 | 공통 카메라 화면 widget | `workflow/view.py::CameraView` |

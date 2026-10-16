@@ -45,6 +45,7 @@ parser.add_argument("--input_file", required=True)
 parser.add_argument("--repo_id", required=True)
 parser.add_argument("--root", required=True)
 parser.add_argument("--fps", type=int, default=None)
+parser.add_argument('--include_failed',action='store_true',help='Include failed legacy folder episodes during common import')
 parser.add_argument("--task", default="", help="Legacy-only instruction; explicit episode Task Definition takes precedence")
 parser.add_argument("--robot_type", default="so101_follower_sim")
 
@@ -159,6 +160,15 @@ dataset_root = Path(args.root).expanduser().resolve()
 
 if not input_file.exists():
     raise FileNotFoundError(f"Input HDF5 not found: {input_file}")
+
+if input_file.is_dir():
+    from soarm101_lab.workflow.dataset import EpisodeDataset,migrate
+    legacy=EpisodeDataset(input_file);selected=[]
+    for name in legacy.names:
+        attrs=legacy.episode_attributes(name)
+        if attrs.get('validation_only'):raise ValueError('Synthetic smoke episodes cannot enter training')
+        if attrs.get('success') or args.include_failed:selected.append(name)
+    input_file=migrate(input_file,dataset_root.with_name(dataset_root.name+'.imported.hdf5'),names=selected)
 
 
 from soarm101_lab.so101_dataset_contract import read_contract, write_contract, JOINT_SPACE, MIMIC_SPACE
@@ -401,7 +411,7 @@ provenance = {"scene_configuration":source_args.get('scene_configuration'),
               "backend":source_args.get('backend','isaac'),"episode_schema":source_args.get('dataset_schema'),
               "source_partition":source_args.get('source_partition'),"source_partition_input":source_args.get('source_partition_input'),
               "episode_source_lineage":episode_lineage,
-              "canonical_coordinates":source_args.get('canonical_coordinates') or RobotCoordinates().metadata(),
+              "canonical_coordinates":source_args.get('canonical_coordinates') or source_args.get('legacy_provenance',{}).get('coordinates') or RobotCoordinates().metadata(),
               "source_groups":source_groups,"episode_review":episode_review,
               "scene_configurations":list({s['sha256']:s for s in episode_scenes.values() if s}.values()),
               "episode_scene_configurations":episode_scenes,

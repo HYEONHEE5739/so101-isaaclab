@@ -1,5 +1,10 @@
 # SO-101 Isaac Lab
 
+현재 Workspace Workflow의 구조는 [ARCHITECTURE](docs/real2sim/ARCHITECTURE.md), 공통 HDF5/MP4 계약과
+두 엔진의 실행 방법은 [DATA_FLOW](docs/real2sim/DATA_FLOW.md), 기능별 수정 위치는 [PROJECT_MAP](docs/real2sim/PROJECT_MAP.md)가 기준입니다.
+Isaac/MuJoCo Workspace DataGen은 같은 공식 Mimic 코어를 사용합니다. 아래의 `--task`만 사용하는 고정 씬 예제는 개발/호환용이며,
+Workspace Production 실행은 UI 또는 `workflow.py run/worker`, 기존 Mimic CLI의 `--workspace` 옵션을 사용합니다.
+
 **End-to-end SO-101 imitation-learning pipeline from physical teleoperation to synthetic demonstration generation and ACT policy evaluation.**
 
 Built with **Isaac Lab, Isaac Mimic, LeRobot, and Pinocchio**.
@@ -393,6 +398,33 @@ pip install -e source/soarm101_lab
 ---
 
 # Run
+
+## Workspace Workflow (Isaac / MuJoCo)
+
+Open the existing UI using its GUI environment:
+
+```bash
+PYTHONPATH=source/soarm101_lab .venv-real2sim-ui/bin/python scripts/real2sim/real2sim_ui.py
+```
+
+Select a Workspace and backend, then use Source → Annotation → DataGen → Convert → Train → Sim Eval.
+New Source, Annotation and DataGen outputs use common HDF5 + Side/Wrist MP4 directly.
+Existing datasets are imported into a separate output when needed; a valid common dataset is used as-is.
+UI jobs and `workflow.py worker --request request.json` share the same dispatcher.
+
+For an existing annotated Workspace dataset, the public Isaac CLI uses the same generation core:
+
+```bash
+PYTHONPATH=source/soarm101_lab python scripts/mimic/generate_dataset.py \
+    --workspace /path/to/workspace --input_file /path/to/annotated.hdf5 \
+    --output_file /path/to/generated.hdf5 --num_envs 2 \
+    --generation_num_trials 10 --max_attempts 1000 --headless
+```
+
+`generation_num_trials` is the target number of successful saved episodes. See
+[DATA_FLOW](docs/real2sim/DATA_FLOW.md) for contracts, replay checks and resume behavior.
+The commands below describe the original fixed-scene Isaac workflow for development and compatibility.
+The demonstration and policy scores above are historical results from that workflow.
 
 The full data-generation and evaluation workflow is:
 

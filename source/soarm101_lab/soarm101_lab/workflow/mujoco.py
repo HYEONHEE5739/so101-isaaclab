@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from ..simulation.mujoco_backend import PolicyEnvironment
-from .episodes import annotate, datagen, grasp_tracker, subtask_signals
+from .episodes import grasp_tracker, subtask_signals
 from .operations import mujoco_request, MODEL_ROOT, ROOT
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import load, metadata
@@ -246,42 +246,6 @@ def source(request, output, publish, bridge):
             log_say('stop recording',blocking=False)
 
 
-def replay(request, output, publish, bridge):
-    from ..learning.minivla.data import load_manifest, episode_arrays
-    path = Path(request['input'])
-    provenance = _provenance(path)
-    _verify_workspace(request, provenance)
-    manifest = load_manifest(path / 'manifest.json')
-    name = request['options'].get('episode', manifest['episodes'][0]['id'])
-    entry = next(e for e in manifest['episodes'] if e['id'] == name)
-    arrays = episode_arrays(entry, manifest.get('cameras',['side']), manifest['control_hz'])
-    scene = provenance['scene']
-    from .tasks import recorded_scene
-    inherited = recorded_scene({'provenance':provenance,'scene_configuration':entry.get('scene_configuration')},load(request['workspace']))
-    request = {**request,'options':{**request['options'],'active_object_ids':inherited['active_object_ids']}}
-    request = {**request, 'options': {**request['options'], 'task_definition': entry.get('task_definition') or inherited.get('task_definition') or scene.get('task_definition'),
-                                    'physics_profile': scene.get('physics_profile', 'legacy_urdf'),
-                                    'full_workspace': scene.get('full_workspace', False),
-                                    'width': scene['camera']['resolution'][0], 'height': scene['camera']['resolution'][1]}}
-    errors = []
-    with _environment(request, output, provenance['coordinates'], manifest['control_hz']) as env:
-        publish = _preview(env, request, publish)
-        env.backend.restore_state(json.loads((Path(entry['_path']) / 'replay.json').read_text()))
-        raw = np.load(Path(entry['_path']) / 'raw_state.npy', allow_pickle=False)
-        actions = np.load(Path(entry['_path']) / 'raw_action.npy', allow_pickle=False)
-        if raw.shape != actions.shape or raw.shape != arrays['state'].shape:
-            raise ValueError('Raw replay state/action lengths differ')
-        for i, target in enumerate(actions):
-            if bridge:
-                bridge.before_step()
-            actual = env.backend.get_state()['joint_pos']
-            errors.append(float(np.max(np.abs(actual - raw[i]))))
-            publish(env.backend.get_rgb() if request['renderer'] != 'none' else None, {'frame': i, 'episode': name})
-            env.backend.step(target)
-            if request['options'].get('realtime', True): time.sleep(1 / env.hz)
-        maximum = max(errors)
-        return {'passed': maximum < 1e-5, 'max_joint_error_rad': maximum, 'episode': name,
-                'frames': len(actions), 'scope': 'same MuJoCo model integration-state/action replay'}
 
 
 def train(request, output):
@@ -611,9 +575,8 @@ def rollout_lerobot(request, output, publish, bridge):
 
 
 def execute(request):
-    if request['stage'] == 'datagen':
-        from .unified import execute as execute_common
-        return execute_common(request)
+    if request['stage'] in ('replay','annotate','datagen'):
+        raise ValueError('Episode stages use workflow.operations.execute_request and the common dataset API')
     request = {**request, 'options': dict(request['options'])}
     if request['options'].get('remote_policy'):
         from huggingface_hub import snapshot_download
@@ -660,12 +623,6 @@ def execute(request):
             result = environment(request, output, publish, bridge)
         elif stage == 'source':
             result = source(request, output, publish, bridge)
-        elif stage == 'replay':
-            result = replay(request, output, publish, bridge)
-        elif stage == 'annotate' and 'episode' not in request['options']:
-            result = annotate(request, output, publish, bridge, _environment, _preview)
-        elif stage == 'datagen':
-            result = datagen(request, output, publish, bridge, _environment, _preview)
         elif stage == 'convert':
             from .episodes import convert_dataset
             result = {'passed': True, **convert_dataset(request['input'], output, {**request['options'], 'workspace': request['workspace']})}
@@ -673,9 +630,6 @@ def execute(request):
             from .episodes import prepare_dataset
             result = {'passed': True, **prepare_dataset(request['input'], output / 'dataset',
                                                         request['options'].get('splits'), request['options'].get('include_failed', False))}
-        elif stage == 'annotate':
-            from .episodes import annotate_episode
-            result = {'passed': True, **annotate_episode(request['input'], request['options']['episode'], request['options']['boundaries'])}
         elif stage == 'import':
             from .episodes import convert_hdf5
             recipe = json.loads(Path(request['input']).read_text())

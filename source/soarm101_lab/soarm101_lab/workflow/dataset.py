@@ -65,6 +65,7 @@ def recording_args(provenance,manifest):
     return dict(env_name='SO101-Workspace-Mimic-v1',type=2,dataset_schema=SCHEMA,backend=p.get('backend','mujoco'),
         workspace=p['workspace'],workspace_path=p.get('workspace_path'),control_dt=1/float(manifest['control_hz']),
         action_semantics=SEMANTICS,so101_coordinates=p['coordinate_contract'],scene_configuration=p['scene_configuration'],
+        canonical_coordinates=copy.deepcopy(p['coordinates']),
         task_definitions=[s['task_definition']],grasp_object=s['pick'],place_bin=s['target'],source_partition=p.get('source_partition'),
         source_partition_input=p.get('source_partition_input'),legacy_provenance=copy.deepcopy(p),ee_frame='robot_base',root_quaternion_order='wxyz',
         observation_timestamp_path='obs/timestamp',object_telemetry={n:{'path':'obs/object_poses/'+n,'frame':'world',
@@ -91,6 +92,59 @@ def recorded_mujoco_episode(env,rows):
             'joint_position':q[0:1],'joint_velocity':np.zeros((1,6))}},
             'rigid_object':{name:{'root_pose':v[0:1],'root_velocity':np.zeros((1,6))} for name,v in world.items()}},
         'collection':{key:np.array([r[key] for r in rows]) for key in ('state','action','requested_action')}}
+
+
+def isaac_recording_episode(values,attrs,videos,args,contract,kinematics=None,*,preserve_original=False):
+    """Normalize native in-memory recording or read-only Legacy input into one contract."""
+    from ..real2sim.workspaces.package import load,metadata
+    if not args.get('workspace_path'):raise ValueError('Isaac recording/import requires the recorded Workspace path')
+    w=load(args['workspace_path'])
+    if metadata(w)!=args.get('workspace'):raise ValueError('Legacy Isaac Workspace identity differs')
+    original=copy.deepcopy(values) if preserve_original else None;policy=values['obs'].get('policy',values['obs']);target=values['joint_targets'];n=len(target)
+    if kinematics is None:
+        model=contract.get('simulation_model',{}).get('robot_model',{})
+        kinematics=RobotPreview(w['root']/model.get('urdf','assets/SO101/urdf/so101_isaaclab.urdf'),load_visuals=False)
+    goals=np.array([kinematics.transforms(v)['tool0'] for v in target]);ee=pose_matrix(policy['ee_state'])
+    if args.get('ee_frame','robot_base')!='robot_base':raise ValueError('Explicit legacy EE frame conversion is required')
+    root=values['initial_state']['articulation']['robot']['root_pose']
+    order=args.get('root_quaternion_order')
+    if order not in ('wxyz','xyzw'):raise ValueError('Explicit legacy root quaternion order required')
+    base=pose_matrix(np.asarray(root).reshape(-1,7)[0],order);objects={};world={}
+    initial=copy.deepcopy(values['initial_state'])
+    for group in ('articulation','rigid_object'):
+        for entry in initial.get(group,{}).values():
+            entry['root_pose']=as_pose7(pose_matrix(entry['root_pose'],order))
+    for name,entry in initial['rigid_object'].items():
+        observed=values['obs'].get('object_poses',{}).get(name)
+        if observed is not None:poses=pose_matrix(observed)
+        else:
+            post=values.get('workspace_states',{}).get(name)
+            if post is None:post=values.get('states',{}).get('rigid_object',{}).get(name,{}).get('root_pose')
+            if post is None:
+                if name in w['task']['dynamic']:raise ValueError('Moving object observations missing: '+name)
+                poses=np.repeat(pose_matrix(entry['root_pose']).reshape(-1,4,4)[0][None],n,axis=0)
+            else:poses=np.concatenate([pose_matrix(entry['root_pose']).reshape(-1,4,4)[:1],pose_matrix(post,order)[:-1]])
+        world[name]=as_pose7(poses);objects[name]=np.linalg.inv(base)@poses
+    stamp=values['obs'].get('timestamp')
+    ts=np.arange(n,dtype=np.float64)*float(args['control_dt']) if stamp is None else np.asarray(stamp).reshape(-1)
+    signals=copy.deepcopy(values['obs'].get('datagen_info',{}).get('subtask_term_signals',{}))
+    normalized={'actions':cartesian_actions(goals,ee[0],target[:,-1]),'joint_targets':target,
+        'action_timestamp':np.asarray(values.get('action_timestamp',ts)).reshape(-1),
+        'obs':{'timestamp':ts[:,None],'policy':{'joint_pos':policy['joint_pos'],'ee_state':as_pose7(ee)},
+            'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
+                'object_pose':objects,'subtask_term_signals':signals},
+            'camera_timestamps':{name.removesuffix('_cam'):ts for name in videos}},
+        'initial_state':initial}
+    attrs={**attrs,'cartesian_action_derivation':'FK of recorded joint_targets'+('; originals retained under legacy/' if preserve_original else ''),
+        'pose_alignment':'pre-step observations; legacy initial[0]+post[:-1] when required'}
+    if preserve_original:normalized['legacy']=original
+    else:
+        normalized['collection']={'recorded_mimic_actions':values['actions']}
+        if 'joint_vel' in policy:normalized['obs']['policy']['joint_vel']=policy['joint_vel']
+        for key in ('states','workspace_states'):
+            if key in values:normalized[key]=values[key]
+    normalized['obs']['events']=copy.deepcopy(values['obs'].get('events',{}))
+    return normalized,attrs,videos,kinematics
 
 
 class EpisodeDataset:
@@ -145,51 +199,27 @@ class EpisodeDataset:
                             'fps':self.hz,'shape':list(value.shape[1:3])+[3]}
             return self._isaac_episode(values,attrs,videos)
 
+    def mimic_episode(self,name):
+        """Load only the official pool fields, excluding raw telemetry and prior plans."""
+        if name not in self.names:raise KeyError(name)
+        if self.common:
+            with h5py.File(self.path,'r') as dataset:
+                group=dataset['data'][name]
+                return {'actions':group['actions'][...],
+                    'obs':{'datagen_info':_read(group['obs/datagen_info'])}}
+        values,_,_=self.episode(name)
+        return {'actions':values['actions'],'obs':{'datagen_info':values['obs']['datagen_info']}}
+
+    def episode_attributes(self,name):
+        if name not in self.names:raise KeyError(name)
+        if self.legacy:return self.episode(name)[1]
+        with h5py.File(self.path,'r') as dataset:
+            return dict(dataset['data'][name].attrs)
+
     def _isaac_episode(self,values,attrs,videos):
-        """Explicit alignment/pose derivation; preserve all original numeric arrays."""
-        from ..real2sim.workspaces.package import load,metadata
-        args=self.args
-        if not args.get('workspace_path'):raise ValueError('Legacy Isaac import requires the recorded Workspace path')
-        w=load(args['workspace_path'])
-        if metadata(w)!=args.get('workspace'):raise ValueError('Legacy Isaac Workspace identity differs')
-        original=copy.deepcopy(values);policy=values['obs'].get('policy',values['obs']);target=values['joint_targets'];n=len(target)
-        if self._fk is None:
-            model=self.contract.get('simulation_model',{}).get('robot_model',{})
-            self._fk=RobotPreview(w['root']/model.get('urdf','assets/SO101/urdf/so101_isaaclab.urdf'),load_visuals=False)
-        goals=np.array([self._fk.transforms(v)['tool0'] for v in target]);ee=pose_matrix(policy['ee_state'])
-        if args.get('ee_frame','robot_base')!='robot_base':raise ValueError('Explicit legacy EE frame conversion is required')
-        root=values['initial_state']['articulation']['robot']['root_pose']
-        order=args.get('root_quaternion_order')
-        if order not in ('wxyz','xyzw'):raise ValueError('Explicit legacy root quaternion order required')
-        base=pose_matrix(np.asarray(root).reshape(-1,7)[0],order);objects={};world={}
-        initial=copy.deepcopy(values['initial_state'])
-        for group in ('articulation','rigid_object'):
-            for entry in initial.get(group,{}).values():
-                entry['root_pose']=as_pose7(pose_matrix(entry['root_pose'],order))
-        for name,entry in initial['rigid_object'].items():
-            observed=values['obs'].get('object_poses',{}).get(name)
-            if observed is not None:poses=pose_matrix(observed)
-            else:
-                post=values.get('workspace_states',{}).get(name)
-                if post is None:post=values.get('states',{}).get('rigid_object',{}).get(name,{}).get('root_pose')
-                if post is None:
-                    if name in w['task']['dynamic']:raise ValueError('Moving object observations missing: '+name)
-                    poses=np.repeat(pose_matrix(entry['root_pose']).reshape(-1,4,4)[0][None],n,axis=0)
-                else:poses=np.concatenate([pose_matrix(entry['root_pose']).reshape(-1,4,4)[:1],pose_matrix(post,order)[:-1]])
-            world[name]=as_pose7(poses);objects[name]=np.linalg.inv(base)@poses
-        stamp=values['obs'].get('timestamp')
-        ts=np.arange(n,dtype=np.float64)/self.hz if stamp is None else np.asarray(stamp).reshape(-1)
-        signals=copy.deepcopy(values['obs'].get('datagen_info',{}).get('subtask_term_signals',{}))
-        normalized={'actions':cartesian_actions(goals,ee[0],target[:,-1]),'joint_targets':target,
-            'action_timestamp':np.asarray(values.get('action_timestamp',ts)).reshape(-1),
-            'obs':{'timestamp':ts[:,None],'policy':{'joint_pos':policy['joint_pos'],'ee_state':as_pose7(ee)},
-                'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
-                    'object_pose':objects,'subtask_term_signals':signals},
-                'camera_timestamps':{name.removesuffix('_cam'):ts for name in videos}},
-            'initial_state':initial,'legacy':original}
-        attrs={**attrs,'cartesian_action_derivation':'FK of recorded joint_targets; original numeric arrays retained under legacy/',
-            'pose_alignment':'pre-step observations; legacy initial[0]+post[:-1] when required'}
-        return normalized,attrs,videos
+        values,attrs,videos,self._fk=isaac_recording_episode(
+            values,attrs,videos,self.args,self.contract,self._fk,preserve_original=True)
+        return values,attrs,videos
 
     def _legacy_episode(self,name):
         e=next(e for e in self.manifest['episodes'] if e['id']==name);p=(self.path/e['path']).resolve()
@@ -357,6 +387,11 @@ class DatasetWriter:
         self.temp=self.path.with_name(self.path.name+'.'+uuid.uuid4().hex+'.tmp')
         self.h=h5py.File(self.temp,'x');self.data=self.h.create_group('data');self.count=0;self.total=0
         self.args=copy.deepcopy(args);self.args.update(dataset_schema=SCHEMA,env_name='SO101-Workspace-Mimic-v1',type=2,action_semantics=SEMANTICS)
+        self.args.setdefault('so101_coordinates',copy.deepcopy(contract))
+        self.args.setdefault('schema_contract',{'joint_order':list(JOINTS),'joint_unit':'rad','pose_frame':'robot_base',
+            'pose_format':'matrix4','quaternion_order':'wxyz','action_semantics':SEMANTICS,'actions':MIMIC_SPACE,
+            'joint_targets':'absolute model rad applied after obs[t]',
+            'target_eef_pose':'controller target; joint-only inputs reconstructed by FK'})
         from importlib.metadata import version,PackageNotFoundError
         versions={}
         for package in ('mujoco','isaacsim','torch','numpy','h5py','av'):
@@ -381,21 +416,37 @@ class DatasetWriter:
         self.args['generation_attempt_history']='generation/attempts_json'
         self.flush()
 
-    def commit(self,values,attrs,videos):
+    def commit(self,values,attrs,videos,*,video_staging=None):
         n=validate_episode(values,attrs,videos,1/float(self.args['control_dt']),video_root=self.path.parent,allow_external_sources=True)
         info=copy.deepcopy(values['obs']['datagen_info'])
         for category in ('eef_pose','target_eef_pose','object_pose'):
             info[category]={name:np.asarray(value,dtype=np.float32) for name,value in info[category].items()}
         values={**values,'obs':{**values['obs'],'datagen_info':info}}
         self.args.setdefault('schema_contract',{})['mimic_pose_dtype']='float32; original numeric telemetry retained separately'
-        folder=self.path.parent/(self.path.stem+'.videos')/uuid.uuid4().hex;folder.mkdir(parents=True,exist_ok=False)
-        self.owned_video_dirs.append(folder);pending='_pending_'+uuid.uuid4().hex;g=self.h.create_group(pending)
+        folder=self.path.parent/(self.path.stem+'.videos')/uuid.uuid4().hex
+        if video_staging is not None:
+            from ..utils.async_video_writer import VideoEpisode
+            if not isinstance(video_staging,VideoEpisode) or not video_staging.finalized:
+                raise ValueError('Only a finalized writer-owned VideoEpisode can be adopted')
+            staged=video_staging.folder.resolve()
+            sources={Path(spec['file']).resolve() for spec in videos.values()}
+            if not staged.is_relative_to(self.path.parent) or staged.is_symlink() or any(p.parent!=staged or p.is_symlink() for p in sources):
+                raise ValueError('Video adoption requires private staging inside this output bundle')
+            if sources!={p.resolve() for p in staged.iterdir()}:
+                raise ValueError('Staging must contain exactly the committed camera videos')
+        folder.parent.mkdir(parents=True,exist_ok=True)
+        self.owned_video_dirs.append(folder);pending='_pending_'+uuid.uuid4().hex
         episode_name=f'demo_{self.count}';old_count=self.count;old_total=self.total
         try:
+            if video_staging is not None:video_staging.folder.rename(folder)
+            else:folder.mkdir(exist_ok=False)
+            g=self.h.create_group(pending)
             copied={}
             for name,spec in videos.items():
                 src=Path(spec['file']);src=src if src.is_absolute() else self.path.parent/src
-                dest=folder/(name+'.mp4');shutil.copyfile(src,dest)
+                if video_staging is not None:dest=folder/src.name
+                else:
+                    dest=folder/(name+'.mp4');shutil.copyfile(src,dest)
                 copied[name]={**spec,'file':str(dest.relative_to(self.path.parent)),'sha256':file_sha256(dest)}
             _write(g,values)
             for k,v in attrs.items():
@@ -407,7 +458,7 @@ class DatasetWriter:
             if pending in self.h:del self.h[pending]
             if episode_name in self.data:del self.data[episode_name]
             self.count=old_count;self.total=old_total
-            shutil.rmtree(folder);raise
+            shutil.rmtree(folder,ignore_errors=True);raise
 
     def close(self,publish=True):
         if self.h is None:return
@@ -423,10 +474,13 @@ class DatasetWriter:
     def __exit__(self,kind,*args):self.close(publish=kind is None)
 
 
-def migrate(source,destination):
+def migrate(source,destination,*,names=None):
     """Lossless numeric import; video bytes copied without decoding/re-encoding."""
     source=Path(source).resolve();destination=Path(destination).resolve()
     reader=EpisodeDataset(source)
+    if names is not None:
+        if not names or len(set(names))!=len(names) or not set(names).issubset(reader.names):raise ValueError('Invalid import episode selection')
+        reader.names=[name for name in reader.names if name in names]
     if reader.contract.get('joint_order')!=list(JOINTS) or reader.contract.get('action_space')!=MIMIC_SPACE:
         raise ValueError('Recorded coordinate/action contract required for common import; legacy unknown cannot be relabeled')
     from .artifacts import fingerprint
@@ -472,22 +526,3 @@ def migrate(source,destination):
     for name in validated.names:
         values,attrs,videos=validated.episode(name);validate_episode(values,attrs,videos,validated.hz,video_root=destination.parent)
     return destination
-
-
-def finalize_owned_isaac_recording(path):
-    """Only called by a writer that exclusively created this new, unregistered output."""
-    from ..so101_dataset_contract import sidecar
-    reader=EpisodeDataset(path)
-    if reader.common or not reader.names:return Path(path)
-    temporary=Path(path).with_name(Path(path).stem+'.common-'+uuid.uuid4().hex+'.hdf5')
-    old_videos=[]
-    with h5py.File(path,'r') as h:
-        from ..utils.async_video_writer import external_video_path
-        for name in reader.names:
-            old_videos.extend(external_video_path(path,v) for v in _json(h['data'][name].attrs.get('external_videos'),{}).values())
-    migrate(path,temporary)
-    os.replace(temporary,path);sidecar(temporary).unlink(missing_ok=True)
-    # These videos were private output of this same writer; legacy/user inputs are never removed.
-    owned=Path(path).parent/(Path(path).stem+'.videos')
-    if old_videos and all(p.resolve().is_relative_to(owned.resolve()) for p in old_videos):shutil.rmtree(owned)
-    return Path(path)

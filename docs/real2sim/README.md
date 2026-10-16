@@ -8,7 +8,8 @@
 
 이 폴더는 현재 `so101-isaaclab`의 Real2Sim / Workspace / imitation-learning workflow를 설명하는 **living documentation**이다.
 
-과거 Phase별 작업지시서와 audit 보고서는 현재 구조에 흡수했다. 세부 과거 기록이 필요하면 Git history를 본다.
+현재 실행 구조는 [ARCHITECTURE.md](ARCHITECTURE.md), 데이터 의미는 [DATA_FLOW.md](DATA_FLOW.md)가 기준이다.
+과거 Phase 설계와 전환 전 데이터 설명은 [archive](../archive/README.md)에 보존한다.
 
 ## 먼저 읽을 문서
 
@@ -89,7 +90,7 @@ python scripts/real2sim/real2sim_sim.py
 ```text
 scripts/real2sim/workflow.py import-builder
 scripts/real2sim/workspace.py
-scripts/real2sim/workflow.py {list,register,run,ready,worker,import-builder,import-hdf5}
+scripts/real2sim/workflow.py {list,register,run,ready,worker,import-builder,migrate,import-hdf5}
 scripts/real2sim/check_workspace_physics.py
 ```
 

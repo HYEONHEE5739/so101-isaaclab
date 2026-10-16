@@ -531,6 +531,10 @@ class WorkflowPanel(QWidget):
             self.section.setEnabled(True); self.stage.setEnabled(True)
             self.backend.setEnabled(True)
             self.navigation.setEnabled(True)
+            if result['ok'] and result['artifact'].get('no_artifact'):
+                self.result.appendPlainText('중지됨 · 완료된 성공 데이터 0개')
+                self.refresh()
+                return
             self.result.appendPlainText(('완료: ' + result['artifact']['path']) if result['ok'] else ('오류: ' + result['error']))
             if result['ok']:
                 a = result['artifact']
@@ -581,7 +585,7 @@ class WorkflowPanel(QWidget):
         if self.task_state.isVisible():
             signals = status.get('task_signals', {})
             word = lambda value: '충족' if value is True else '미충족' if value is False else '판정 없음'
-            self.task_state.setText('접근: ' + ('TCP 거리 %.1f mm (성공 임계값 없음)' % signals['tcp_distance_mm'] if signals.get('tcp_distance_mm') is not None else '측정 없음')
+            task_text=('접근: ' + ('TCP 거리 %.1f mm (성공 임계값 없음)' % signals['tcp_distance_mm'] if signals.get('tcp_distance_mm') is not None else '측정 없음')
                 + '   |   Grasp (휴리스틱): ' + word(signals.get('grasp')) + '   |   작업 성공 조건: ' + word(signals.get('place'))
                 + '\nEpisode 결과: ' + status.get('episode_outcome', '진행 중' if active else '대기')
                 + '   ' + status.get('outcome_reason', '')
@@ -591,8 +595,15 @@ class WorkflowPanel(QWidget):
             outcome = status.get('episode_outcome', '')
             color = '#dff3e3' if outcome.startswith('성공') else '#ffe4d9' if outcome.startswith('실패') else '#e9eef5'
             self.task_state.setStyleSheet(f'QLabel {{ background: {color}; color: #17202a; padding: 8px; }}')
+            if stage=='datagen' and 'target_successes' in status:
+                from .presentation import datagen_status_text
+                task_text=datagen_status_text(status)
+            self.task_state.setText(task_text)
         if self.busy:
             text = status.get('state', 'STARTING — 환경/정책 준비 중')
+            if stage=='datagen' and status.get('workflow_phase'):
+                phase={'preparing':'환경 준비 중','source_validation':'Source 사전 검증 중','generation':'데이터 생성 중'}[status['workflow_phase']]
+                self.status.setText(f'{text} · {phase}')
             if status.get('frames') and time.time() - max(status['frames'].values()) >= 2:
                 text += ' · 마지막 프레임 (새 프레임 대기)'
             self.preview_status.setText(f"{text} · {status.get('task_id', '')} · step {status.get('steps', 0)} · "

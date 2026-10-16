@@ -135,22 +135,16 @@ class Operations:
         if backend not in ('isaac', 'mujoco'):
             raise ValueError('Unknown simulation backend')
         opts.setdefault('python', default_python())
-        if stage in ('replay','annotate','datagen') and (artifact.get('format') in ('so101.common-episode/2','so101.canonical/1') or artifact.get('env_args',{}).get('workspace_path')):
+        if stage in ('replay','annotate','datagen'):
             return unified_plan(stage,artifact,workspace,opts,dry,run_dir)
-        if stage in ('source', 'replay', 'annotate', 'datagen') and artifact.get('backend', backend) != backend:
+        if stage == 'source' and artifact.get('backend', backend) != backend:
             raise ValueError('Artifact simulation backend differs from selected backend')
         if stage in ('source','replay','annotate','datagen','sim_eval','real_eval'):
             from .tasks import bind_scene_options
             opts = bind_scene_options(stage, artifact, load(artifact['path'] if stage=='source' else workspace), opts)
         canonical = artifact.get('format') in ('so101.canonical/1', 'so101.minivla-policy/1')
-        common_conversion = stage == 'convert' and artifact.get('format') == 'so101.common-episode/2'
-        if (backend == 'mujoco' and stage in ('source', 'replay', 'annotate', 'datagen', 'convert', 'sim_eval') and not common_conversion) or (canonical and stage in ('train', 'convert')):
-            if stage == 'datagen':
-                opts['num_successful_demos'] = successful_demo_target(opts)
+        if (backend == 'mujoco' and stage in ('source', 'sim_eval')) or (canonical and stage == 'train'):
             return mujoco_plan(stage, artifact, workspace, opts, dry, run_dir)
-        if stage == 'datagen':
-            opts['num_successful_demos'] = successful_demo_target(opts)
-            opts.pop('trials', None)
         if any(k.lower() in ('token', 'api_key', 'password', 'hf_token') for k in opts):
             raise ValueError('Use local Hugging Face login/environment authentication, not workflow options')
         mode = opts.get('mode', 'operator' if opts.get('headless', True) else 'developer')
@@ -200,7 +194,7 @@ class Operations:
                 raise ValueError('Duplicate task_id in selection')
             opts['tasks'] = definitions
             opts['task'] = definitions[0]['language_instruction']
-        if w and artifact.get('coordinates'):
+        if w and artifact.get('coordinates') and stage!='convert':
             semantic = JOINT_SPACE if stage in ('sim_eval', 'real_eval', 'train') else MIMIC_SPACE
             require_compatible(artifact['coordinates'], coordinate_contract(w), semantic)
         if stage in ('train', 'hf_dataset', 'hf_policy', 'sim_eval', 'real_eval') and not (canonical and stage.startswith('hf_')):
@@ -267,20 +261,10 @@ class Operations:
                     '--episode_time_s', str(opts.get('episode_time_s', 20)), '--reset_time_s', str(opts.get('reset_time_s', 5)), '--device', device, *headless]
             if opts.get('identity_sim_for_validation'):cli.append('--identity_sim_for_validation')
             if opts.get('resume_data'):cli+=['--resume_data',str(opts['resume_data'])]
-        elif stage == 'replay':
-            cli += ['scripts/real2sim/workspace.py', 'replay', ws, '--dataset', path, '--report', str(output), '--device', device, *headless]
-        elif stage in ('annotate', 'datagen'):
-            script = 'annotate_demos.py' if stage == 'annotate' else 'generate_dataset.py'
-            cli += ['scripts/mimic/' + script, '--workspace', ws, '--input_file', path, '--output_file', str(output), '--device', device, *headless]
-            if stage == 'annotate' and opts.get('auto', True):
-                cli += ['--auto']
-            if stage == 'datagen':
-                cli += ['--generation_num_trials', str(opts['num_successful_demos']), '--num_envs', '1']
-                if opts.get('generation_seed') is not None:
-                    cli += ['--generation_seed', str(opts['generation_seed'])]
         elif stage == 'convert':
             cli += ['scripts/tools/convert_isaac2lerobot.py', '--input_file', path, '--root', str(output),
                     '--repo_id', opts['repo_id'], '--task', opts.get('task', ''), '--action_source', 'joint_targets']
+            if opts.get('include_failed'):cli.append('--include_failed')
             if artifact.get('format')=='so101.common-episode/2':
                 fps=1/float(artifact['env_args']['control_dt'])
                 if abs(fps-round(fps))>1e-8:raise ValueError('This LeRobot version requires integer FPS; refusing to change recorded timing')
@@ -348,6 +332,13 @@ class Operations:
                 raise RuntimeError('Workflow cancelled; partial outputs were not registered')
             if resumable_stop:
                 notify('중지 완료 · 저장된 episode 검증 중 (진행 중 episode는 제외)')
+            report_path=target/'report.json'
+            if stage=='datagen' and plan.get('worker_report') and report_path.is_file():
+                stopped_report=json.loads(report_path.read_text())
+                if resumable_stop and stopped_report.get('stopped') and stopped_report.get('successes')==0:
+                    state.update(status='STOPPED')
+                    notify('중지됨 · 완료된 성공 데이터 0개 · 새 데이터는 등록하지 않았습니다.')
+                    return {'status':'STOPPED','no_artifact':True}
             if stage in ('source', 'datagen') and not plan.get('worker_report') and (code == 0 or resumable_stop):
                 inspect_artifact(stage, target)
                 if plan['options'].get('resume_data'):
@@ -533,9 +524,12 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
         raise ValueError('Do not store credentials in workflow options')
     w=load(workspace)
     if artifact.get('workspace')!=metadata(w):raise ValueError('Input Workspace identity differs')
+    if w['task'].get('mode')=='geometry_review':raise ValueError('Geometry review Workspace requires explicit workflow task metadata')
     opts=bind_scene_options(stage,artifact,w,options)
     definitions=[validate(t,w) for t in from_artifact(artifact,w)]
     if len(definitions)!=1:raise ValueError('Select one homogeneous task')
+    if options.get('tasks') is not None and options['tasks']!=definitions:
+        raise ValueError('Derived stages must inherit input artifact tasks; do not relabel demonstrations')
     opts.update(tasks=definitions,task_definition=definitions[0],instruction=definitions[0]['language_instruction'])
     opts.setdefault('mode','operator');opts['headless']=opts['mode']=='operator'
     if opts['mode'] not in ('operator','developer'):raise ValueError('Unknown execution mode')
@@ -555,7 +549,7 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
 
 def execute_request(request):
     """Worker dispatch; GUI planning does not load engines or policy libraries."""
-    if request.get('episode_schema')=='so101.common-episode/2':
+    if request.get('stage') in ('replay','annotate','datagen'):
         from .unified import execute
         return execute(request)
     backend = request.get('backend', 'common')

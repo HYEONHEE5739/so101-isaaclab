@@ -2,6 +2,26 @@
 
 테스트의 목표는 "실행된다"를 넘어서 **변경이 맞다는 증거를 만드는 것**이다.
 
+## 공통 경로 정리·성능 검사 (2026-10-16)
+
+`test_common_mimic.py`는 공식 본문 parity, Pool 재사용/선택 subset, RNG 격리, 성공 예약/느린 Writer 중 상태 진행,
+실패 rollback, private 영상 이동/무결성, 교차 재생 캐시의 전체 identity와 실패 비캐시를 검사한다.
+`test_curation.py`는 한 Converter로의 전달과 원본 보존을, 별도 학습 suite는 과거 Checkpoint/normalization을 검사한다.
+신호를 주입한 Fixture는 물리 성공 증거가 아니다. 실제 1/2/4환경·정지/재개·양방향 실행은 별도 GPU probe로 확인한다.
+
+검증 기록은 `outputs/workflow_validation/architecture_cleanup/`에 둔다. `before_benchmarks.json`은 기준 커밋8da97ca,
+`after_benchmarks.json`은 정리 후 결과이며 pool/lock/commit/copy/영상 검사 시간과 CPU/GPU/RSS 표본을 보존한다.
+GPU 비교 중 다른 Isaac 작업이 있으면 정상 표본으로 사용하지 않는다. OOM 실행 로그도 남긴다.
+GUI PyQt와 학습 TorchCodec의 GLib 경로를 섞지 않고, USD·MuJoCo 검사는 별도 프로세스로 실행한다.
+
+완료 결과는 [구조 정리 보고서](../../outputs/workflow_validation/architecture_cleanup/REPORT.md)와
+[성능 측정](../../outputs/workflow_validation/architecture_cleanup/BENCHMARK.md)을 본다.
+core364PASS/6skip, USD68PASS, learning49PASS/1skip, common40PASS는 중복이 있어 합산하지 않는다.
+양 엔진 실제1/2/4환경·SIGINT/Resume, 설치된 공식14-Source parity, 실제 LeRobot 변환4경로,
+positive 물리 replay cache hit와 실패 Source 차단을 별도로 확인했다.
+최초 before CPU병행·after Mu4 사용자GPU부하가 있어 전체 wall 차이를 코드효과로 단정하지 않는다.
+사람의 수동 annotation,8환경,실물,새 정책 품질은 미검증이다.
+
 ## 1. 테스트 층
 
 ### A. Pure/unit tests

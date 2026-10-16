@@ -1,3 +1,5 @@
+> 과거 설계·실험 기록입니다. 현재 구조와 실행 경로는 [ARCHITECTURE](../../real2sim/ARCHITECTURE.md)와 [DATA_FLOW](../../real2sim/DATA_FLOW.md)를 따릅니다. 본문의 단계·제한·명령은 작성 당시 기준입니다.
+
 현재 프로젝트에는 Isaac Lab 기반으로 만든 SO-101 simulation 환경과 UI가 있다.
 
 이 프로젝트를 분석한 뒤, 기존 UI와 전체 workflow는 최대한 유지하면서 simulation backend를 Isaac Lab에서 MuJoCo로 교체하거나 MuJoCo backend를 추가하고 싶다.

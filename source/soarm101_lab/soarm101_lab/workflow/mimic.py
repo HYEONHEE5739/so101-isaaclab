@@ -79,9 +79,9 @@ class MimicGenerator(DataGenerator):
         return result
 
 
-def source_pool(env,source):
+def source_pool(env,source,names=None):
     pool=DataGenInfoPool(env,env.cfg,env.device,asyncio_lock=asyncio.Lock())
-    pool.load_from_dataset_file(str(source))
+    pool.load_from_dataset_file(str(source),select_demo_keys=names)
     if pool.num_datagen_infos==0:raise ValueError('No annotated Source in Mimic pool')
     return pool
 
@@ -106,7 +106,7 @@ class PhysicsControl:
 
 
 class GenerationScheduler:
-    """Global attempts and successful commits. Commit budget is held across writer calls."""
+    """Reserve global success slots; serialize writes without holding the state lock."""
     def __init__(self,target,max_attempts,num_envs,resumed=0,history=()):
         if type(target) is not int or target<=resumed:raise ValueError('Target must exceed resumed count')
         if type(max_attempts) is not int or max_attempts<1:raise ValueError('Positive maximum attempts required')
@@ -114,31 +114,48 @@ class GenerationScheduler:
         self.failures=Counter(r['category'] for r in history if r['category'] not in ('success','interrupted','target_already_reached'))
         self.workers={i:{'state':'idle','attempts':0,'successes':0,'failures':{}} for i in range(num_envs)}
         self.records=copy.deepcopy(list(history));self.stop=threading.Event();self.lock=threading.RLock();self.start_time=time.perf_counter();self.resumed=resumed
+        self.writer_lock=threading.Lock();self.reservations=0
         self.history_complete=not resumed or bool(history)
         self.control=PhysicsControl(num_envs)
 
     def claim(self,worker):
         with self.lock:
             if self.stop.is_set() or self.successes>=self.target or self.started>=self.max_attempts:return None
-            self.started+=1;self.workers[worker]['state']='resetting';self.workers[worker]['attempts']+=1
+            self.started+=1;self.workers[worker].update(state='resetting',steps=0);self.workers[worker]['attempts']+=1
             return self.started
 
-    def set_state(self, worker, state):
-        with self.lock:self.workers[worker]['state']=state
+    def set_state(self, worker, state, **details):
+        with self.lock:self.workers[worker].update(state=state,**details)
 
     def finish(self,worker,attempt,category,details,commit=None):
         with self.lock:
             row={'attempt':attempt,'env_id':worker,'category':category,**details}
-            if category=='success' and self.successes<self.target:
-                row['episode']=commit();self.successes+=1;self.workers[worker]['successes']+=1
-                if self.successes>=self.target:self.stop.set()
+            reserved=category=='success' and self.successes+self.reservations<self.target
+            if reserved:
+                self.reservations+=1;self.workers[worker]['state']='saving'
             elif category=='success':row['category']='target_already_reached'
-            elif category!='interrupted':
-                self.failures[category]+=1
-                f=self.workers[worker]['failures'];f[category]=f.get(category,0)+1
-            self.completed+=1;self.workers[worker]['state']=row['category'];self.records.append(row)
-            print('[MIMIC] '+json.dumps(row,ensure_ascii=False,allow_nan=False),flush=True)
-            return row
+        if reserved:
+            try:
+                with self.writer_lock:row['episode']=commit()
+            except BaseException as exc:
+                with self.lock:
+                    self.reservations-=1
+                    row.update(category='storage_failure',reason=str(exc));self._record(worker,row)
+                raise
+        with self.lock:
+            if reserved:
+                self.reservations-=1;self.successes+=1;self.workers[worker]['successes']+=1
+                if self.successes>=self.target:self.stop.set()
+            self._record(worker,row)
+        print('[MIMIC] '+json.dumps(row,ensure_ascii=False,allow_nan=False),flush=True)
+        return row
+
+    def _record(self,worker,row):
+        category=row['category']
+        if category not in ('success','interrupted','target_already_reached'):
+            self.failures[category]+=1
+            failures=self.workers[worker]['failures'];failures[category]=failures.get(category,0)+1
+        self.completed+=1;self.workers[worker].update(state=category,steps=row.get('steps',0));self.records.append(row)
 
     def progress(self):
         with self.lock:
@@ -149,12 +166,13 @@ class GenerationScheduler:
                 'grasp_failure':'집기 실패','place_failure':'배치 실패','timeout':'시간 초과','interrupted':'중단'}.get(latest.get('category'),'생성 중')
             if self.successes==self.target:outcome='목표 달성';reason=''
             decided=self.successes+sum(self.failures.values())
-            return dict(target_successes=self.target,successes=self.successes,attempts=self.started,completed_attempts=self.completed,
+            return dict(target_successes=self.target,successes=self.successes,pending_successes=self.reservations,attempts=self.started,completed_attempts=self.completed,
                 active_attempts=self.started-self.completed,failures=sum(self.failures.values()),failure_breakdown=dict(self.failures),
                 interrupted_attempts=sum(r['category'] in ('interrupted','target_already_reached') for r in self.records),
                 success_rate=self.successes/decided if decided and self.history_complete else None,
                 success_rate_definition='successful commits / (successful commits + classified failures); excludes interrupted/in-flight attempts',
-                env_status=copy.deepcopy(self.workers),
+                env_status=copy.deepcopy(self.workers),latest_env_id=latest.get('env_id'),
+                latest_attempt=latest.get('attempt'),latest_category=latest.get('category'),
                 wall_seconds=time.perf_counter()-self.start_time,episode_outcome=outcome,outcome_reason=reason,resumed_successes=self.resumed)
 
 

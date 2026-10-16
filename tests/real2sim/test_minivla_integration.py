@@ -193,14 +193,6 @@ def test_capture_alignment_prepare_group_split_and_smoke_rejection(tmp_path, env
         prepare_dataset(smoke.root, tmp_path / 'bad_train')
 
 
-def test_annotation_validation(tmp_path, env):
-    from soarm101_lab.workflow.episodes import annotate_episode
-    writer = make_dataset(tmp_path / 'source', env)
-    boundaries = dict(approach=0, grasp=1, transport=2, place=3)
-    annotate_episode(writer.root, 'episode_0000', boundaries)
-    with pytest.raises(FileExistsError): annotate_episode(writer.root, 'episode_0000', boundaries)
-    with pytest.raises(ValueError): annotate_episode(writer.root, '../outside', boundaries)
-    with pytest.raises(ValueError): annotate_episode(writer.root, 'episode_0001', {**boundaries, 'place': 4})
 
 
 def test_recorded_state_actions_replay_exactly(tmp_path, env):
@@ -281,36 +273,8 @@ def test_ik_is_bounded_and_does_not_change_physics(env):
     assert backend._snapshot() == before
 
 
-def test_annotation_rejects_replay_without_physical_success(tmp_path, env, monkeypatch):
-    from soarm101_lab.workflow import mujoco as worker
-    writer = make_dataset(tmp_path / 'source', env)
-    monkeypatch.setattr(worker, '_verify_workspace', lambda *args: None)
-    monkeypatch.setattr(worker, '_environment', lambda *args: env)
-    output = tmp_path / 'annotation'; output.mkdir()
-    report = worker.annotate({'input': str(writer.root), 'options': {'auto': True, 'realtime': False}},
-                             output, lambda *args: None, None, worker._environment, worker._preview)
-    assert not report['passed'] and report['accepted'] == 0
-    assert len(report['rejected']) == 3
-    assert not list(writer.root.glob('*/annotation.json'))
 
 
-def test_auto_annotation_uses_validated_artifact(tmp_path, env, monkeypatch):
-    from soarm101_lab.workflow import mujoco as worker
-    from soarm101_lab.workflow.artifacts import inspect_artifact
-    writer = make_dataset(tmp_path / 'source', env)
-    monkeypatch.setattr(worker, '_verify_workspace', lambda *args: None)
-    monkeypatch.setattr(worker, '_environment', lambda *args: env)
-    # Only signal timing is synthetic; action/state replay uses actual MuJoCo.
-    from soarm101_lab.workflow import episodes
-    monkeypatch.setattr(episodes, 'subtask_signals', lambda env, tracker, tick: {'grasp': tick >= 1, 'place': tick >= 3})
-    monkeypatch.setattr(env.backend, 'is_success', lambda: True)
-    output = tmp_path / 'annotation'; output.mkdir()
-    report = worker.annotate({'input': str(writer.root), 'options': {'auto': True, 'realtime': False}},
-                             output, lambda *args: None, None, worker._environment, worker._preview)
-    assert report['passed'] and report['accepted'] == 3
-    a = inspect_artifact('annotated', report['dataset'])
-    assert a['backend'] == 'mujoco' and a['episode_count'] == 3
-    assert json.loads((Path(report['dataset']) / 'episode_0000/annotation.json').read_text())['grasp'] == 1
 
 
 def test_canonical_registry_and_resume_preserve_original(tmp_path, env):

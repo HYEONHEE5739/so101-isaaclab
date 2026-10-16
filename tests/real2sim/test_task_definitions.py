@@ -48,7 +48,8 @@ def test_episode_tasks_inherit_and_cannot_relabel(published, tmp_path):
     assert artifact['tasks'] == [definition]
     op = Operations(r)
     plan = op.plan('annotate', artifact, str(w['root']), {}, run_dir=tmp_path)
-    assert plan['options']['tasks'] == [definition] and '--headless' in plan['argv']
+    assert plan['options']['tasks'] == [definition] and plan['options']['headless']
+    assert plan['argv'][2:4]==['scripts/real2sim/workflow.py','worker']
     with pytest.raises(ValueError, match='relabel'):
         op.plan('annotate', artifact, str(w['root']), {'tasks': [catalog(w)[0]]}, run_dir=tmp_path)
     convert = op.plan('convert', artifact, str(w['root']), {'repo_id': 'test/task', 'task': 'ignored'}, run_dir=tmp_path)

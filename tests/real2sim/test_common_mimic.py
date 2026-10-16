@@ -131,6 +131,78 @@ def test_scheduler_exact_global_budget_and_resume():
     assert resumed.started==6
 
 
+def test_scheduler_writer_does_not_block_state_and_reserves_exact_target():
+    from soarm101_lab.workflow.mimic import GenerationScheduler
+    scheduler=GenerationScheduler(1,10,2);entered=threading.Event();release=threading.Event();committed=[]
+    def commit():
+        entered.set()
+        if not release.wait(5):raise TimeoutError('Test did not release its writer')
+        committed.append('demo_0');return 'demo_0'
+    with ThreadPoolExecutor(2) as executor:
+        first=scheduler.claim(0);saving=executor.submit(scheduler.finish,0,first,'success',{},commit)
+        try:
+            assert entered.wait(2)
+            status=executor.submit(scheduler.progress).result(timeout=2)
+            assert status['pending_successes']==1 and status['successes']==0
+            second=executor.submit(scheduler.claim,1).result(timeout=2)
+            extra=scheduler.finish(1,second,'success',{},lambda:pytest.fail('Reserved target exceeded'))
+            assert extra['category']=='target_already_reached'
+        finally:release.set()
+        saving.result(timeout=2)
+    assert committed==['demo_0'] and scheduler.successes==1 and scheduler.reservations==0
+
+
+def test_scheduler_failed_write_rolls_back_reservation():
+    from soarm101_lab.workflow.mimic import GenerationScheduler
+    scheduler=GenerationScheduler(1,3,1)
+    def fail():raise OSError('disk full')
+    with pytest.raises(OSError,match='disk full'):
+        scheduler.finish(0,scheduler.claim(0),'success',{},fail)
+    status=scheduler.progress()
+    assert status['successes']==status['pending_successes']==0
+    assert status['failure_breakdown']=={'storage_failure':1}
+    scheduler.finish(0,scheduler.claim(0),'success',{},lambda:'demo_0')
+    assert scheduler.successes==1 and scheduler.progress()['completed_attempts']==2
+
+
+def test_finalized_owned_video_is_adopted_without_copy(tmp_path,episode,monkeypatch):
+    from soarm101_lab.utils.async_video_writer import VideoEpisode
+    values,attrs,_,args,contract=episode
+    stage=VideoEpisode(tmp_path,30)
+    for _ in range(len(values['actions'])):
+        stage.append({name:np.zeros((480,640,3),np.uint8) for name in ('side_cam','wrist_cam')})
+    specs=stage.finish(len(values['actions']))
+    videos={key:{**spec,'file':str(stage.folder/spec['file'])} for key,spec in specs.items()}
+    inodes={key:Path(spec['file']).stat().st_ino for key,spec in videos.items()}
+    def no_copy(*args,**kwargs):pytest.fail('Fresh private video must be moved, not copied')
+    monkeypatch.setattr(shutil,'copyfile',no_copy)
+    target=tmp_path/'adopted.hdf5'
+    with DatasetWriter(target,args,contract) as writer:writer.commit(values,attrs,videos,video_staging=stage)
+    stage.abort()
+    reader=EpisodeDataset(target);validate_dataset(reader)
+    _,_,saved=reader.episode('demo_0')
+    assert all((tmp_path/spec['file']).stat().st_ino==inodes[key] for key,spec in saved.items())
+
+
+def test_owned_video_commit_failure_removes_only_private_staging(tmp_path,episode,monkeypatch):
+    from soarm101_lab.workflow import dataset
+    from soarm101_lab.utils.async_video_writer import VideoEpisode
+    values,attrs,original,args,contract=episode
+    original_hashes={name:dataset.file_sha256(spec['file']) for name,spec in original.items()}
+    stage=VideoEpisode(tmp_path,30)
+    for _ in range(len(values['actions'])):
+        stage.append({name:np.zeros((480,640,3),np.uint8) for name in ('side_cam','wrist_cam')})
+    videos={key:{**spec,'file':str(stage.folder/spec['file'])} for key,spec in stage.finish(len(values['actions'])).items()}
+    def fail(*args,**kwargs):raise OSError('write failed')
+    target=tmp_path/'failed.hdf5';writer=DatasetWriter(target,args,contract)
+    monkeypatch.setattr(dataset,'_write',fail)
+    with pytest.raises(OSError,match='write failed'):writer.commit(values,attrs,videos,video_staging=stage)
+    assert writer.count==writer.total==0 and not list(writer.data)
+    writer.close(False);stage.abort()
+    assert not target.exists() and not list(tmp_path.glob('failed.videos/*'))
+    assert all(dataset.file_sha256(spec['file'])==original_hashes[name] for name,spec in original.items())
+
+
 def test_independent_reference_random_streams_preserve_global_rng():
     from soarm101_lab.workflow.mimic import RandomStream
     import torch
@@ -150,6 +222,244 @@ def test_mujoco_import_does_not_load_isaac():
     import subprocess,sys
     result=subprocess.run([sys.executable,'-c',"from soarm101_lab.workflow import datagen;import sys;assert not any(n.split('.')[0] in ('isaaclab','omni','pxr') for n in sys.modules)"],capture_output=True,text=True)
     assert result.returncode==0,result.stderr
+
+
+def test_pool_reuse_is_read_only_and_respects_selected_episodes(tmp_path,episode):
+    import hashlib,pickle
+    from soarm101_lab.workflow.mimic import configuration,source_pool,MimicGenerator
+    values,attrs,videos,args,contract=episode
+    path=tmp_path/'pool_reuse.hdf5'
+    with DatasetWriter(path,args,contract) as writer:
+        for _ in range(3):writer.commit(values,attrs,videos)
+    env=SimpleNamespace(cfg=configuration('cube','cube'),device='cpu',actions_to_gripper_actions=lambda actions:{'tool0':actions[:,-1:]})
+    env.cfg.subtask_configs['tool0'][0].subtask_term_offset_range=(0,0)
+    pool=source_pool(env,path,['demo_0','demo_2'])
+    assert pool.num_datagen_infos==2
+    before=hashlib.sha256(pickle.dumps((pool.datagen_infos,pool.subtask_boundaries))).hexdigest()
+    for seed in (11,12,11):
+        reused=MimicGenerator(env,pool,seed)
+        fresh=MimicGenerator(env,source_pool(env,path,['demo_0','demo_2']),seed)
+        actual=reused.randomize_subtask_boundaries();expected=fresh.randomize_subtask_boundaries()
+        for key in actual:np.testing.assert_array_equal(actual[key],expected[key])
+    assert hashlib.sha256(pickle.dumps((pool.datagen_infos,pool.subtask_boundaries))).hexdigest()==before
+
+
+def test_only_complete_positive_physical_replay_proofs_are_cached(tmp_path,monkeypatch):
+    from soarm101_lab.workflow import unified
+    source=tmp_path/'input.bin';source.write_bytes(b'unchanged source')
+    reader=SimpleNamespace(names=['demo_0'],path=source)
+    request={'options':{'replay_cache_dir':str(tmp_path/'cache')}}
+    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('identity',{'code':'v1'}))
+    calls=[]
+    def replay(*args):
+        calls.append(True)
+        return {'passed':True,'episodes':[{'episode':'demo_0','physical_replay_passed':True}]}
+    monkeypatch.setattr(unified,'replay',replay)
+    first=unified.cached_replay(reader,request,None,tmp_path/'first')
+    second=unified.cached_replay(reader,request,None,tmp_path/'second')
+    assert not first['cache']['hit'] and second['cache']['hit'] and len(calls)==1
+    # A code/config change invalidates the proof even when the dataset is unchanged.
+    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('changed',{'code':'v2'}))
+    unified.cached_replay(reader,request,None,tmp_path/'changed')
+    assert len(calls)==2
+    def failed(*args):
+        calls.append(False)
+        return {'passed':False,'episodes':[{'episode':'demo_0','physical_replay_passed':False}]}
+    monkeypatch.setattr(unified,'replay',failed)
+    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('failed',{'code':'v3'}))
+    for index in range(2):
+        assert not unified.cached_replay(reader,request,None,tmp_path/f'failed{index}')['passed']
+    assert calls[-2:]==[False,False] and not (tmp_path/'cache/failed.json').exists()
+
+
+@pytest.mark.parametrize('field',['source','episodes','workspace','scene','calibration','backend','physics','version'])
+def test_replay_cache_identity_tracks_all_physical_inputs(field,monkeypatch):
+    import importlib.metadata
+    from soarm101_lab.workflow.unified import replay_cache_identity
+    options=SimpleNamespace(timestep=.001,integrator=0,solver=1,gravity=np.array([0.,0.,-9.81]))
+    backend=SimpleNamespace(metadata={'simulation_configuration':{'controller':'calibrated'},'model_sha256':'model'},
+        model=SimpleNamespace(opt=options),decimation=10)
+    adapter=SimpleNamespace(backend=backend)
+    reader=SimpleNamespace(names=['demo_0'],args={'workspace':{'sha256':'workspace'},'scene_configuration':{'reset':'uniform'}},
+        contract={'calibration':'v1'},hz=30.)
+    request={'backend':'mujoco','options':{'source_pool_sha256':'source'}}
+    original=replay_cache_identity(reader,request,adapter)[0]
+    if field=='source':request['options']['source_pool_sha256']='different'
+    elif field=='episodes':reader.names.append('demo_1')
+    elif field=='workspace':reader.args['workspace']['sha256']='different'
+    elif field=='scene':reader.args['scene_configuration']['reset']='different'
+    elif field=='calibration':reader.contract['calibration']='v2'
+    elif field=='backend':request['backend']='isaac'
+    elif field=='physics':options.timestep=.002
+    elif field=='version':monkeypatch.setattr(importlib.metadata,'version',lambda name:'changed version')
+    assert replay_cache_identity(reader,request,adapter)[0]!=original
+
+
+@pytest.mark.parametrize('grasp,place,accepted',[(False,True,False),(True,False,False),(True,True,True)])
+def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,grasp,place,accepted):
+    """Synthetic signal fixture checks the gate; it does not claim physical success."""
+    from soarm101_lab.workflow.unified import replay
+    values,attrs,videos,args,contract=episode
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
+    reader=EpisodeDataset(source);calls=[]
+    class Buffer:
+        video=None
+        def append(self,*args):pass
+        def abort(self):pass
+        def finish(self,attrs):return copy.deepcopy(values),attrs,videos
+    class Adapter:
+        workspace={'task':{'dynamic':['cube']}};base_world=np.eye(4);step_index=0
+        annotation_auto=True;buffer=Buffer();tracker=SimpleNamespace(completed=False)
+        def restore(self,*args):self.tracker.completed=False;self.step_index=0
+        def state(self):return {'joint_pos':np.zeros(6),'object_poses':{'cube':np.eye(4)}}
+        def step(self,*args):self.step_index+=1
+        def update_grasp(self):self.tracker.completed=grasp
+        def place_success(self):return place
+        def check_success(self):return self.tracker.completed and self.place_success()
+        def failure_category(self):return 'grasp_failure' if not self.tracker.completed else 'place_failure'
+    adapter=Adapter();adapter.backend=SimpleNamespace(step=adapter.step)
+    writer=SimpleNamespace(commit=lambda *args,**kwargs:calls.append(True) or 'demo_0')
+    result=replay(adapter,reader,tmp_path/'replayed',writer=writer)
+    assert result['passed']==accepted and result['accepted']==int(accepted)
+    assert bool(calls)==accepted
+
+
+@pytest.mark.parametrize('stage',['replay','annotate','datagen'])
+def test_valid_common_input_reaches_engine_without_legacy_import(stage,tmp_path,episode,monkeypatch):
+    from soarm101_lab.workflow import unified,mujoco
+    from soarm101_lab.workflow.operations import execute_request
+    from soarm101_lab.real2sim.workspaces import package
+    values,attrs,videos,args,contract=episode
+    identity={'sha256':'immutable workspace'}
+    args={**args,'workspace':identity,'scene_configuration':{'task_definition':{},'active_object_ids':['cube'],'reset':{}}}
+    path=tmp_path/'common.hdf5'
+    with DatasetWriter(path,args,contract) as writer:writer.commit(values,attrs,videos)
+    monkeypatch.setattr(package,'load',lambda *args:{})
+    monkeypatch.setattr(package,'metadata',lambda *args:identity)
+    monkeypatch.setattr(unified,'migrate',lambda *args:pytest.fail('Common input must not be migrated'))
+    def engine(*args,**kwargs):raise RuntimeError('Validated common input reached the physics boundary')
+    monkeypatch.setattr(mujoco,'_environment',engine)
+    request={'backend':'mujoco','stage':stage,'input':str(path),'workspace':'fixture',
+        'output':str(tmp_path/stage),'options':{'generation_seed':1047}}
+    with pytest.raises(RuntimeError,match='reached the physics boundary'):execute_request(request)
+    assert json.loads((tmp_path/stage/'failure.json').read_text())['schema_compatible']
+
+
+def test_datagen_cancel_before_trials_reports_stopped_without_false_success(tmp_path,episode,monkeypatch):
+    from soarm101_lab.workflow import unified,mujoco
+    from soarm101_lab.real2sim.workspaces import package
+    values,attrs,videos,args,contract=episode;identity={'sha256':'immutable workspace'}
+    args={**args,'workspace':identity,'scene_configuration':{'task_definition':{},'active_object_ids':['cube'],'reset':{}}}
+    path=tmp_path/'source.hdf5'
+    with DatasetWriter(path,args,contract) as writer:writer.commit(values,attrs,videos)
+    monkeypatch.setattr(package,'load',lambda *args:{})
+    monkeypatch.setattr(package,'metadata',lambda *args:identity)
+    def cancel(*args,**kwargs):raise KeyboardInterrupt()
+    monkeypatch.setattr(mujoco,'_environment',cancel)
+    result=unified.execute({'backend':'mujoco','stage':'datagen','input':str(path),'workspace':'fixture',
+        'output':str(tmp_path/'run'),'options':{'generation_seed':1047,'num_successful_demos':100}})
+    assert result['stopped'] and result['successes']==0 and not result['passed'] and result['dataset'] is None
+    assert not (tmp_path/'run/failure.json').exists()
+
+
+@pytest.mark.parametrize('backend,source_backend',[
+    ('isaac','mujoco'),('mujoco','isaac'),('isaac','isaac'),('mujoco','mujoco')])
+def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source_backend,tmp_path,episode,monkeypatch):
+    """14-episode contract fixture, stubbed engines: no physical preflight may run."""
+    import sys
+    from soarm101_lab.workflow import unified,mujoco,adapters,datagen,presentation
+    from soarm101_lab.real2sim.workspaces import package
+    values,attrs,videos,args,contract=episode;identity={'sha256':'immutable workspace'}
+    args={**args,'backend':source_backend,'workspace':identity,
+        'scene_configuration':{'task_definition':{},'active_object_ids':['cube'],'reset':{}}}
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:
+        for _ in range(14):writer.commit(values,attrs,videos)
+    monkeypatch.setattr(package,'load',lambda *args:{})
+    monkeypatch.setattr(package,'metadata',lambda *args:identity)
+    monkeypatch.setattr(unified,'replay',lambda *args:pytest.fail('DataGen must not replay the Source pool'))
+    monkeypatch.setattr(unified,'cached_replay',lambda *args:pytest.fail('DataGen must not require a replay proof'))
+    native=SimpleNamespace(backend=object(),close=lambda:None)
+    adapter=SimpleNamespace(buffer=SimpleNamespace(abort=lambda:None),close=lambda:None)
+    monkeypatch.setattr(unified,'_native_isaac',lambda *args:native)
+    monkeypatch.setattr(mujoco,'_environment',lambda *args,**kwargs:native)
+    monkeypatch.setattr(adapters,'IsaacAdapter',lambda *args:adapter)
+    monkeypatch.setattr(adapters,'MujocoAdapter',lambda *args:adapter)
+    monkeypatch.setitem(sys.modules,'isaaclab.app',SimpleNamespace(AppLauncher=lambda **kwargs:SimpleNamespace(app=native)))
+    session=tmp_path/'session';session.mkdir()
+    (session/'config.json').write_text(json.dumps({'stage':'datagen','mode':'operator'}))
+    bridge=presentation.Presentation(session)
+    monkeypatch.setattr(presentation,'current',lambda:bridge)
+    monkeypatch.setattr(presentation,'attach',lambda *args:bridge)
+    calls=[]
+    def generate(request,reader,output,active_bridge):
+        assert reader.backend==source_backend and len(reader.names)==14
+        assert request['options']['num_envs']==4
+        assert active_bridge.details['workflow_phase']=='preparing'
+        assert 'source_total' not in active_bridge.details
+        active_bridge.bind_generation(SimpleNamespace(progress=lambda:{'successes':0,'attempts':0}))
+        calls.append(backend)
+        return {'passed':True,'successes':2}
+    monkeypatch.setattr(datagen,'run_isaac',lambda native,request,reader,output,bridge,boundary:
+        generate(request,reader,output,bridge))
+    monkeypatch.setattr(datagen,'run_mujoco',lambda request,reader,output,bridge,**kwargs:
+        generate(request,reader,output,bridge))
+    result=unified.execute({'backend':backend,'stage':'datagen','input':str(source),'workspace':'fixture',
+        'output':str(tmp_path/'generated'),'options':{'generation_seed':1047,'num_envs':4,'num_successful_demos':2}})
+    assert calls==[backend] and result['passed']
+    assert 'cross_replay_cache' not in result
+    assert not (tmp_path/'generated/cross_replay.json').exists()
+    status=json.loads((session/'status.json').read_text())
+    assert status['workflow_phase']=='generation' and 'source_total' not in status
+
+
+def test_isaac_replay_holds_idle_commands_despite_measured_drift(tmp_path,episode):
+    import torch
+    from soarm101_lab.workflow.unified import replay
+    values,attrs,videos,args,contract=episode
+    values['joint_targets'][:,0]=np.arange(len(values['actions']))*.01
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
+    measured=torch.tensor([[.1]*6,[.2]*6,[0.]*6,[.4]*6])
+    idle_initial=measured[[0,1,3]].clone();commands=[]
+    def step(action):
+        commands.append(action.clone())
+        measured.sub_(.05)  # Simulated gravity error must not become the next hold command.
+    class Adapter:
+        index=2;ids=list(range(6));step_index=0;base_world=np.eye(4)
+        workspace={'task':{'dynamic':['cube']}};tracker=SimpleNamespace(completed=False)
+        buffer=SimpleNamespace(abort=lambda:None)
+        native=SimpleNamespace(scene={'robot':SimpleNamespace(data=SimpleNamespace(joint_pos=measured))},
+            device='cpu',step=step)
+        def restore(self,*args):measured[self.index].zero_()
+        def state(self):return {'joint_pos':measured[self.index].numpy(),'object_poses':{'cube':np.eye(4)}}
+        def update_grasp(self):self.tracker.completed=True;self.step_index+=1
+        def place_success(self):return True
+        def check_success(self):return True
+        def failure_category(self):return 'place_failure'
+    result=replay(Adapter(),EpisodeDataset(source),tmp_path/'replay')
+    assert result['passed'] and len(commands)==len(values['actions'])
+    for index,command in enumerate(commands):
+        torch.testing.assert_close(command[[0,1,3]],idle_initial,rtol=0,atol=0)
+        np.testing.assert_allclose(command[2].numpy(),values['joint_targets'][index],atol=1e-8,rtol=0)
+
+
+def test_standalone_manual_annotation_keyboard_uses_common_replay_state(monkeypatch):
+    import sys
+    from soarm101_lab.workflow.presentation import annotation_keyboard
+    class Keyboard:
+        def __init__(self,*args):self.callbacks={}
+        def add_callback(self,key,callback):self.callbacks[key]=callback
+        def reset(self):pass
+    monkeypatch.setitem(sys.modules,'isaaclab.devices',SimpleNamespace(Se3Keyboard=Keyboard,Se3KeyboardCfg=lambda **kwargs:None))
+    adapter=SimpleNamespace(annotation_marks=[],annotation_position=[7],annotation_skipped=[])
+    keyboard=annotation_keyboard(adapter)
+    assert adapter.annotation_paused
+    keyboard.callbacks['N']();assert not adapter.annotation_paused
+    keyboard.callbacks['B']();assert adapter.annotation_paused
+    keyboard.callbacks['S']();assert adapter.annotation_marks==[7]
+    keyboard.callbacks['Q']();assert adapter.annotation_skipped==[True]
 
 
 def test_shared_subtask_source_cannot_leak_across_splits():

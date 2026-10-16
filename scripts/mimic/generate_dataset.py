@@ -123,44 +123,14 @@ def main():
     env_name = task_name or get_env_name_from_dataset(args_cli.input_file)
 
     # Configure environment
-    if args_cli.workspace:
-        from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config, validate_input
-        from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
-        from isaaclab.managers import DatasetExportMode
-        workspace, source_args = validate_input(args_cli.input_file, args_cli.workspace, annotated=True)
-        from soarm101_lab.real2sim.workspaces.reset import datagen_seed
-        from soarm101_lab.real2sim.storage import atomic
-        from pathlib import Path
-        seed = datagen_seed(workspace['task']['reset']['seed'], args_cli.generation_seed)
-        generation_provenance = dict(generation_seed=seed, workspace_reset_seed=workspace['task']['reset']['seed'],
-                                     seed_mode='automatic' if args_cli.generation_seed is None else 'explicit')
-        from soarm101_lab.workflow.artifacts import fingerprint
-        generation_provenance['source_input_sha256']=fingerprint(args_cli.input_file)
-        atomic(Path(args_cli.output_file).with_suffix('.generation.json'), generation_provenance)
-        print(f'[WORKFLOW] Datagen seed={seed} (workspace seed={workspace["task"]["reset"]["seed"]})', flush=True)
-        env_cfg = make_mimic_config(workspace, args_cli.device, num_envs, randomization_seed=seed,
-                                   coordinates=source_args.get('so101_coordinates'))
-        env_name = env_cfg.env_name
-        success_term = env_cfg.terminations.success
-        env_cfg.terminations = None
-        target = 10 if args_cli.generation_num_trials is None else args_cli.generation_num_trials
-        if target < 1:
-            raise ValueError('Successful demo target must be positive')
-        env_cfg.datagen_config.generation_num_trials = target
-        print(f'[WORKFLOW] Datagen 목표: 성공 데이터 {target}개 (실패 시도 제외)', flush=True)
-        env_cfg.recorders = ActionStateRecorderManagerCfg()
-        env_cfg.recorders.dataset_export_dir_path = output_dir
-        env_cfg.recorders.dataset_filename = output_file_name
-        env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
-    else:
-        env_cfg, success_term = setup_env_config(
-            env_name=env_name,
-            output_dir=output_dir,
-            output_file_name=output_file_name,
-            num_envs=num_envs,
-            device=args_cli.device,
-            generation_num_trials=args_cli.generation_num_trials,
-        )
+    env_cfg, success_term = setup_env_config(
+        env_name=env_name,
+        output_dir=output_dir,
+        output_file_name=output_file_name,
+        num_envs=num_envs,
+        device=args_cli.device,
+        generation_num_trials=args_cli.generation_num_trials,
+    )
 
     # override
     env_cfg.recorders.record_pre_step_flat_policy_observations = RecorderTermCfg(
@@ -176,11 +146,7 @@ def main():
     )
 
     # Create environment
-    if args_cli.workspace:
-        from soarm101_lab.tasks.manager_based.soarm101_lab.so101_mimic_env import SO101PickPlaceMimicEnv
-        env = SO101PickPlaceMimicEnv(cfg=env_cfg)
-    else:
-        env = gym.make(env_name, cfg=env_cfg).unwrapped
+    env = gym.make(env_name, cfg=env_cfg).unwrapped
 
     from soarm101_lab.workflow.presentation import attach
     bridge = attach(env)
@@ -286,14 +252,6 @@ def main():
     from soarm101_lab.tasks.manager_based.soarm101_lab.mdp.so101_mimic_recorders import close_video_recorders
     close_video_recorders(env)
     env.close()  # close/flush recorder before opening the completed dataset
-    if args_cli.workspace:
-        from soarm101_lab.real2sim.workspaces.mimic import preserve_metadata
-        preserve_metadata(args_cli.input_file, args_cli.output_file, args_cli.workspace, generated=True,
-                          expected_source_sha256=generation_provenance['source_input_sha256'])
-        import h5py
-        import json
-        with h5py.File(args_cli.output_file, 'a') as dataset:
-            dataset['data'].attrs['generation_provenance'] = json.dumps(generation_provenance)
 
 
 if __name__ == "__main__":
