@@ -3,7 +3,7 @@ import hashlib,json,subprocess,sys
 from pathlib import Path
 import h5py,pytest
 from soarm101_lab.workflow.artifacts import (Registry,artifact_name,artifact_description,
-    output_location,validate_storage_name,fingerprint)
+    output_location,validate_storage_name,fingerprint,episode_input_kind)
 from soarm101_lab.workflow.operations import Operations
 from test_source_partitions import source_fixture
 from soarm101_lab.real2sim.workspaces.package import load
@@ -22,12 +22,52 @@ def test_invalid_names(name):
     with pytest.raises(ValueError):validate_storage_name(name)
 
 
+def test_episode_picker_classifies_recorded_evidence_without_modifying_input(tmp_path):
+    path = tmp_path/'input.hdf5'
+    with h5py.File(path,'w') as h:
+        data=h.create_group('data');data.attrs['env_args']='{}'
+        data.create_group('demo_0')
+    before=path.read_bytes()
+    assert episode_input_kind(path)=='source' and path.read_bytes()==before
+    with h5py.File(path,'a') as h:
+        h.create_dataset('data/demo_0/obs/datagen_info/subtask_term_signals/grasp',data=[0,1])
+    assert episode_input_kind(path)=='annotated'
+    with h5py.File(path,'a') as h:
+        h['data'].attrs['env_args']=json.dumps({'generation_method':'isaaclab_mimic/1.0.15'})
+    assert episode_input_kind(path)=='datagen'
+
+
+def test_input_picker_registers_selected_source_and_binds_its_scene(tmp_path,storage_workspace,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    app=QApplication.instance() or QApplication([])
+    registry=Registry(tmp_path/'workflow');registry.register('workspace',storage_workspace)
+    selected=tmp_path/'new_source.hdf5';source_fixture(selected,2,load(storage_workspace))
+    before=selected.read_bytes()
+    monkeypatch.setattr(ui,'Registry',lambda:registry)
+    panel=ui.WorkflowPanel(lambda *args:pytest.fail('Selecting input must not start a worker'))
+    try:
+        panel.stage.setCurrentIndex(panel.stage.findData('annotate'))
+        monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(str(selected),''))
+        panel.browse()
+        artifact=registry.get(panel.inputs.currentData())
+        assert artifact['type']=='source' and artifact['path']==str(selected)
+        assert panel.workspace_path==str(storage_workspace)
+        assert selected.read_bytes()==before
+        assert 'storage_name' not in panel.stage_options()
+        panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+        with pytest.raises(ValueError,match='입력 형식'):
+            panel.browse()
+        assert selected.read_bytes()==before
+    finally:panel.close()
+
+
 @pytest.mark.parametrize('backend',['isaac','mujoco'])
 @pytest.mark.parametrize('stage,bucket',[('source','sources'),('annotate','annotations'),('datagen','datagen'),('convert','datasets'),('train','models'),('sim_eval','evaluations'),('real_eval','evaluations'),('hf_dataset','evaluations')])
 def test_worker_path_contract(tmp_path,backend,stage,bucket):
     out,boundary=output_location(stage,{},dict(backend=backend,storage_name='학습_실험01'),tmp_path)
     assert boundary==tmp_path/bucket/'학습_실험01'
-    if stage=='source' and backend=='isaac':assert out==boundary/'source.hdf5'
+    if stage=='source':assert out==(boundary/'origin/source.hdf5' if backend=='isaac' else boundary/'origin')
     elif stage in ('real_eval','hf_dataset') or (stage=='sim_eval' and backend=='isaac'):assert out==boundary/'result.json'
     else:assert out==boundary
     assert not boundary.exists()
@@ -97,14 +137,17 @@ def test_curation_named_filter_and_train14_val6(tmp_path,monkeypatch):
     assert filtered['path']==str(registry.root/'curation/filtered/source20_checked.hdf5')
     d.storage_name.setText('source20_train14_val6');d.train_ratio.setValue(70);d.split_plan=source_split(original,.7,2)
     d.save_source_split()
-    records=registry.all()[-2:];assert {r['display_name'] for r in records}=={'source20_train14_val6_train','source20_train14_val6_val'}
+    records=registry.all()[-2:];assert {r['display_name'] for r in records}=={'train','val'}
+    origin=next(a for a in registry.all() if a.get('execution',{}).get('origin_source_id')==parent['id'])
     ids={}
     for r in records:
         catalog,partition=source_catalog(r['path']);ids[partition['split']]=set(partition['source_ids'])
-        assert r['parents']==[parent['id']] and len(catalog)==(14 if partition['split']=='train' else 6)
+        assert r['parents']==[origin['id']] and len(catalog)==(14 if partition['split']=='train' else 6)
         registry.verify(r)
     assert not ids['train']&ids['val'] and fingerprint(original)==before
-    assert (registry.root/'curation/splits/source20_train14_val6/source_split.json').is_file()
+    assert (Path(d.saved_collection)/'source_split.json').is_file()
+    assert Path(d.saved_collection).name=='split_1'
+    assert source_catalog(origin['path'])[0]==source_catalog(original)[0]
     d.close()
 
 
@@ -120,7 +163,7 @@ def test_registry_legacy_name_fallback_and_content_identity(tmp_path):
     assert named['id']!=second['id'] and named['sha256']==fingerprint(p)
 
 
-def test_ui_names_filters_preview_and_model_graph(tmp_path,storage_workspace,monkeypatch):
+def test_ui_input_names_and_model_graph(tmp_path,storage_workspace,monkeypatch):
     from PyQt6.QtWidgets import QApplication,QComboBox
     from soarm101_lab.workflow import ui
     from soarm101_lab.workflow.ui import TrainingLossPlot
@@ -133,25 +176,18 @@ def test_ui_names_filters_preview_and_model_graph(tmp_path,storage_workspace,mon
     registry.register('workspace',storage_workspace)
     model=tmp_path/'models/named_policy/policy';model.mkdir(parents=True)
     (model/'metrics.jsonl').write_text('{"step":1,"loss":0.2}\n')
-    policy=dict(id='named-policy',type='policy',path=str(model),parents=['dataset-id'],status='SUCCEEDED',
+    policy=dict(id='named-policy',type='policy',path=str(model),parents=[first['id']],status='SUCCEEDED',
                 created_at=1,display_name='MiniVLA_실험01',format='so101.minivla-policy/1',workspace=first['workspace'])
     atomic(registry.root/'artifacts/named-policy.json',policy)
-    dataset=tmp_path/'lerobot';dataset.mkdir()
-    atomic(registry.root/'artifacts/dataset-id.json',dict(id='dataset-id',type='dataset',path=str(dataset),created_at=2,status='SUCCEEDED',format={},parents=[]))
     monkeypatch.setattr(ui,'Registry',lambda:registry)
-    panel=ui.WorkflowPanel(lambda *args:None);panel.workspace.setText(str(storage_workspace))
-    panel.select_stage('replay');panel.refresh()
-    assert panel.current_screen.inputs.findData(first['id'])>=0 and panel.current_screen.inputs.findData(second['id'])>=0
-    panel.current_screen.picker.select(first['id']);panel.current_screen.picker.search.setText('한글');assert panel.current_screen.inputs.count()==1 and panel.current_screen.inputs.currentData()==first['id']
-    assert first['path'] in panel.current_screen.picker.details.toPlainText() and '한글_Source' in panel.current_screen.inputs.currentText()
-    panel.current_screen.output.name.setText('재생_결과');panel.current_screen.update_ready()
-    assert panel.current_screen.stage_options()['storage_name']=='재생_결과' and '재생_결과' in panel.current_screen.output.preview.text()
-    panel.current_screen.picker.task.setText('no-such-task');assert panel.current_screen.inputs.count()==0
-    panel.current_screen.picker.task.clear();panel.current_screen.picker.search.clear();panel.current_screen.inputs.setCurrentIndex(panel.current_screen.inputs.findData(first['id']))
-    assert not hasattr(panel.current_screen,'metrics')
-    panel.select_stage('train:minivla',artifact_id='dataset-id')
-    assert panel.current_screen.metrics.training_metrics_path()==model/'metrics.jsonl'
-    panel.current_screen.metrics.show_training_loss();dialog=panel.current_screen.metrics._loss_dialog
+    panel=ui.WorkflowPanel(lambda *args:None);panel.workspace_path = str(storage_workspace)
+    panel.stage.setCurrentIndex(panel.stage.findData('replay'));panel.refresh()
+    assert panel.inputs.findData(first['id'])>=0 and panel.inputs.findData(second['id'])>=0
+    panel.inputs.setCurrentIndex(panel.inputs.findData(first['id']))
+    assert first['path'] == panel.inputs.toolTip() and '한글_Source' in panel.inputs.currentText()
+    assert 'storage_name' not in panel.stage_options()
+    assert panel.training_metrics_path()==model/'metrics.jsonl'
+    panel.show_training_loss();dialog=panel._loss_dialog
     choices=dialog.findChild(QComboBox,'lossModelChoice');assert choices.findData(policy['id'])>=0
     choices.setCurrentIndex(choices.findData(policy['id']));choices.activated.emit(choices.currentIndex())
     chart=dialog.findChild(TrainingLossPlot,'trainingLossPlot');assert chart.path==model/'metrics.jsonl'

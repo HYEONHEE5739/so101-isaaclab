@@ -20,8 +20,8 @@ def session(tmp_path, monkeypatch, stage='replay'):
 
 def test_modes_same_source_environment(published, tmp_path):
     r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
-    operator = op.plan('source', a, '', {'port': 'test', 'mode': 'operator', 'storage_name':'mode_test'}, run_dir=tmp_path)
-    developer = op.plan('source', a, '', {'port': 'test', 'mode': 'developer', 'storage_name':'mode_test'}, run_dir=tmp_path)
+    operator = op.plan('source', a, '', {'port': 'test', 'mode': 'operator'}, run_dir=tmp_path)
+    developer = op.plan('source', a, '', {'port': 'test', 'mode': 'developer'}, run_dir=tmp_path)
     assert '--headless' in operator['argv']
     assert [v for v in operator['argv'] if v != '--headless'] == developer['argv']
     assert operator['workspace'] == developer['workspace']
@@ -82,15 +82,15 @@ def test_ui_operator_default_frames_and_controls(tmp_path, monkeypatch):
     assert panel.mode.currentData() == 'operator'
     root = session(tmp_path, monkeypatch); bridge = module.current()
     bridge.publish({'sim_side': np.zeros((10, 10, 3), np.uint8)}, force=True)
-    panel.select_stage('replay')
-    panel.service.session = root; panel.controller.busy = True; panel.controller.active = {'stage':'replay','owner':panel.current_key}; panel.current_screen.monitor.begin()
+    panel.stage.setCurrentIndex(panel.stage.findData('replay'))
+    panel.service.session = root; panel.busy = True; panel.active_stage = 'replay'
     panel.poll_preview()
-    assert panel.current_screen.preview.feeds['sim_side'].pixmap() is not None
-    assert 'real_side' not in panel.current_screen.preview.feeds
-    assert panel.current_screen.monitor.controls['pause'].isEnabled() and 'save' not in panel.current_screen.monitor.controls
-    panel.controller.busy = False; panel.current_screen.monitor.finish({'ok':True,'artifact':{'path':'fixture'}}); panel.poll_preview()
-    assert panel.current_screen.preview.feeds['sim_side'].pixmap() is not None
-    assert panel.current_screen.monitor.status.text()=='SUCCEEDED'
+    assert panel.feeds['sim_side'].pixmap() is not None
+    assert panel.feeds['real_side'].isHidden()
+    assert panel.controls['pause'].isEnabled() and not panel.controls['save'].isEnabled()
+    panel.busy = False; panel.poll_preview()
+    assert panel.feeds['sim_side'].pixmap() is not None
+    assert '실행 종료' in panel.preview_status.text()
     panel.close()
 
 
@@ -113,20 +113,20 @@ def test_stage_specific_ui(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
     panel = ui.WorkflowPanel(lambda *args: None)
-    assert not panel.current_screen.episode_time.isHidden()
-    assert not panel.current_screen.monitor.controls['save'].isHidden()
-    assert 'mark' not in panel.current_screen.monitor.controls
-    panel.select_stage('annotate')
-    assert not panel.current_screen.preview.feeds['sim_overview'].isHidden()
-    assert not hasattr(panel.current_screen, 'episode_time')
-    assert 'mark' not in panel.current_screen.monitor.controls
-    panel.current_screen.annotation_mode.setCurrentIndex(1)
-    assert not panel.current_screen.monitor.controls['mark'].isHidden()
-    assert not panel.current_screen.monitor.controls['skip'].isHidden()
+    assert not panel.episode_time.isHidden()
+    assert not panel.controls['save'].isHidden()
+    assert panel.controls['mark'].isHidden()
+    panel.stage.setCurrentIndex(panel.stage.findData('annotate'))
+    assert not panel.feeds['sim_overview'].isHidden()
+    assert panel.episode_time.isHidden()
+    assert panel.controls['mark'].isHidden()
+    panel.annotation_mode.setCurrentIndex(1)
+    assert not panel.controls['mark'].isHidden()
+    assert not panel.controls['skip'].isHidden()
     for stage in ('convert', 'train'):
-        panel.select_stage(stage)
-        assert panel.current_screen.preview is None
-        assert all(button.isHidden() for button in panel.current_screen.monitor.controls.values())
+        panel.stage.setCurrentIndex(panel.stage.findData(stage))
+        assert panel.images.isHidden()
+        assert all(button.isHidden() for button in panel.controls.values())
     panel.close()
 
 
@@ -201,24 +201,24 @@ def test_datagen_ui_uses_identical_progress_for_both_backends(tmp_path,monkeypat
     from soarm101_lab.workflow import ui
     app=QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
-    panel=ui.WorkflowPanel(lambda *args:None)
-    panel.select_stage('datagen')
+    panel=ui.WorkflowPanel(lambda *args:None);panel.save_backend_settings=lambda:None
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
     panel.backend.setCurrentIndex(panel.backend.findData(backend))
-    panel.controller.active={'stage':'datagen','owner':panel.current_key};panel.current_screen.monitor.begin();panel.controller.busy=True
+    panel.active_stage='datagen';panel.busy=True
     root=session(tmp_path,monkeypatch,'datagen');bridge=module.current();panel.service.session=root
     bridge.details['ik_solver']='pinocchio_dls'
     bridge.start_datagen(100,4);bridge.source_progress(1,14,'demo_1',88,440);bridge.status()
     panel.show();app.processEvents();panel.poll_preview()
-    assert 'Source 검증 완료 1/14' in panel.current_screen.monitor.task_state.text()
-    assert '전체 성공 0/100' in panel.current_screen.monitor.task_state.text() and 'Env 3: 대기' in panel.current_screen.monitor.task_state.text()
-    assert 'Source 사전 검증 중' in panel.current_screen.monitor.status.text()
+    assert 'Source 검증 완료 1/14' in panel.task_state.text()
+    assert '전체 성공 0/100' in panel.task_state.text() and 'Env 3: 대기' in panel.task_state.text()
+    assert 'Source 사전 검증 중' in panel.status.text()
     panel.resize(1440,1050);app.processEvents();panel.poll_preview();app.processEvents()
     from PyQt6.QtCore import QRect,Qt
-    bounds=panel.current_screen.monitor.task_state.fontMetrics().boundingRect(QRect(0,0,panel.current_screen.monitor.task_state.width()-20,10000),
-        Qt.TextFlag.TextWordWrap,panel.current_screen.monitor.task_state.text())
-    assert 'IK: pinocchio_dls' in panel.current_screen.monitor.task_state.text()
-    assert panel.current_screen.monitor.task_state.height()>=bounds.height()+16
-    panel.controller.busy=False;panel.close()
+    bounds=panel.task_state.fontMetrics().boundingRect(QRect(0,0,panel.task_state.width()-20,10000),
+        Qt.TextFlag.TextWordWrap,panel.task_state.text())
+    assert 'IK: pinocchio_dls' in panel.task_state.text()
+    assert panel.task_state.height()>=bounds.height()+16
+    panel.busy=False;panel.close()
 
 
 def test_datagen_failure_reasons_and_frozen_completion_duration():

@@ -342,15 +342,18 @@ def source_split(source,train_fraction=.8,seed=0,assignments=None,names=None):
             'counts':{s:sum(v==s for v in assignments.values()) for s in ('train','val')},'leakage':False}
 
 
-def export_source_splits(source,destination,train_fraction=.8,seed=0,assignments=None,names=None):
+def export_source_splits(source,destination,train_fraction=.8,seed=0,assignments=None,names=None,*,nested=False):
     from .curation import export_subset
     plan=source_split(source,train_fraction,seed,assignments,names);destination=Path(destination)
     destination.mkdir(parents=True,exist_ok=False);outputs={}
-    for split in ('train','val'):
-        path=destination/(split if Path(source).is_dir() else split+'.hdf5')
-        chosen=[n for n,v in plan['assignments'].items() if v==split]
-        outputs[split]=str(export_subset(source,path,chosen,partition=plan['partitions'][split],source_records=plan['records']))
-    atomic(destination/'source_split.json',plan)
+    try:
+        for split in ('train','val'):
+            path=destination/split if Path(source).is_dir() else destination/split/'dataset.hdf5' if nested else destination/(split+'.hdf5')
+            chosen=[n for n,v in plan['assignments'].items() if v==split]
+            outputs[split]=str(export_subset(source,path,chosen,partition=plan['partitions'][split],source_records=plan['records']))
+        atomic(destination/'source_split.json',plan)
+    except BaseException:
+        shutil.rmtree(destination);raise
     return {**plan,'outputs':outputs}
 
 

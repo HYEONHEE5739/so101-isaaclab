@@ -196,11 +196,12 @@ def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(
         requests.append(args);return str(dest),''
     monkeypatch.setattr(QFileDialog,'getSaveFileName',choose_destination)
     d.export_button.click()
-    assert not errors and len(requests)==1 and dest.exists()
+    if mode=='planned':dest=Path(d.saved_collection)
+    assert not errors and len(requests)==(0 if mode=='planned' else 1) and dest.exists()
     if mode=='planned':
         result=json.loads((dest/'source_split.json').read_text())
         assert result['assignments']==d.split_plan['assignments']
-        outputs={s:source_catalog(dest/(s+'.hdf5')) for s in ('train','val')}
+        outputs={s:source_catalog(dest/s/'dataset.hdf5') for s in ('train','val')}
         for split,(saved,saved_partition) in outputs.items():
             expected={records[n]['source_id'] for n in names if d.split_plan['assignments'][n]==split}
             assert {r['source_id'] for r in saved.values()}==expected
@@ -214,8 +215,9 @@ def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(
             assert saved_partition['parent_partition_sha256']==partition['sha256']
             assert set(saved_partition['source_ids'])==expected
         else:assert saved_partition is None
-    registered=[a for a in registry.all() if a['id']!=parent['id']]
+    registered=[a for a in registry.all() if a['id']!=parent['id'] and not a.get('execution',{}).get('origin_source_id')]
     assert len(registered)==(2 if mode=='planned' else 1)
-    assert all(a['parents']==[parent['id']] for a in registered)
+    origin=next((a for a in registry.all() if a.get('execution',{}).get('origin_source_id')==parent['id']),parent)
+    assert all(a['parents']==[origin['id']] for a in registered)
     assert src.read_bytes()==before and original.read_bytes()==original_bytes
     d.close()

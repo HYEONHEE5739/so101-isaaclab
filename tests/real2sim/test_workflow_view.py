@@ -26,18 +26,25 @@ def test_pipeline_starts_at_source_without_retired_publication(tmp_path, monkeyp
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
     panel = ui.WorkflowPanel(lambda *args: None)
-    assert panel.current_stage() == 'source'
-    assert 'accept' not in panel.navigation.items
-    assert set(panel.current_screen.preview.feeds)=={'sim_side','sim_wrist'}
-    assert not panel.current_screen.preview.feeds['sim_side'].isHidden()
-    assert panel.current_screen.monitor.result.maximumHeight() > 1000
-    assert len(panel.current_screen.monitor.shortcuts) == 2
-    assert panel.current_screen.monitor.controls['discard'].text().startswith('리셋')
-    panel.select_stage('real_eval')
-    assert panel.navigation.topLevelItemCount() == 5
-    assert 'publish' not in panel.navigation.items
-    assert panel.current_stage() == 'real_eval'
-    assert set(panel.current_screen.preview.feeds)=={'real_side','real_wrist'}
+    assert panel.stage.currentData() == 'source'
+    assert not panel.task_selector.isHidden()
+    assert panel.stage.findData('accept') == -1
+    assert panel.feeds['real_side'].isHidden() and panel.feeds['real_wrist'].isHidden()
+    assert not panel.feeds['sim_side'].isHidden()
+    assert panel.result.maximumHeight() > 1000
+    assert len(panel.shortcuts) == 2
+    assert panel.controls['discard'].text().startswith('리셋')
+    for index in range(1, panel.stage.count()):
+        panel.stage.setCurrentIndex(index)
+        assert panel.task_selector.isHidden()
+    panel.stage.setCurrentIndex(panel.stage.findData('source'))
+    assert not panel.task_selector.isHidden()
+    panel.section.setCurrentIndex(1)
+    assert panel.section.count() == 2
+    assert panel.stage.findData('publish') == -1
+    assert panel.stage.currentData() == 'real_eval'
+    assert panel.task_selector.isHidden()
+    assert panel.feeds['sim_side'].isHidden() and not panel.feeds['real_side'].isHidden()
     panel.close()
 
 
@@ -53,10 +60,10 @@ def test_source_arrow_shortcuts_use_existing_commands(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
     panel = ui.WorkflowPanel(lambda *args: None); panel.show(); panel.activateWindow()
     root = tmp_path / 'presentation'; atomic(root / 'status.json', {'state':'RUNNING','frames':{}})
-    panel.service.session = root; panel.controller.busy = True; panel.controller.active = {'stage':'source','owner':panel.current_key}; panel.current_screen.monitor.begin()
-    panel.poll_preview(); panel.current_screen.monitor.controls['save'].setFocus(); app.processEvents()
-    QTest.keyClick(panel.current_screen.monitor.controls['save'], Qt.Key.Key_Right)
-    QTest.keyClick(panel.current_screen.monitor.controls['save'], Qt.Key.Key_Left)
+    panel.service.session = root; panel.busy = True; panel.active_stage = 'source'
+    panel.poll_preview(); panel.controls['save'].setFocus(); app.processEvents()
+    QTest.keyClick(panel.controls['save'], Qt.Key.Key_Right)
+    QTest.keyClick(panel.controls['save'], Qt.Key.Key_Left)
     app.processEvents()
     commands = [json.loads(p.read_text())['command'] for p in sorted((root / 'commands').glob('*.json'))]
     assert commands == ['save', 'discard']
@@ -86,21 +93,21 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
     panel = ui.WorkflowPanel(lambda *args: None)
-    assert hasattr(panel.current_screen, 'episode_time') and not hasattr(panel,'options_help')
-    panel.select_stage('datagen')
-    assert json.loads(panel.current_screen.options.toPlainText())['num_successful_demos'] == 10
-    assert 'num_successful_demos' in panel.current_screen.options.editors
-    panel.current_screen.options.setPlainText('{"num_successful_demos": 3}')
-    assert panel.current_screen.stage_options()['num_successful_demos'] == 3
-    panel.current_screen.reset_options()
-    assert json.loads(panel.current_screen.options.toPlainText())['num_successful_demos'] == 10
-    panel.select_stage('train')
-    assert 'batch_size' in panel.current_screen.options.editors
-    assert 'num_successful_demos' not in json.loads(panel.current_screen.options.toPlainText())
-    panel.current_screen.options.setPlainText('[]')
+    assert 'Episode Time' in panel.options_help.toPlainText()
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+    assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
+    assert '만들 성공 데이터 수' in panel.options_help.toPlainText()
+    panel.options.setPlainText('{"num_successful_demos": 3}')
+    assert panel.stage_options()['num_successful_demos'] == 3
+    panel.reset_options()
+    assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    assert 'batch_size' in panel.options_help.toPlainText()
+    assert 'num_successful_demos' not in json.loads(panel.options.toPlainText())
+    panel.options.setPlainText('[]')
     import pytest
     with pytest.raises(ValueError, match='JSON 객체'):
-        panel.current_screen.stage_options()
+        panel.stage_options()
     panel.close()
 
 
@@ -120,19 +127,19 @@ def test_training_model_selector_owns_architecture(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
     panel = ui.WorkflowPanel(lambda *args: None)
-    assert not hasattr(panel.current_screen, 'architecture')
-    panel.select_stage('train')
-    assert not panel.current_screen.architecture.isHidden()
-    assert 'architecture' not in json.loads(panel.current_screen.options.toPlainText())
-    assert panel.current_screen.stage_options()['architecture'] == 'smolvla'
-    panel.current_screen.architecture.setCurrentIndex(panel.current_screen.architecture.findData('act'))
-    panel.current_screen.options.setPlainText('{"architecture": "smolvla", "steps": 42}')
-    assert panel.current_screen.stage_options()['architecture'] == 'act'
-    assert panel.current_screen.stage_options()['steps'] == 42
-    panel.current_screen.reset_options()
-    assert panel.current_screen.stage_options()['architecture'] == 'act'
-    panel.select_stage('convert')
-    assert not hasattr(panel.current_screen, 'architecture')
+    assert panel.architecture.isHidden()
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    assert not panel.primary.isHidden() and not panel.architecture.isHidden()
+    assert 'architecture' not in json.loads(panel.options.toPlainText())
+    assert panel.stage_options()['architecture'] == 'smolvla'
+    panel.architecture.setCurrentIndex(panel.architecture.findData('act'))
+    panel.options.setPlainText('{"architecture": "smolvla", "steps": 42}')
+    assert panel.stage_options()['architecture'] == 'act'
+    assert panel.stage_options()['steps'] == 42
+    panel.reset_options()
+    assert panel.stage_options()['architecture'] == 'act'
+    panel.stage.setCurrentIndex(panel.stage.findData('convert'))
+    assert panel.architecture.isHidden()
     panel.close()
 
 
@@ -143,13 +150,13 @@ def test_dashboard_navigation_selects_existing_stage(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
     panel = ui.WorkflowPanel(lambda *args: None)
-    assert not hasattr(panel,'stage')
-    panel.navigation.setCurrentItem(panel.navigation.items['train:smolvla'])
-    assert panel.current_stage() == 'train'
+    assert panel.stage.isHidden()
+    panel.navigation.setCurrentRow(panel.stage.findData('train'))
+    assert panel.stage.currentData() == 'train'
     assert panel.dashboard_title.text() == ui.LABELS['train']
-    panel.navigation.setCurrentItem(panel.navigation.items['real_eval'])
-    assert panel.navigation.topLevelItemCount() == 5
-    assert panel.current_stage() == 'real_eval'
+    panel.section.setCurrentIndex(1)
+    assert panel.navigation.count() == panel.stage.count()
+    assert panel.stage.currentData() == 'real_eval'
     panel.close()
 
 
@@ -178,11 +185,11 @@ def test_minivla_periodic_resume_picker_reads_model_root(tmp_path,monkeypatch,ba
     if omitted:
         saved=json.loads((model/'config.json').read_text());saved.pop('batch_size');(model/'config.json').write_text(json.dumps(saved))
     panel=ui.WorkflowPanel(lambda *args:None)
-    panel.select_stage('train')
-    panel.current_screen.architecture.setCurrentIndex(panel.current_screen.architecture.findData('minivla'))
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
     monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(str(selected),''))
-    panel.current_screen.browse_checkpoint()
-    opts=panel.current_screen.stage_options()
+    panel.browse_checkpoint()
+    opts=panel.stage_options()
     assert opts['resume_checkpoint']==str(selected) and opts['steps']==17 and opts['batch_size']==batch_size
     assert opts['model_config']==str(model/'config.json')
     panel.close()
@@ -206,13 +213,13 @@ def test_training_graph_waits_and_updates_without_a_file_dialog(tmp_path,monkeyp
     app=QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
     monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(_ for _ in ()).throw(AssertionError('automatic graph must not ask for a file')))
-    panel=ui.WorkflowPanel(lambda *args:None);panel.select_stage('train:minivla');panel.controller.busy=True;panel.controller.active={'stage':'train','owner':panel.current_key}
-    panel.current_screen.metrics.show_training_loss();chart=panel.current_screen.metrics._loss_dialog.findChild(ui.TrainingLossPlot)
-    assert chart.path is None and chart.rows==[] and not panel.current_screen.metrics._loss_dialog.isModal()
+    panel=ui.WorkflowPanel(lambda *args:None);panel.busy=True;panel.active_stage='train'
+    panel.show_training_loss();chart=panel._loss_dialog.findChild(ui.TrainingLossPlot)
+    assert chart.path is None and chart.rows==[] and not panel._loss_dialog.isModal()
     run=tmp_path/'run';(run/'presentation').mkdir(parents=True)
     custom=tmp_path/'custom_output';metrics=custom/'policy/metrics.jsonl'
     (run/'state.json').write_text(json.dumps({'stage':'train','plan':{'output':str(custom),'options':{'architecture':'minivla'}}}))
-    panel.service.session=run/'presentation';panel.current_screen.monitor.session=panel.service.session;chart.reload()
+    panel.service.session=run/'presentation';chart.reload()
     assert chart.path==metrics and chart.rows==[]
     metrics.parent.mkdir(parents=True);(metrics.parent/'config.json').write_text('{"steps":100}')
     metrics.write_text('{"step":1,"loss":2.0}\n')
@@ -222,7 +229,7 @@ def test_training_graph_waits_and_updates_without_a_file_dialog(tmp_path,monkeyp
     QTest.qWait(1700)
     assert len(chart.rows)==2 and chart.rows[-1]['validation_action_loss']==1.8
     chart.reload();assert len(chart.rows)==2
-    panel.current_screen.metrics._loss_dialog.close();panel.controller.busy=False;panel.close()
+    panel._loss_dialog.close();panel.busy=False;panel.close()
 
 
 def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monkeypatch):
@@ -232,8 +239,8 @@ def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monke
     from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
     registry=Registry(tmp_path/'registry');monkeypatch.setattr(ui,'Registry',lambda:registry)
-    panel=ui.WorkflowPanel(lambda *args:None);panel.select_stage('train:minivla')
-    panel.current_screen.inputs.blockSignals(True);panel.current_screen.inputs.clear();panel.current_screen.inputs.addItem('dataset','train_id');panel.current_screen.inputs.blockSignals(False)
+    panel=ui.WorkflowPanel(lambda *args:None)
+    panel.inputs.blockSignals(True);panel.inputs.clear();panel.inputs.addItem('dataset','train_id');panel.inputs.blockSignals(False)
     monkeypatch.setattr(registry,'get',lambda key:{'type':'dataset','path':str(tmp_path/'dataset')})
     chosen=None
     for stamp,source in [('20261017_100000','train_id'),('20261017_110000','train_id'),('20261017_120000','different_id')]:
@@ -241,7 +248,7 @@ def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monke
         output=tmp_path/stamp;metrics=output/'policy/metrics.jsonl';metrics.parent.mkdir(parents=True);metrics.write_text('')
         (run/'state.json').write_text(json.dumps({'stage':'train','source':source,'plan':{'output':str(output),'options':{'architecture':'minivla'}}}))
         if stamp=='20261017_110000':chosen=metrics
-    assert panel.service.session is None and panel.current_screen.metrics.training_metrics_path()==chosen
+    assert panel.service.session is None and panel.training_metrics_path()==chosen
     panel.close()
 
 
@@ -268,9 +275,9 @@ def test_minivla_batch_size_defaults_and_stage_options(tmp_path,monkeypatch):
     app=QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
     panel=ui.WorkflowPanel(lambda *args:None)
-    panel.select_stage('train')
-    panel.current_screen.architecture.setCurrentIndex(panel.current_screen.architecture.findData('minivla'))
-    assert panel.current_screen.options.editors['batch_size'][1].value()==8
-    panel.current_screen.options.editors['batch_size'][1].setValue(4)
-    assert panel.current_screen.stage_options()['batch_size']==4 and 'accumulation' not in panel.current_screen.options.editors
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    assert panel.options.editors['batch_size'][1].value()==8
+    panel.options.editors['batch_size'][1].setValue(4)
+    assert panel.stage_options()['batch_size']==4 and 'accumulation' not in panel.options.editors
     panel.close()

@@ -35,15 +35,15 @@ def scenes(tmp_path, monkeypatch):
 def test_scene_selection_shares_workflow_camera_ids_and_task(scenes):
     app,w,first,second,artifacts=scenes
     w.live_scene.setCurrentIndex(w.live_scene.findData(str(first)))
-    assert w.workflow_panel.workspace.text()==str(first)
+    assert w.workflow_panel.workspace_path==str(first)
     assert w.workflow_panel.inputs.currentData()==artifacts[0]['id']
     assert len(w.workflow_panel.task_selector.definitions)==6
     assert not w.live_tiles['sim_wrist'].isHidden()
     # Source dropdown can select another Workspace despite the old Scene filter.
     panel=w.workflow_panel
     index=panel.inputs.findData(artifacts[1]['id']);assert index>=0
-    panel.inputs.setCurrentIndex(index);panel.inputs.activated.emit(index)
-    assert panel.workspace.text()==str(second)
+    panel.inputs.setCurrentIndex(index)
+    assert panel.workspace_path==str(second)
     assert w.live_scene.currentData()==str(second)
     assert panel.scene_cameras==('front',)
     assert w.live_tiles['sim_wrist'].isHidden()
@@ -88,7 +88,7 @@ def test_active_scene_not_silently_replaced_by_selection(scenes,monkeypatch):
     monkeypatch.setattr(w.bus,'status',lambda:state)
     w.live_scene.setCurrentIndex(w.live_scene.findData(str(second)))
     w.identity_sim.setChecked(True);w.refresh()
-    assert w.workflow_panel.workspace.text()==str(second)
+    assert w.workflow_panel.workspace_path==str(second)
     assert str(first) in w.live_details.text()
     assert 'Scene 관절 보정 제외: OFF' in w.live_details.text()
     assert 'Disconnect → Connect' in w.scene_selection_hint.text()

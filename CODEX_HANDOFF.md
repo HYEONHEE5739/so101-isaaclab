@@ -1,32 +1,110 @@
 # SO-101 / Real2Sim 개발 인수인계
 
-## 최신 — Workflow 작업별 화면과 Controller 분리 (2026-10-17)
+## 최신 — 최상위 datasets 경로 제거 후 검증 (2026-10-18)
 
-사용자 명세 기준52c4e06에서 UI만 리팩터링했다. 기존 미추적 MUJOCO_LOG.TXT와 docs/minivla/test-output.txt 보존.
-WorkflowPanel은217줄의 상위 통합/화면 lifecycle로 축소했고 ui_components에 Context/Controller/Navigation,
-ArtifactPicker, run별 Monitor/Preview/TrainingMetrics와 Source/Replay/Annotation/DataGen/Convert/Training/
-Sim/Real Eval/Publication/Curation/Explorer Screen을 분리했다. Navigation5그룹은 STAGES 실행 계약과 별개다.
-모델별 TrainingScreen 인스턴스가 옵션/입력/Resume을 각각 보존한다. Camera 없는 단계에는 CameraView를 생성하지 않는다.
-Replay/Annotation/DataGen은 editable TaskSelector 대신 입력에서 상속한 Task/Scene 요약을 쓴다.
+사용자가 최상위 datasets 삭제를 요청해 남아 있던 Source split 호환 링크를 제거했다. 실제 Source20/14/6과
+모델은 outputs/workflow의 관리 경로 그대로이며 숫자/영상/manifest/Registry/UI를 변경하지 않았다.
+앞서 이 링크가 반드시 필요하다고 안내했지만 조사한 옛 datasets 참조는 과거 출처 기록이었고 현재 실행 의존성이 없었다.
+옛 경로 open/listdir/scandir/mkdir를 차단한 상태로 현재 Registry15개 verify, Source 원본과14/6 열기,
+양 엔진 신규 Source/Annotation 계획, Source20 복사본의 Curation14/6·10/10 저장을 확인했다.
+Train100/Val30(40057/12242표본) 실제 CPU 로딩과 best/last Resume 계약도 통과했다. 옛 경로 IO 시도0.
+신규 Source 기본 출력과 Curation 분할 저장은 이미 sources/<묶음>/origin, split_N/train·val을 사용하므로
+새 production 수정은 하지 않았다. 과거 metadata 경로 문자열을 일괄 치환해 내용 SHA/Resume identity를 바꾸지 않는다.
+회귀82PASS. 검증 스크립트의 dry plan output 가정 오류 로그는 보존했고 실제 output_location 검사로 정정했다.
+보고서 outputs/workflow_validation/legacy_datasets_removal/REPORT.md, result/final_audit.json.
+새 물리 기록/실물/학습/정책 추론/의존성 변경/Commit/Push 없음. Staged 되돌리기 보존.
 
-Controller는 plain snapshot/deep copy→기존 Operations.readiness/run을 호출한다. debounce/token/worker validation 유지,
-Val 후보 검사도 background에서 처리. 실행 중 Context/Navigation/설정 잠금, 중복 실행 차단, 시작 전 취소 지원.
-현재 화면의 run만 로그/결과와 연결한다. MiniVLA는 실제 metrics 그래프를 재사용하고 이전 기록이면 구분한다.
-변환/업로드에 그래프·카메라·기록 컨트롤 없음. Real Motion은 기본OFF+명시 확인, Upload도 대상/범위 확인 후 기존 worker.
-Window는 Context+scene_tasks()를 사용하고 기존 getter/browse/select/service/busy 호환 유지. Backend 동기화는 잠금을 존중한다.
+## 최신 — 단계별 입력 폴더·선택값 격리 (2026-10-17)
 
-Explorer는 Registry 읽기 전용 필터/계보/정확한 ID 이동, MiniVLA checkpoint를 Policy 하위 파일로 표시한다.
-LeRobot 중간 checkpoint import는 기존 평가 화면의 폴더 등록을 사용한다. Curation은 기존 dialog를 임베딩했고,
-episode 선별/Source Group 분할/원본 보존은 변경하지 않았다. 숨긴 real_enabled/real_side/wrist/options_help 및
-section/stage combo, 이전 Navigation/show-hide와 미사용 stylesheet를 제거했다. option_help schema·CameraView/
-LogTail·TrainingLossPlot·TaskSelector와 기존 SettingsForm은 재사용한다.
+공용 inputs combo의 이전 단계 ID를 refresh가 그대로 재사용하고, collection_directory가 입력 종류를 따라
+기본 저장소를 바꾸던 경로를 고쳤다. input_folders는 기존처럼 단계별, 새 input_selections는 각 단계의
+Artifact ID와 Train Val ID를 저장한다. inputs_stage가 현재 combo의 소유 단계를 구분하고 refresh가 그 단계의
+저장값만 복원한다. 다른 단계의 전역 Scene으로 목록을 필터링하지 않는다. 명시적인 Source/Real-Sim Scene 선택은 유지.
+기본 묶음 시작 위치는 단계 기준 sources/annotations/datagen/datasets/models이며 이전 입력 종류를 따르지 않는다.
+빈 범위의 개별 입력 선택창도 해당 단계 폴더에서 시작한다. 버튼은 annotations / split_1처럼 실제 저장소를 표시한다.
+Curation 저장은 현재 호환 단계만 갱신한다. Source에서 다른 단계의 Annotation 범위를 자동 변경하는 코드는 제거했다.
 
-화면/Curation149PASS, USD/Window75PASS, 공통 계약83PASS, MiniVLA CPU38PASS. 실제 Registry63개 읽기 전용11화면
-캡처는 worker0, Registry/UI 설정 byte 보존 확인. 처음 USD 경로 누락·모드 비교의 임의 출력명·라우팅 fixture의
-Task metadata 의존·캡처 runner QWidget.scroll 동명 오류를 수정했고 실패 로그는 남겼다. 모델/IK/물리/Mimic/
-Dataset/Operations/Registry/CLI/학습 코드는 변경하지 않았다. 새 GPU 학습/DataGen/Hub 업로드/실물 검증/commit/push 없음.
-사용법·옵션/Stage 계약·제거 근거: docs/real2sim/WORKFLOW_UI.md. 보고서·캡처·명령/감사:
-outputs/workflow_validation/ui_architecture/. 최종 작업은 git diff로 검토할 상태다.
+Native UI/저장/Curation168PASS/1deselected, 후속 browse64PASS/1deselected, 별도 Window/Task/Operations66PASS.
+마지막 빈 입력 tooltip 제거·저장소 라벨/alias 경로 변경은 관련25PASS로 확인했다.
+다른 단계로 이동·재시작할 때 공유 유형의 Source 선택이 섞이지 않는지, Curation 교차 갱신 방지와 9종 기본 경로를 검사했다.
+실제 Registry 복사본에서 DataGen의 Annotation 범위를 Train으로 바꿔도 다른5단계의 폴더/ID와 Train Val이 유지됐고
+재시작 후6단계 선택을 복원했다(worker0). UI 검사/보고서는 outputs/workflow_validation/stage_input_isolation/에 있다.
+기존 데이터/Registry/사용자 ui.json은 수정하지 않았다. 엔진/학습/실물/Hub/Commit/Push 없음. GUI 재시작 필요.
+
+## 최신 — 기존 실제 결과의 단계별 저장소 정리 (2026-10-17)
+
+사용자 명시 요청으로 기존 runs/datasets 및 등록된 검증 폴더의 실제 결과를 outputs/workflow의
+sources/annotations/datagen/datasets/models/evaluations로 이동했다. 28개 경로·2070파일의 byte SHA를
+이동 전후 대조했고 Registry21개의 path/collection만 갱신했다(ID/부모/등록 SHA 유지).
+Source20은 sources/20261016_094817_source_cube_red_to_cup_a_656da738/origin/dataset,
+기존 14/6 분할은 같은 묶음 split_1/train·val이다. 이후 결과/모델도 같은 묶음·분할을 공유한다.
+예전 절대 경로는 symlink로 연결해 HDF5/영상·LeRobot index·checkpoint 내 참조를 유지했다.
+모델/manifest/숫자/영상은 재작성하지 않았다. 실패 결과는 단계별 .incomplete, 이력 JSON/로그는 runs다.
+사용자 ui.json의 입력 묶음을 새 경로에 연결했다. 열려 있던 GUI는 재시작해야 새 코드/설정을 읽는다.
+묶음 선택창은 Registry.collection_directory로 입력 저장소/분할에서 시작한다. 모델 변경 시 전체 입력을
+refresh하여 MiniVLA의 Val을 Train 목록에서 제외한다. Source 외 Task 편집 숨김은 유지했다.
+
+이동한 Registry21개 verify, Source catalog5개, Train100/Val30(40057/12242표본) 실제 CPU 로딩,
+best18000/last20000 Resume 계약을 확인했다. 새 학습/정책 추론/엔진/실물은 실행하지 않았다.
+UI·저장123PASS/1deselected, 별도 Window35PASS, 임시 데이터 이동 실패 rollback 확인. 정리 전부터 경로가 없던 Registry40개는
+삭제·재생성하지 않고 plan.json에 보존했다. Workspace2개는 원래 위치 그대로다.
+보고서 outputs/workflow_validation/storage_reorganization/REPORT.md, plan/result/runtime_validation.json.
+before/에 Registry/UI 백업이 있으며 일회성 reorganize.py는 완료 후 재적용/백업 덮어쓰기를 거부한다.
+Staged 되돌리기와 기존 미커밋 코드는 보존했다. Commit/Push 없음.
+
+## 최신 — Source origin·여러 split·단계별 입력 묶음 (2026-10-17)
+
+입력 폴더 열기 옆에 데이터 묶음 선택을 추가했다. 선택 범위를 input_folders로 단계별 저장하며 그 아래의
+호환 Registry 입력만 표시한다. 빈 범위는 다른 입력으로 대체하지 않는다. 미등록 데이터는 명시 선택 폴더에서
+기존 register 검증으로 발견한다. 정책 묶음은 기존 provenance만 읽고 checkpoint 파일을 수정하지 않는다.
+새 Source 기본 출력은 sources/<Source 이름>/origin/이다. Curation 분할 저장은 같은 묶음 split_1, split_2…
+아래 train/, val/과 source_split.json을 자동 저장한다. HDF5는 각 role/dataset.hdf5, Canonical은 role/ Dataset.
+기존 Source는 명시 분할 저장 시 origin으로 복사한다. HDF5 복사본에는 Source 계보/그룹을 명시하여 경로 기반
+Legacy 그룹 변경을 막는다. 원래 데이터와 파일 계약/좌표/숫자/MP4는 보존한다. 이미 분할된 입력의 잠금은 유지.
+Annotation/DataGen/Convert는 기존 output_location이 Source/분할/role을 이어받아 단계별 폴더에 저장한다.
+학습은 Source/분할 아래 모델별 새 실행, ACT/SmolVLA Resume의 기존 출력 계약은 그대로다.
+Registry의 새 collection은 저장 그룹일 뿐, 실제 Source Partition/누수 검사에 사용되는 증거를 대신하지 않는다.
+Curation 저장 후 Annotation 묶음이 연결되고 Source 기본 Curation 재열기는 origin으로 돌아가 새 분할이 가능하다.
+기존 선택된 데이터의 Curation은 해당 입력을 연다. metadata 설명/Task provenance/이름 UI는 다시 만들지 않았다.
+추가 요청: Scene objects/Active Objects·Task preset/Pick object/Target cup/Language instruction 영역은 Source에만
+표시한다. 나머지 단계의 편집 영역은 숨기고 입력의 Task/Scene 상속·충돌 검사·평가 기능에 필요한 내부 상태는 유지한다.
+실제 Qt 10단계 표시 범위와 split_2 Train/Val 양쪽 Task 상속을 검사했다(task_visibility.json).
+
+Native UI/저장/Curation167PASS, 별도 USD/Window/Task/Operations67PASS. Fixture worker subprocess로 Train/Val
+Annotation 두 경로의 기존 request/검증/등록→DataGen 묶음 선택 확인. 실제 기존 Canonical Source20을 검증 폴더에
+origin+split1(14/6)+split2(10/10)로 복사·분할하고 실제 Qt dropdown 두 항목을 캡처했다. 원본 Source 및 Registry/UI64
+JSON byte 보존, 엔진 worker0. Window/liveness 테스트 Registry를 임시 경로로 격리했다.
+새 DataGen/학습/실물/Hub/의존성 변경/commit/push 없음. 초기 경로 기대/그룹 오류 로그 보존.
+보고서 outputs/workflow_validation/dataset_collections/REPORT.md, runtime_result.json, annotation_split_2.png.
+
+## 최신 — Task provenance 표시·전용 코드 제거 (2026-10-17)
+
+TaskSelector의 summary QLabel/행/설명 생성과 Workflow의 Builder 설명 추가/summary 갱신을 삭제했다.
+Scene/Task 구성 오류는 task_setup_error로만 보관하고 기존 NOT_READY/실행 전 검사에 전달한다.
+옵션 편집은 기존처럼 실행 준비 검사와 분리한다. Task 선택/상속/충돌/review 판정, 파일 provenance와
+Source Partition/Train-Val 누수 검증은 실제 기능에 필요하므로 유지했다. 이전 UI 제거의 전용 코드도 재검색했다.
+UI/저장108PASS, 별도 Window/Task42PASS. Registry/UI설정64개+핵심 실행/계보 모듈5개 hash와 staged 되돌리기
+diff 보존, 기존 Registry 복사본 화면에서 summary 미존재와 worker0 확인. 새 엔진/학습/실물/업로드/commit/push 없음.
+보고서 outputs/workflow_validation/task_provenance_cleanup/REPORT.md. 초기 옵션 guard 위치/fixture 실패 로그도 보존했다.
+
+## 최신 — Workflow 입력 UI 간소화 (2026-10-17)
+
+큰 UI 리팩터링을 되돌리는 staged diff는 그대로 유지했다. 그 위의 작은 수정으로 Loss 버튼은 Train에만
+표시한다. 연결·실행 환경 버튼, Workspace/Python editor, 검색/종류/Task 필터, 경로·계보 설명,
+저장 이름/추천/예상 위치, Workspace/새로고침/별도 입력 선택 버튼과 전용 코드는 삭제했다.
+사용자 확인에 따라 유일한 `입력 폴더 열기`는 OS 탐색기가 아니라 현재 단계의 입력 선택창이다.
+선택된 입력 경로(없으면 해당 입력 유형의 최근 경로/기본 폴더)에서 시작하며 출력 경로를 쓰지 않는다.
+Scene/Builder는 기존 import worker, Episode는 HDF5 또는 Canonical manifest 선택, Dataset/Policy는 폴더 선택이다.
+기존 Registry 항목을 재사용하고 미등록 Episode는 생성/주석 metadata로 유형을 결정한 뒤 기존 검사를 거친다.
+MiniVLA Val 입력 선택 시 Train은 유지한다. 완료/선택 뒤 내부 refresh와 CLI 이름/출력 기능은 보존했다.
+Workspace는 plain `workspace_path`와 `workspaceChanged`, Python은 `worker_python`으로 실제 실행/Real-Sim에 전달한다.
+선택 Scene/입력 identity를 확인하며 원본 data/model/worker/학습/IK/물리/Resume 코드는 수정하지 않았다.
+
+검증: UI/저장 107PASS, 별도 USD/Window35PASS. HDF5 선택→등록→Scene 연결과 잘못된 DataGen 입력 거부,
+10단계 입력 dialog 시작 위치/취소, 실제 worker 요청의 Python/Scene, 기존 backend/장치 연결 경계를 검사했다.
+기존 Registry63+UI설정1개의 복사본으로 화면 확인, 원본64 JSON byte 보존, worker 실행0.
+보고서 outputs/workflow_validation/ui_input_cleanup/REPORT.md 및 source.png/train.png/ui_probe.json.
+새 DataGen/GPU 학습/실물/Hub 업로드는 실행하지 않았다. Commit/Push 없음.
 
 ## 최신 — MiniVLA 신규 학습 Batch8·Accumulation1 (2026-10-17)
 

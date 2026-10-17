@@ -109,10 +109,7 @@ Real2Sim으로 맞춘 한 실제 작업공간을 재사용 가능한 environment
 - policy train: `policy.py`
 - evaluation: `evaluation.py`
 - Hugging Face: `hub.py`
-- UI: `ui.py`(상위 통합), `ui_components/`(Context/Controller/작업별 Screen), `view.py`, `presentation.py`
-
-화면 책임·5개 Navigation 그룹·설정 소유권과 사용 경로는 [WORKFLOW_UI](WORKFLOW_UI.md)에 있다.
-UI Controller가 기존 Operations를 호출하며 Worker·Registry·데이터 계약은 유지한다.
+- UI: `ui.py`, `view.py`, `presentation.py`
 
 두 backend는 같은 WorkflowPanel, Operations, Registry, Presentation을 사용한다. `operations.plan`은 명령 계획,
 `artifacts.output_location`은 UI/worker의 공통 저장 경로 계약이다. 실행 로그는 `runs/<Run ID>`, 실제 새 결과는

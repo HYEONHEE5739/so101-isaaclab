@@ -24,7 +24,7 @@ def test_fake_ui_joint_reference_review_save_activate_restore(tmp_path,monkeypat
     from soarm101_lab.workflow.artifacts import Registry
     monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path/'real2sim');p=w.precision_panel
-    w.workflow_panel.python.setText(sys.executable);w.show();app.processEvents()
+    w.workflow_panel.worker_python = sys.executable;w.show();app.processEvents()
     assert w.tabs.count()==4 and w.runtime_launcher.process is None
     for index in (3,0,1,3):w.tabs.setCurrentIndex(index);app.processEvents()
     assert w.runtime_launcher.process is None  # Switching tabs must do nothing to devices.

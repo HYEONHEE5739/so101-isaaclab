@@ -189,11 +189,11 @@ def test_workflow_panel_shared_backend_and_no_autorun(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, 'Registry', lambda: registry)
     calls = []
     panel = ui.WorkflowPanel(lambda *args: calls.append(args))
-    panel.select_stage('train')
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
     assert not calls
     assert panel.service.registry is registry
-    assert panel.current_screen.monitor.status.text().startswith('NOT_READY')
-    assert panel.current_screen.stage_options()['architecture'] == 'smolvla'
+    assert panel.status.text().startswith('NOT_READY')
+    assert panel.stage_options()['architecture'] == 'smolvla'
     panel.close()
 
 

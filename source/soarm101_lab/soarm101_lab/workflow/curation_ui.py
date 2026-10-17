@@ -328,7 +328,7 @@ class EventTimeline(QSlider):
 class CurationDialog(QDialog):
     def __init__(self,registry,parent=None,workspace=None):
         super().__init__(parent);self.registry=registry;self.workspace=workspace;self.split_generation=0
-        self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None;self.split_plan=None
+        self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None;self.split_plan=None;self.saved_collection=None
         self.reader=None;self.frame_job=None;self.pending_frame=None;self.generation=0;self.seek_generation=0;self.pending_selection=None
         self.setWindowTitle('Data Curation · 에피소드 검토');self.resize(1400,920)
         layout=QVBoxLayout(self);layout.setSpacing(10)
@@ -411,9 +411,9 @@ class CurationDialog(QDialog):
         self.cancel_split=QPushButton('미리보기 지우기');self.cancel_split.clicked.connect(self.cancel_source_split);assignbar.addWidget(self.cancel_split);assignbar.addStretch()
         self.split_status=QLabel('비율과 랜덤값을 정한 뒤 미리보기를 누르면 분포 그림에 색으로 표시됩니다.');self.split_status.setWordWrap(True);advanced_layout.addWidget(self.split_status)
         from .artifacts import suggested_name
-        names=QFormLayout();page.addLayout(names)
-        self.storage_name=QLineEdit(suggested_name('curated'));names.addRow('저장 이름',self.storage_name)
-        self.output_preview=QLabel();self.output_preview.setWordWrap(True);self.output_preview.setTextFormat(Qt.TextFormat.PlainText);names.addRow('예상 저장 위치',self.output_preview)
+        self.names_form=QFormLayout();page.addLayout(self.names_form)
+        self.storage_name=QLineEdit(suggested_name('curated'));self.names_form.addRow('저장 이름',self.storage_name)
+        self.output_preview=QLabel();self.output_preview.setWordWrap(True);self.output_preview.setTextFormat(Qt.TextFormat.PlainText);self.names_form.addRow('예상 저장 위치',self.output_preview)
         self.storage_name.textChanged.connect(self.update_output_preview)
         footer=QHBoxLayout();layout.addLayout(footer);footer.addWidget(QLabel('원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.'));footer.addStretch()
         self.export_button=QPushButton('데이터 저장');self.export_button.setObjectName('primaryAction');self.export_button.setEnabled(False)
@@ -567,6 +567,11 @@ class CurationDialog(QDialog):
 
     def open_latest(self):
         artifact=self.registry.latest({'source','annotated','datagen'},self.workspace)
+        if artifact and artifact['type']=='source' and artifact.get('collection',{}).get('partition'):
+            origin=self.registry.root/'sources'/artifact['collection']['source']/'origin'
+            artifact=next((a for a in reversed(self.registry.all()) if a['type']=='source'
+                           and a.get('status')=='SUCCEEDED' and Path(a['path']).is_relative_to(origin)
+                           and Path(a['path']).exists()),artifact)
         if artifact:self.load_data(artifact['path'])
         else:self.info.setText('현재 Workspace에 완료된 Source / Annotation / DataGen이 없습니다. 데이터 열기에서 선택하세요.')
 
@@ -655,6 +660,7 @@ class CurationDialog(QDialog):
 
     def update_split_controls(self):
         locked=any(r.get('source_partition') for r in self.rows);planned=self.split_plan is not None
+        self.storage_name.setVisible(not planned);self.names_form.labelForField(self.storage_name).setVisible(not planned)
         eligible=sum(r['name'] not in self.excluded for r in self.rows)
         self.plan_split.setEnabled(bool(self.path) and eligible>=2 and not locked)
         for control in (self.assign_split,self.source_assignment):control.setEnabled(planned and not locked)
@@ -662,7 +668,7 @@ class CurationDialog(QDialog):
         self.cancel_split.setVisible(planned);self.choose_button.setEnabled(bool(self.rows));self.count.setEnabled(bool(self.rows))
         self.restore_button.setEnabled(bool(self.excluded));self.export_button.setEnabled(bool(self.path) and eligible>0)
         self.export_button.setText('Train / Val 저장' if planned else '데이터 저장')
-        self.export_button.setToolTip('미리보기대로 Train / Validation을 새 폴더에 각각 저장합니다.' if planned else '현재 포함된 에피소드를 새 데이터셋에 저장합니다. 기록된 분할은 유지합니다.')
+        self.export_button.setToolTip('같은 Source 묶음의 다음 split_N 아래 Train / Validation을 저장합니다.' if planned else '현재 포함된 에피소드를 새 데이터셋에 저장합니다. 기록된 분할은 유지합니다.')
         if planned:
             counts={s:sum(r.get('split')==s and r['name'] not in self.excluded for r in self.rows) for s in ('train','val')}
             self.split_status.setText(f"저장 전 · Train {counts['train']}개 / Val {counts['val']}개")
@@ -679,6 +685,7 @@ class CurationDialog(QDialog):
         self.update_output_preview()
 
     def curation_destination(self):
+        if self.split_plan is not None and self.path:return self.registry.next_split(self.path)
         from .artifacts import validate_storage_name
         name=validate_storage_name(self.storage_name.text())
         split=self.split_plan is not None
@@ -813,26 +820,23 @@ class CurationDialog(QDialog):
 
     def save_source_split(self):
         if not self.split_plan:return self.error('Source 분할을 먼저 확인하세요.')
-        try:proposed=self.curation_destination();proposed.parent.mkdir(parents=True,exist_ok=True)
-        except ValueError as exc:return self.error(exc)
-        dest,_=QFileDialog.getSaveFileName(self,'새 Train/Validation 출력 폴더',str(proposed),'폴더 이름 (*)')
-        if not dest:return
-        from .artifacts import validate_storage_name
-        try:
-            name=validate_storage_name(Path(dest).name)
-            for split in ('train','val'):validate_storage_name(name+'_'+split)
-        except ValueError as exc:return self.error(exc)
-        if Path(dest).exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
         from .episodes import export_source_splits
         source,kind=self.path,self.kind;names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         assignments={n:self.split_plan['assignments'][n] for n in names}
         ratio,seed=self.train_ratio.value()/100,self.split_seed.value()
         def work():
-            result=export_source_splits(source,dest,ratio,seed,assignments,names)
-            parent=next((a for a in self.registry.all() if a['path']==source),None)
-            for split,output in result['outputs'].items():self.registry.register(kind,output,parents=[parent['id']] if parent else [],display_name=name+'_'+split)
+            parent=self.registry.ensure_source_origin(source,kind)
+            dest=self.registry.next_split(source)
+            result=export_source_splits(parent['path'],dest,ratio,seed,assignments,names,nested=True)
+            for split,output in result['outputs'].items():
+                self.registry.register(kind,output,parents=[parent['id']],display_name=split)
+            result['folder']=str(dest)
             return result
-        self.run_job(work,lambda result:self.info.setText(f'Train {result["counts"]["train"]} / Validation {result["counts"]["val"]} 저장·등록 완료 · 원본 불변 · {dest}'))
+        def done(result):
+            self.saved_collection=result['folder']
+            self.info.setText(f'Train {result["counts"]["train"]} / Validation {result["counts"]["val"]} 저장·등록 완료 · {self.saved_collection}')
+            self.update_output_preview()
+        self.run_job(work,done)
 
     def save(self):
         if not self.path:return

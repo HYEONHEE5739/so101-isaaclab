@@ -3,7 +3,7 @@ import json
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                              QLineEdit, QSpinBox, QComboBox, QToolButton, QPushButton, QTableWidget,
-                             QTableWidgetItem, QHeaderView, QFileDialog, QSizePolicy)
+                             QTableWidgetItem, QHeaderView, QFileDialog)
 from .option_help import FIELDS, KEYS
 
 LABELS = {'val_every':'검증 간격 (step)','early_stopping':'Early Stopping','patience':'조기 종료 Patience','legacy_group_split':'Legacy 단일 데이터 Group 분리','ik_failure_policy': 'IK Failure Policy', 'ik_solver': 'IK Solver', 'steps': '총 학습 step', 'batch_size': 'Batch 크기', 'num_workers': '데이터 로더 workers',
@@ -46,19 +46,13 @@ class SettingsForm(QWidget):
         keys = [k for k in KEYS[self.stage] if k != 'architecture']
         if getattr(self, 'allowed_keys', None) is not None:
             keys = [k for k in keys if k in self.allowed_keys]
-        order = list(getattr(self, 'basic_order', ()))
-        if order:
-            keys.sort(key=lambda key: order.index(key) if key in order else len(order))
         self.extra = {k: v for k, v in values.items() if k not in keys}
         advanced_layout=None
         if getattr(self,'minivla',False):
             from ..learning.minivla.config import MODEL_ROOT
             note=QLabel('기본 모델 설정: '+str(MODEL_ROOT/'configs/default.json')+'\n체크한 학습 값 > 선택한 JSON > 기본 JSON. 체크를 해제하면 JSON 값을 사용합니다.\nValidation: episode당 최대 8개 고정 시점 평균. 실제 loss만 기록합니다.');note.setWordWrap(True);self.layout_.addWidget(note)
-        basic_keys = getattr(self, 'basic_keys', None)
-        if basic_keys is not None or getattr(self, 'minivla', False):
-            toggle=QToolButton();toggle.setText('고급 실행 설정');toggle.setCheckable(True)
+            toggle=QToolButton();toggle.setText('고급 모델 설정 / Legacy 호환');toggle.setCheckable(True)
             advanced=QWidget();advanced_layout=QVBoxLayout(advanced);advanced.hide();toggle.toggled.connect(advanced.setVisible)
-            self.advanced_toggle, self.advanced_panel = toggle, advanced
             self.layout_.addWidget(toggle);self.layout_.addWidget(advanced)
         for key in keys:
             kind, default, description = FIELDS[key]
@@ -132,18 +126,8 @@ class SettingsForm(QWidget):
             enabled.toggled.connect(editor.setEnabled)
             enabled.toggled.connect(self.textChanged)
             box.addWidget(editor); box.addWidget(help_label)
-            is_advanced = key not in basic_keys if basic_keys is not None else key in ('model_config','patience','legacy_group_split')
-            (advanced_layout if advanced_layout is not None and is_advanced else self.layout_).addWidget(card)
+            (advanced_layout if advanced_layout is not None and key in ('model_config','patience','legacy_group_split') else self.layout_).addWidget(card)
             self.editors[key] = enabled, editor, kind
-        if advanced_layout is not None:
-            self.layout_.removeWidget(self.advanced_toggle)
-            self.layout_.removeWidget(self.advanced_panel)
-            self.layout_.addWidget(self.advanced_toggle)
-            self.layout_.addWidget(self.advanced_panel)
-        for label in self.findChildren(QLabel):
-            if label.wordWrap():
-                label.setMinimumWidth(0)
-                label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.textChanged.emit()
 
     def toPlainText(self):

@@ -10,6 +10,13 @@ from soarm101_lab.real2sim.storage import Bus
 from soarm101_lab.real2sim.runtime import Runtime
 
 
+@pytest.fixture(autouse=True)
+def isolated_workflow_registry(tmp_path,monkeypatch):
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'workflow_registry'))
+
+
 @pytest.mark.parametrize('state', ['CONNECTING', 'BUILDING_ENVIRONMENT'])
 def test_busy_ui_requires_live_owner(tmp_path, state):
     from PyQt6.QtWidgets import QApplication
@@ -238,7 +245,7 @@ def test_capture_start_is_explicit_and_always_real_only(tmp_path,monkeypatch):
         w.selected(ROOT / 'tests/real2sim/fixtures/scene_profile.json')
         # The sim selection and even an invalid Pipeline workspace must not affect Capture.
         w.live_backend.setCurrentIndex(w.live_backend.findData('isaac'))
-        w.workflow_panel.workspace.setText('/not/a/published/workspace')
+        w.workflow_panel.workspace_path = '/not/a/published/workspace'
         w.start_capture()
         assert connect.call_args.kwargs['backend']=='real'
         payload=connect.call_args.args[0]

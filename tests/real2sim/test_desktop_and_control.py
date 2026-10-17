@@ -9,6 +9,13 @@ from soarm101_lab.real2sim.core import JOINTS
 from soarm101_lab.real2sim.runtime import Runtime
 
 
+@pytest.fixture(autouse=True)
+def isolated_workflow_registry(tmp_path,monkeypatch):
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'workflow_registry'))
+
+
 def test_qt_startup_layout_and_heartbeat(tmp_path):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.real2sim.ui import Window, ROOT
@@ -288,11 +295,10 @@ def test_workspace_connection_does_not_replace_capture_profile(tmp_path, monkeyp
     camera_profile = ROOT/'tests/real2sim/fixtures/partial_profile.json'
     window.selected(camera_profile)
     scene = tmp_path/'builder_workspace'
-    window.workflow_panel.workspace.setText(str(scene))
+    window.workflow_panel.workspace_path = str(scene)
     window.live_workspace.setChecked(True)
     monkeypatch.setattr(package, 'load', lambda p: {'root':scene})
-    # This fixture checks profile routing only; scene/task compatibility has its own fixture.
-    monkeypatch.setattr(window.workflow_panel, 'scene_tasks', lambda: [])
+    monkeypatch.setattr(window.workflow_panel.task_selector,'selection',lambda **kwargs:[])
     window.runtime_launcher.connect = Mock(return_value='request')
     window.connect_hw(backend='isaac')
     payload = window.runtime_launcher.connect.call_args.args[0]

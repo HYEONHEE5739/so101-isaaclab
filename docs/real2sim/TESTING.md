@@ -2,31 +2,6 @@
 
 테스트의 목표는 "실행된다"를 넘어서 **변경이 맞다는 증거를 만드는 것**이다.
 
-## Workflow 화면 분리 (2026-10-17)
-
-[화면 사용법과 구조](WORKFLOW_UI.md). 아래 suite는 프로세스를 분리한다. 새 학습/GPU 렌더/업로드/모터 실행은 없다.
-UI 검사는 Mock Worker·합성 Registry, Curation/저장 검사는 임시 파일, 계약 검사는 CPU fixture를 사용한다.
-
-```bash
-workflow_python=/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python
-workflow_gui_paths=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages
-workflow_usd_root=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311
-
-QT_QPA_PLATFORM=offscreen PYTHONPATH="$workflow_gui_paths" "$workflow_python" -m pytest tests/real2sim/test_workflow_screens.py tests/real2sim/test_workflow_view.py tests/real2sim/test_settings_form.py tests/real2sim/test_mujoco_workflow_ui.py tests/real2sim/test_artifact_storage.py tests/real2sim/test_curation.py -q -k 'not one_camera'
-
-QT_QPA_PLATFORM=offscreen PYTHONPATH="$workflow_gui_paths:$workflow_usd_root" LD_LIBRARY_PATH="$workflow_usd_root/bin" "$workflow_python" -m pytest tests/real2sim/test_presentation.py tests/real2sim/test_workflow.py tests/real2sim/test_training_resume.py tests/real2sim/test_desktop_and_control.py tests/real2sim/test_mujoco_workflow_ui.py::test_one_camera_scene_configures_pipeline_and_real_sim tests/real2sim/test_precision_ui.py tests/real2sim/test_task_definitions.py -q
-
-QT_QPA_PLATFORM=offscreen PYTHONPATH="$workflow_gui_paths" "$workflow_python" -m pytest tests/real2sim/test_common_mimic.py tests/real2sim/test_source_partitions.py tests/real2sim/test_minivla_integration.py -q
-
-PYTHONPATH=source/soarm101_lab "$workflow_python" -m pytest tests/minivla/test_partition_training.py tests/minivla/test_data_and_runtime.py tests/minivla/test_lerobot_direct.py -q
-```
-
-결과는 각각149PASS/1deselected(다음 USD suite에서 실행),75PASS,83PASS,38PASS다.
-`test_workflow_screens`는 5개 그룹/전용 컨트롤/기본·고급 단일 소유권, ID 유지, snapshot/중복 실행/실행 중 잠금,
-stale readiness/log 차단, 백그라운드 Val 호환성, 양 엔진 IK 전달, 명시적 Real/Upload 확인과 정확한 Checkpoint 이동을 검사한다.
-기존 학습 fixture는 Batch8/Accumulation1 및 옛 Resume/Source Partition/Normalization 계약을 검사한다.
-실제 UI 읽기 전용 캡처와 초기 실패 로그는 `outputs/workflow_validation/ui_architecture/`에 보존한다.
-
 ## 공통 경로 정리·성능 검사 (2026-10-16)
 
 `test_common_mimic.py`는 공식 본문 parity, Pool 재사용/선택 subset, RNG 격리, 성공 예약/느린 Writer 중 상태 진행,

@@ -1,47 +1,104 @@
 # SO-101 Real2Sim Data Flow
 
-## 사용자 이름·저장 경로 — 2026-10-17
+## 단계별 저장 경로·입력 선택 — 2026-10-17
 
-새 Workflow 실행은 **저장 이름**을 실제 경로와 Registry `display_name`에 사용한다.
-단계별 이름을 자동 추천하며 수정할 수 있다. 한글/영문/숫자/밑줄/하이픈을 지원한다.
-이름은 100자·UTF-8 200바이트 이내이며 경로 구분자·점·공백·장치 예약 이름은 거절한다.
-`artifacts.output_location`이 UI 미리보기와 Operations 계획에 같은 파일/폴더 계약을 제공한다.
+Workflow UI는 저장 이름·추천·예상 위치를 표시하지 않는다. 기존 `artifacts.output_location`이
+실행 때 단계/Task/시각/고유 suffix로 이름을 자동 생성하고 Registry `display_name`에 기록한다.
+CLI의 명시적 저장 이름은 계속 지원한다. 한글/영문/숫자/밑줄/하이픈, 100자·UTF-8 200바이트 이내이며
+경로 구분자·점·공백·장치 예약 이름은 거절한다. Worker 내부의 데이터 형식과 파일 구조를 유지하며,
+기본 결과 경로에 Source 묶음·분할·Train/Val을 연결한다.
 
 ```text
 outputs/workflow/
-  sources/<이름>/              # Isaac: source.hdf5 / MuJoCo: dataset.hdf5 등
-  annotations/<이름>/         # 공통 dataset.hdf5 + 상대 MP4
+  sources/<Source 묶음>/
+    origin/                  # Isaac: source.hdf5 / MuJoCo: dataset.hdf5 또는 과거 dataset/
+    split_1/
+      train/dataset.hdf5     # 과거 Canonical 입력이면 train/ 자체가 Dataset
+      val/dataset.hdf5
+      source_split.json
+    split_2/                 # 같은 origin, 다른 비율/Seed/선택
+      train/
+      val/
+      source_split.json
+  annotations/<Source 묶음>/<분할>/<train 또는 val>/<실행 이름>/
+  datagen/<Source 묶음>/<분할>/<train 또는 val>/<실행 이름>/
+  datasets/<Source 묶음>/<분할>/<train 또는 val>/<실행 이름>/
+  models/<Source 묶음>/<분할>/<실행 이름>/  # 모델은 Train/Val 양쪽을 사용
+  evaluations/<Source 묶음>/<분할>/...    # 평가/업로드 기록, 필요하면 role도 상속
   curation/filtered/<이름>.hdf5  # 과거 canonical이면 <이름>/ 폴더
-  curation/splits/<이름>/     # train.hdf5, val.hdf5, source_split.json
-  datagen/<이름>/             # dataset.hdf5 + 영상·생성 report
-  datasets/<이름>/            # LeRobot meta/Parquet/MP4
-  models/<이름>/              # 기존 trainer의 policy/ 또는 checkpoints/ 구조
-  evaluations/<이름>/         # 엔진별 report/기록; Replay·Hub receipt도 이곳
   runs/<고유 Run ID>/         # request.json, state.json, process.log, presentation/
   artifacts/<고유 ID>.json    # 데이터가 아닌 Registry 인덱스
 ```
 
-필요한 폴더는 새 저장 시 생성한다. Worker에는 실제 결과 경로를 전달하고 request/state.plan.output에
+묶음 정보 없는 기존 입력은 이전 단계별 `<자동 이름>` 기본 경로도 지원한다. 분할하지 않은 Source는
+`<분할>` 대신 `origin`으로 연결하고 Train/Val 경로를 만들지 않는다. 필요한 폴더는 새 저장 시 생성한다.
+Worker에는 실제 결과 경로를 전달하고 request/state.plan.output에
 동일하게 기록한다. 직접 지정한 `output`은 유지한다. 저장 이름도 지정했다면 경로의 마지막 이름(파일은
 stem 또는 포함 폴더)과 일치해야 한다. 파일형 Source/Evaluation은 HDF5/JSON 확장자를 검사한다.
 기존 결과가 있으면 거절하고, 동시 실행은 저장 경계 옆의 배타적 예약 파일로 중복 사용을 차단한다.
-중단 결과도 삭제/덮어쓰지 않는다. DataGen/Source 이어 수집·MiniVLA Resume은 기존 입력과 **새 저장 이름**을
-선택한다. ACT/SmolVLA는 기존 Resume 출력 계약을 유지하며, 기본 Resume 위치는 미리보기에 표시한다.
+중단 결과도 삭제/덮어쓰지 않는다. DataGen/Source 이어 수집·MiniVLA Resume은 기존 입력을 선택하고
+새 자동 이름에 저장한다. ACT/SmolVLA는 기존 Resume 출력 계약을 유지한다.
 CLI에서 ACT/SmolVLA 재개의 새 이름을 지정하려면 일치하는 새 `output`도 명시해야 한다.
 강제 kill로 예약 파일이 남았다면 자동 삭제하지 않고 해당 파일에 기록된 Run의 종료 여부를 먼저 확인한다.
 
 새 Annotation은 지정한 위치에 등록하고 Source를 부모로 연결하여 원본을 보존한다.
-기존 명시적 `Registry.promote_annotation`의 검증·rollback API는 유지한다. Curation은 같은 저장 버튼으로
-선별 결과와 분할 결과를 각각 filtered/splits에 제안한다. 이름 입력 후 저장창에서 최종 경로를 고를 수 있다.
-Split의 Train/Val은 `<이름>_train`, `<이름>_val`로 따로 등록하며 기존 Hash/Inventory/Assignments를 사용한다.
+기존 명시적 `Registry.promote_annotation`의 검증·rollback API는 유지한다. Curation의 일반 선별 저장은
+기존 filtered 제안/저장창을 유지한다. 분할 미리보기 후 저장은 해당 Source 묶음의 다음 `split_N`을 자동 생성한다.
+분할 저장에는 별도 이름/위치를 묻지 않는다. 저장 후 현재 Replay/Annotation/변환 화면의 입력만 새 분할로
+갱신할 수 있으며 다른 단계의 선택은 바꾸지 않는다. Source에서 저장해도 Annotation을 자동 변경하지 않는다.
+Train/Val은 따로 등록하며 기존 Hash/Inventory/Assignments·중복 그룹 분리 금지·분할 잠금을 그대로 사용한다.
+이미 나눈 Train/Val에서 재분할하지 않는다. 새 분할은 origin에서 만든다. Source의 최신 기록이 분할 결과라면
+Curation의 기본 열기는 같은 묶음 origin을 사용하고, 명시적으로 선택한 Train/Val 검토·선별은 기존대로 잠금을 유지한다.
+이전 Source는 첫 분할 저장 때 관리 경로의 origin으로 복사한다. 기존 파일은 이동/수정하지 않는다.
+HDF5 복사본에는 기존 Source 계보/그룹을 명시해 경로 변경으로 그룹이 달라지는 것을 막으며 숫자/영상은 보존한다.
+기존 `export_source_splits` 명시적 출력 API는 호환되는 평면 형식도 지원하고 UI는 `nested=True`를 사용한다.
 
-입력 선택기는 저장 이름·종류·Task로 좁히고 날짜/episode/partition/backend/짧은 ID를 표시한다.
-선택 내용의 실제 경로·부모 계보를 확인하고 **입력 폴더 열기**로 열 수 있다. 현재 단계에 호환되는 유형만
-선택할 수 있다. 등록 모델은 Resume과 Loss Graph 목록에서도 선택한다. 그래프는 현재 실행/선택 정책/
+입력 선택기는 날짜/episode/partition/backend/짧은 ID를 표시하며 현재 단계에 호환되는 유형만 선택할 수 있다.
+검색·종류·Task 필터와 경로/부모 계보 설명 영역은 제거했다. 실제 선택 경로는 입력 dropdown tooltip에 남는다.
+**입력 폴더 열기**는 현재 입력 위치에서 파일/데이터를 고르는 선택창이다. 출력 위치를 열지 않는다.
+옆의 **데이터 묶음 선택**에서 먼저 `split_2` 같은 상위 폴더를 고르면 dropdown에는 그 아래의 호환 입력만 표시한다.
+Annotation이면 Train/Val 두 항목, DataGen이면 해당 Annotation 묶음, 학습이면 해당 변환 Dataset 묶음이다.
+폴더 범위는 `input_folders`, 선택 Artifact ID와 Train의 Val ID는 `input_selections`에 단계별로 기억한다.
+단계 전환 때 공용 combo의 이전 값을 재사용하지 않으며 UI 재시작 후에도 각 단계의 선택을 복원한다.
+다른 단계의 Scene 변경으로 현재 단계의 목록을 바꾸지 않고 해당 단계의 선택된 입력/폴더를 기준으로 읽는다.
+빈 폴더는 빈 목록으로 남기며 다른 묶음으로 자동 대체하지 않는다.
+묶음 선택창의 기본 저장소는 Source=Scene, Replay/Annotation=`sources`, DataGen=`annotations`, 변환=`datagen`,
+학습/Dataset 업로드=`datasets`, 평가/Policy 업로드=`models`다. 이전 단계의 입력 종류로 기본 위치를 바꾸지 않는다.
+버튼에는 `annotations / split_1`처럼 저장소와 마지막 폴더를 함께 표시하고 tooltip에 전체 경로를 둔다.
+선택 폴더의 미등록 HDF5/Canonical/LeRobot/완료 정책은 기존 Registry 검사를 거쳐 등록한다.
+정책 묶음 탐색은 기존 provenance가 있는 모델을 읽기만 한다. 별도 checkpoint metadata 연결은 기존 개별 입력 가져오기를 사용한다.
+Source는 Scene/Builder 폴더, Replay/Annotation/DataGen/Convert는 HDF5 또는 기존 Canonical의 manifest.json,
+Train/업로드는 Dataset 또는 Policy 폴더를 선택한다. 선택/완료 후 목록을 자동 갱신하며 별도 새로고침 버튼은 없다.
+등록되지 않은 Episode는 기록된 생성/주석 증거로 유형을 판별하고 기존 Registry 검사를 거친다.
+MiniVLA에서 Val Dataset을 등록하면 기존 Train을 유지하고 Validation 선택기에 연결한다.
+묶음 선택 시 Validation 후보도 그 폴더 안에서 검증한다. MiniVLA의 Train/Val 별도 선택 규칙은 유지한다.
+Workspace/Python 수동 editor도 없다. 입력의 Scene identity에 맞는 경로를 찾고 기존 backend별 Python 설정/기본값을
+worker에 전달한다. Real/Sim도 같은 내부 Scene 상태를 공유하며, 선택만으로 worker/장치를 시작하지 않는다.
+`Task provenance` 설명 행과 문구 생성/갱신 코드는 삭제했다. Task 상속·객체/Task 충돌 검사와 데이터 파일의
+provenance는 실행·분할 누수 검증에 필요하므로 유지한다. Scene/Task 준비 오류는 기존 `NOT_READY` 상태에 표시한다.
+Scene objects/Active Objects와 Task preset/Pick object/Target cup/Language instruction 편집 영역은
+Source 단계에만 표시한다. 다른 단계에서는 영역 전체를 숨기며 입력 데이터의 Task/Scene 상속과 기존 평가 처리는 유지한다.
+등록 모델은 Resume과 모델 학습의 Loss Graph 목록에서도 선택한다. 그래프는 현재 실행/선택 정책/
 Train 입력의 등록 모델에서 metrics.jsonl을 자동 탐색하고 수동 JSONL 선택도 유지한다.
 Checkpoint import는 모델의 상위 폴더 또는 Registry의 Run request에서 기록된 출력 관계를 검증한다.
 
-기존 runs 내부 결과는 이동/수정하지 않는다. 이름 없는 Registry 항목은 읽을 때 경로 기반 이름을 보여주며
+기존 실제 저장 자료도 2026-10-17에 이 구조로 이동했다. Source20 묶음은
+`sources/20261016_094817_source_cube_red_to_cup_a_656da738/origin/dataset`이고, 기존 Train14/Val6은
+같은 묶음의 `split_1/train`, `split_1/val`이다. 그 Annotation·DataGen·LeRobot·MiniVLA도 각 단계 폴더에서
+같은 Source/분할을 공유한다. Registry의 ID/부모/내용 SHA는 유지하고 실제 path/collection만 갱신했다.
+기존 파일에 기록된 절대 경로와 Resume identity를 보존하기 위해 예전 위치에는 새 경로를 가리키는 symlink를 남겼다.
+원래 runs의 request/state/process.log/tasks/presentation은 실행 이력으로 유지한다. 실패 실행의 남은 자료는
+각 단계 `.incomplete/<Run ID>`에 보관하며 정상 입력으로 등록하지 않는다. 모델/숫자/영상/manifest는 재작성하지 않았다.
+묶음 선택창은 개별 입력 파일 위치보다 상위인 Source/분할 또는 해당 단계 입력 저장소에서 시작한다.
+MiniVLA로 모델을 바꾸면 Train/Val 목록도 다시 필터링하여 Val을 Train 입력으로 남기지 않는다.
+
+2026-10-18에 최상위 `soarm101_lab/datasets`의 호환 링크도 제거했다. 이 경로가 없는 상태에서 Source 원본/분할,
+Curation 저장, Train/Val 로딩과 MiniVLA Resume 계약을 확인했다. 기존 `annotated_from` 등 옛 경로 문자열은
+과거 출처 기록이며 해당 디렉터리를 열어야 하는 실행 입력이 아니다. 기록/내용 SHA를 바꾸려고 재작성하지 않는다.
+새 Source는 계속 `outputs/workflow/sources/<묶음>/origin`, Curation 분할은 같은 묶음 `split_N/train·val`에 저장한다.
+검증 결과는 `outputs/workflow_validation/legacy_datasets_removal/REPORT.md`다.
+
+앞의 명시적인 정리 작업 외에는 기존 결과를 자동으로 이동/수정하지 않는다. 이름 없는 Registry 항목은 읽을 때 경로 기반 이름을 보여주며
 ID/Path/SHA256/Parent는 그대로 사용한다. `workflow.py run|ready --storage-name 이름`,
 `register --display-name 이름`도 같은 경계를 사용한다. 명시적 `worker --output` 경로는 그대로 유지한다.
 

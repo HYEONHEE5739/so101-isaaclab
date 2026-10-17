@@ -6,6 +6,7 @@ import time
 import uuid
 import os
 import shutil
+import re
 from datetime import datetime
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import ROOT, load, metadata
@@ -61,6 +62,18 @@ def artifact_description(artifact):
     return ' · '.join(f for f in fields if f)
 
 
+def collection_at(path, root):
+    """Storage grouping only; Source Partition remains the authority for train/val."""
+    try:parts=Path(path).resolve().relative_to(Path(root).resolve()).parts
+    except ValueError:return None
+    if len(parts)<3 or parts[0] not in set(OUTPUT_FOLDERS.values()):return None
+    bucket,family,variant=parts[:3]
+    if variant!='origin' and not re.fullmatch(r'split_[1-9][0-9]*',variant):return None
+    validate_storage_name(family)
+    partition=parts[3] if len(parts)>3 and parts[3] in ('train','val') else None
+    return {'source':family,'variant':variant,**({'partition':partition} if partition else {})}
+
+
 def output_location(stage, artifact, options, root):
     """Return the existing worker's file/directory contract and its reserved boundary."""
     backend=options.get('backend','isaac')
@@ -71,7 +84,10 @@ def output_location(stage, artifact, options, root):
         output=Path(options['output']).expanduser().resolve()
         if file_output and output.suffix.lower() not in (('.hdf5','.h5') if stage=='source' else ('.json',)):
             raise ValueError('이 단계의 출력 경로에는 '+('HDF5 파일 확장자가' if stage=='source' else 'JSON 파일 확장자가')+' 필요합니다.')
-        if supplied and supplied not in (output.stem if file_output else output.name,output.parent.name if file_output else output.name):
+        names={output.stem if file_output else output.name,output.parent.name if file_output else output.name}
+        origin=output.parent if file_output else output
+        if stage=='source' and origin.name=='origin':names.add(origin.parent.name)
+        if supplied and supplied not in names:
             raise ValueError('저장 이름과 지정 출력 경로의 이름이 다릅니다. 이름을 맞추거나 출력 경로 설정을 해제하세요.')
         return output,output
     if stage=='train' and options.get('resume_checkpoint') and options.get('architecture','smolvla')!='minivla':
@@ -81,8 +97,16 @@ def output_location(stage, artifact, options, root):
             raise ValueError('ACT/SmolVLA Resume은 기존 출력 위치를 사용합니다. 새 이름으로 저장하려면 같은 이름의 output 경로도 명시하세요.')
         return output,output
     leaf=supplied or suggested_name(stage,artifact)
-    folder=Path(root).resolve()/OUTPUT_FOLDERS[stage]/leaf
-    output=folder/('source.hdf5' if stage=='source' else 'result.json') if file_output else folder
+    folder=Path(root).resolve()/OUTPUT_FOLDERS[stage]
+    collection=artifact.get('collection') or collection_at(artifact.get('path',root),root)
+    if stage!='source' and collection:
+        folder=folder/validate_storage_name(collection['source'])/validate_storage_name(collection['variant'])
+        if stage!='train' and collection.get('partition'):
+            if collection['partition'] not in ('train','val'):raise ValueError('Unknown storage partition')
+            folder=folder/collection['partition']
+    folder=folder/leaf
+    target=folder/'origin' if stage=='source' else folder
+    output=target/('source.hdf5' if stage=='source' else 'result.json') if file_output else target
     return output,folder
 
 
@@ -199,6 +223,27 @@ def inspect_artifact(kind, path):
     return result
 
 
+def episode_input_kind(path):
+    """Read recorded generation/annotation evidence for the input file picker."""
+    p = Path(path)
+    if p.is_dir():
+        args = json.loads((p / 'project_provenance.json').read_text())
+        episodes = json.loads((p / 'manifest.json').read_text())['episodes']
+        generated = any((e.get('source_lineage') or {}).get('kind') == 'mimic_segments' for e in episodes)
+        annotated = bool(episodes) and all((p / e['path'] / 'annotation.json').is_file() for e in episodes)
+    else:
+        import h5py
+        with h5py.File(p, 'r') as h:
+            data = h['data']
+            args = json.loads(data.attrs.get('env_args', '{}'))
+            generated = bool(data.attrs.get('generation_provenance'))
+            episodes = [g for name, g in data.items() if name.startswith('demo_')]
+            annotated = bool(episodes) and all('obs/datagen_info/subtask_term_signals/grasp' in g for g in episodes)
+    if generated or args.get('source_dataset') or args.get('generation_method'):
+        return 'datagen'
+    return 'annotated' if annotated else 'source'
+
+
 def inspect_canonical(kind, path):
     """Inspect the existing canonical format without importing ML or simulation."""
     import numpy as np
@@ -259,6 +304,18 @@ class Registry:
         self.root = Path(root or ROOT / 'outputs/workflow')
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def collection_directory(self, stage, artifact=None):
+        """Start the group picker above individual runs, in the stage's input store."""
+        artifact=artifact or {}
+        inputs={'replay':'sources','annotate':'sources','datagen':'annotations','convert':'datagen',
+                'train':'datasets','sim_eval':'models','real_eval':'models','hf_dataset':'datasets','hf_policy':'models'}
+        if stage=='source':return ROOT/DEFAULTS['workspace']
+        directory=self.root/inputs[stage]
+        collection=artifact.get('collection') or collection_at(artifact.get('path',self.root),self.root)
+        if collection and Path(artifact.get('path',self.root)).resolve().is_relative_to(directory.resolve()):
+            directory=directory/validate_storage_name(collection['source'])/validate_storage_name(collection['variant'])
+        return directory
+
     def register(self, kind, path, parents=(), extra=None, display_name=None):
         if display_name is not None:validate_storage_name(display_name)
         details = inspect_artifact(kind, path)
@@ -281,6 +338,8 @@ class Registry:
                     'created_at': time.time(), 'status': 'SUCCEEDED', 'parents': list(parents),
                     'sha256': content_hash, 'execution': extra or {}}
         artifact['display_name']=display_name or artifact_name(artifact)
+        collection=collection_at(resolved,self.root)
+        if collection:artifact['collection']=collection
         if workspaces:
             artifact['workspace'] = workspaces[0]
         for key in ('coordinates', 'representation', 'tasks', 'backend'):
@@ -335,6 +394,105 @@ class Registry:
             if key in current and current[key] != artifact.get(key):
                 raise ValueError('Artifact metadata changed since registration')
         return current
+
+    def source_collection(self, source):
+        source=Path(source).resolve()
+        collection=collection_at(source,self.root)
+        if collection and collection['variant']=='origin' and source.is_relative_to((self.root/'sources').resolve()):
+            return self.root/'sources'/collection['source']
+        label=source.parent.name if source.name in ('dataset.hdf5','source.hdf5','dataset') else source.stem
+        label=''.join(c if c.isalnum() or c in '_-' else '_' for c in label)[:40] or 'source'
+        return self.root/'sources'/(label+'_'+hashlib.sha256(str(source).encode()).hexdigest()[:8])
+
+    def next_split(self, source):
+        family=self.source_collection(source)
+        used=[int(p.name[6:]) for p in family.glob('split_*') if re.fullmatch(r'split_[1-9][0-9]*',p.name)]
+        return family/f'split_{max(used,default=0)+1}'
+
+    def discover_collection(self, folder, allowed):
+        """Explicit folder import; inspect dataset roots and prune their internal files."""
+        folder=Path(folder).expanduser().resolve()
+        if not folder.is_dir():raise ValueError('데이터 묶음 폴더를 선택하세요.')
+        known=[a for a in self.all() if a.get('status')=='SUCCEEDED' and Path(a['path']).exists()
+               and a['type'] in allowed and Path(a['path']).is_relative_to(folder)]
+        paths={a['path'] for a in known};found=list(known)
+        def add(kind,path):
+            path=Path(path).resolve()
+            if kind in allowed and str(path) not in paths and path.is_relative_to(folder):
+                found.append(self.register(kind,path));paths.add(str(path))
+        for base,dirs,files in os.walk(folder):
+            base=Path(base)
+            dirs[:]=[d for d in dirs if not d.startswith('.') and not d.endswith('.videos') and d not in ('__pycache__','assets','scene')]
+            if str(base) in paths:dirs[:]=[];continue
+            if 'project_provenance.json' in files:
+                kind='policy' if any((base/n).is_file() for n in ('best.pt','last.pt')) else 'dataset' if 'statistics.json' in files else episode_input_kind(base)
+                add(kind,base);dirs[:]=[];continue
+            if (base/'meta/info.json').is_file():
+                add('dataset',base);dirs[:]=[];continue
+            if 'model.safetensors' in files and 'config.json' in files:
+                if (base/'workflow_provenance.json').is_file():add('policy',base)
+                dirs[:]=[];continue
+            last=base/'checkpoints/last/pretrained_model'
+            if last.is_dir() and 'policy' in allowed:
+                if (last/'workflow_provenance.json').is_file():add('policy',last)
+                dirs.remove('checkpoints')
+            if 'manifest.json' in files:
+                manifest=json.loads((base/'manifest.json').read_text())
+                if manifest.get('schema')=='so101.workspace/1':
+                    add('workspace',base);dirs[:]=[];continue
+            if set(allowed)&{'source','annotated','datagen'}:
+                for name in sorted(files):
+                    path=base/name
+                    if path.suffix.lower() in ('.hdf5','.h5') and str(path.resolve()) not in paths:
+                        add(episode_input_kind(path),path)
+        return found
+
+    def ensure_source_origin(self, source, kind='source'):
+        """Copy older inputs on explicit curation save; never move or rewrite them."""
+        source=Path(source).resolve();family=self.source_collection(source);origin=family/'origin'
+        parent=next((a for a in reversed(self.all()) if a['path']==str(source) and a['type']==kind
+                     and a.get('status')=='SUCCEEDED'),None)
+        parent=parent or self.register(kind,source)
+        self.verify(parent)
+        if source.is_relative_to(origin.resolve()):return parent
+        if origin.exists():
+            existing=next((a for a in reversed(self.all()) if Path(a['path']).is_relative_to(origin.resolve())
+                           and a.get('execution',{}).get('origin_source_id')==parent['id']),None)
+            if not existing:raise ValueError('Source origin already exists for a different input')
+            self.verify(existing);return existing
+        origin.mkdir(parents=True,exist_ok=False);destination=origin/source.name
+        try:
+            if source.is_dir():shutil.copytree(source,destination)
+            else:
+                import h5py
+                from ..utils.async_video_writer import external_video_path
+                from .episodes import source_catalog
+                records=source_catalog(source)[0]
+                shutil.copyfile(source,destination)
+                from ..so101_dataset_contract import sidecar
+                if sidecar(source).is_file():shutil.copyfile(sidecar(source),sidecar(destination))
+                rewrites={}
+                with h5py.File(source,'r') as dataset:
+                    for name,group in dataset['data'].items():
+                        specs=json.loads(group.attrs.get('external_videos','{}'));copied={}
+                        for camera,spec in specs.items():
+                            video=external_video_path(source,spec);relative=video.relative_to(source.parent)
+                            target=origin/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                            if not target.exists():shutil.copyfile(video,target)
+                            copied[camera]={**spec,'file':str(relative)}
+                        if copied!=specs:rewrites[name]=copied
+                if rewrites or records:
+                    with h5py.File(destination,'a') as dataset:
+                        for name,specs in rewrites.items():dataset['data'][name].attrs['external_videos']=json.dumps(specs)
+                        for name,record in records.items():
+                            group=dataset['data'][name]
+                            group.attrs['source_lineage']=json.dumps(record)
+                            groups=record['source'].get('groups',[])
+                            if groups and not group.attrs.get('source_group'):group.attrs['source_group']=groups[0]
+            return self.register(kind,destination,parents=[parent['id']],display_name='origin',
+                                 extra={'origin_source_id':parent['id']})
+        except BaseException:
+            shutil.rmtree(origin);raise
 
     def promote_annotation(self, source, completed, extra=None):
         """Validate first, replace source transactionally, retain lineage as superseded records."""
