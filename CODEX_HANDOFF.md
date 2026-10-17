@@ -1,5 +1,33 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — Workflow 작업별 화면과 Controller 분리 (2026-10-17)
+
+사용자 명세 기준52c4e06에서 UI만 리팩터링했다. 기존 미추적 MUJOCO_LOG.TXT와 docs/minivla/test-output.txt 보존.
+WorkflowPanel은217줄의 상위 통합/화면 lifecycle로 축소했고 ui_components에 Context/Controller/Navigation,
+ArtifactPicker, run별 Monitor/Preview/TrainingMetrics와 Source/Replay/Annotation/DataGen/Convert/Training/
+Sim/Real Eval/Publication/Curation/Explorer Screen을 분리했다. Navigation5그룹은 STAGES 실행 계약과 별개다.
+모델별 TrainingScreen 인스턴스가 옵션/입력/Resume을 각각 보존한다. Camera 없는 단계에는 CameraView를 생성하지 않는다.
+Replay/Annotation/DataGen은 editable TaskSelector 대신 입력에서 상속한 Task/Scene 요약을 쓴다.
+
+Controller는 plain snapshot/deep copy→기존 Operations.readiness/run을 호출한다. debounce/token/worker validation 유지,
+Val 후보 검사도 background에서 처리. 실행 중 Context/Navigation/설정 잠금, 중복 실행 차단, 시작 전 취소 지원.
+현재 화면의 run만 로그/결과와 연결한다. MiniVLA는 실제 metrics 그래프를 재사용하고 이전 기록이면 구분한다.
+변환/업로드에 그래프·카메라·기록 컨트롤 없음. Real Motion은 기본OFF+명시 확인, Upload도 대상/범위 확인 후 기존 worker.
+Window는 Context+scene_tasks()를 사용하고 기존 getter/browse/select/service/busy 호환 유지. Backend 동기화는 잠금을 존중한다.
+
+Explorer는 Registry 읽기 전용 필터/계보/정확한 ID 이동, MiniVLA checkpoint를 Policy 하위 파일로 표시한다.
+LeRobot 중간 checkpoint import는 기존 평가 화면의 폴더 등록을 사용한다. Curation은 기존 dialog를 임베딩했고,
+episode 선별/Source Group 분할/원본 보존은 변경하지 않았다. 숨긴 real_enabled/real_side/wrist/options_help 및
+section/stage combo, 이전 Navigation/show-hide와 미사용 stylesheet를 제거했다. option_help schema·CameraView/
+LogTail·TrainingLossPlot·TaskSelector와 기존 SettingsForm은 재사용한다.
+
+화면/Curation149PASS, USD/Window75PASS, 공통 계약83PASS, MiniVLA CPU38PASS. 실제 Registry63개 읽기 전용11화면
+캡처는 worker0, Registry/UI 설정 byte 보존 확인. 처음 USD 경로 누락·모드 비교의 임의 출력명·라우팅 fixture의
+Task metadata 의존·캡처 runner QWidget.scroll 동명 오류를 수정했고 실패 로그는 남겼다. 모델/IK/물리/Mimic/
+Dataset/Operations/Registry/CLI/학습 코드는 변경하지 않았다. 새 GPU 학습/DataGen/Hub 업로드/실물 검증/commit/push 없음.
+사용법·옵션/Stage 계약·제거 근거: docs/real2sim/WORKFLOW_UI.md. 보고서·캡처·명령/감사:
+outputs/workflow_validation/ui_architecture/. 최종 작업은 git diff로 검토할 상태다.
+
 ## 최신 — MiniVLA 신규 학습 Batch8·Accumulation1 (2026-10-17)
 
 사용자 요청대로 신규 MiniVLA는 Batch 기본8, Accumulation1이다. 이미 연결된 Batch QSpinBox·TRAIN_KEYS·

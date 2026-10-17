@@ -1,14 +1,14 @@
 """One shared semantic task selector for all workflow stages."""
 import copy
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QWidget, QFormLayout, QComboBox, QLineEdit, QListWidget, QListWidgetItem, QLabel
+from PyQt6.QtWidgets import QWidget, QFormLayout, QComboBox, QLineEdit, QListWidget, QListWidgetItem, QLabel, QToolButton
 from .tasks import catalog, object_ids, active_objects, workspace_key
 
 
 class TaskSelector(QWidget):
     changed = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, compact=False):
         super().__init__(parent)
         self.definitions = {}; self.loading = False; self.inherited = None; self.review = False
         layout = QFormLayout(self); layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -24,10 +24,18 @@ class TaskSelector(QWidget):
             self.scope.addItem(label, value)
         self.multiple = QListWidget(); self.multiple.setMaximumHeight(120)
         self.summary = QLabel(); self.summary.setWordWrap(True)
+        advanced_form = None
+        if compact:
+            toggle = QToolButton(); toggle.setText('Task 상세 · 객체 조합 / 문장 / Provenance'); toggle.setCheckable(True)
+            advanced = QWidget(); advanced_form = QFormLayout(advanced); advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+            advanced.hide(); toggle.toggled.connect(advanced.setVisible)
         for label, widget in [('Task preset', self.preset), ('Pick object', self.pick), ('Target cup', self.target),
                               ('Language instruction', self.instruction), ('평가 범위', self.scope),
                               ('평가 task 목록', self.multiple), ('Task provenance', self.summary)]:
-            layout.addRow(label, widget)
+            target_form = advanced_form if compact and widget in (self.pick, self.target, self.instruction, self.summary) else layout
+            target_form.addRow(label, widget)
+        if compact:
+            layout.addRow(toggle); layout.addRow(advanced)
         self.preset.currentIndexChanged.connect(self.choose_preset)
         self.pick.currentTextChanged.connect(self.choose_pair); self.target.currentTextChanged.connect(self.choose_pair)
         self.instruction.textEdited.connect(self.edit_instruction)

@@ -133,21 +133,25 @@ def test_ui_names_filters_preview_and_model_graph(tmp_path,storage_workspace,mon
     registry.register('workspace',storage_workspace)
     model=tmp_path/'models/named_policy/policy';model.mkdir(parents=True)
     (model/'metrics.jsonl').write_text('{"step":1,"loss":0.2}\n')
-    policy=dict(id='named-policy',type='policy',path=str(model),parents=[first['id']],status='SUCCEEDED',
+    policy=dict(id='named-policy',type='policy',path=str(model),parents=['dataset-id'],status='SUCCEEDED',
                 created_at=1,display_name='MiniVLA_실험01',format='so101.minivla-policy/1',workspace=first['workspace'])
     atomic(registry.root/'artifacts/named-policy.json',policy)
+    dataset=tmp_path/'lerobot';dataset.mkdir()
+    atomic(registry.root/'artifacts/dataset-id.json',dict(id='dataset-id',type='dataset',path=str(dataset),created_at=2,status='SUCCEEDED',format={},parents=[]))
     monkeypatch.setattr(ui,'Registry',lambda:registry)
     panel=ui.WorkflowPanel(lambda *args:None);panel.workspace.setText(str(storage_workspace))
-    panel.stage.setCurrentIndex(panel.stage.findData('replay'));panel.refresh()
-    assert panel.inputs.findData(first['id'])>=0 and panel.inputs.findData(second['id'])>=0
-    panel.artifact_search.setText('한글');assert panel.inputs.count()==1 and panel.inputs.currentData()==first['id']
-    assert first['path'] in panel.artifact_details.text() and '한글_Source' in panel.inputs.currentText()
-    panel.storage_name.setText('재생_결과');panel.update_ready()
-    assert panel.stage_options()['storage_name']=='재생_결과' and '재생_결과' in panel.output_preview.text()
-    panel.artifact_task.setText('no-such-task');assert panel.inputs.count()==0
-    panel.artifact_task.clear();panel.artifact_search.clear();panel.inputs.setCurrentIndex(panel.inputs.findData(first['id']))
-    assert panel.training_metrics_path()==model/'metrics.jsonl'
-    panel.show_training_loss();dialog=panel._loss_dialog
+    panel.select_stage('replay');panel.refresh()
+    assert panel.current_screen.inputs.findData(first['id'])>=0 and panel.current_screen.inputs.findData(second['id'])>=0
+    panel.current_screen.picker.select(first['id']);panel.current_screen.picker.search.setText('한글');assert panel.current_screen.inputs.count()==1 and panel.current_screen.inputs.currentData()==first['id']
+    assert first['path'] in panel.current_screen.picker.details.toPlainText() and '한글_Source' in panel.current_screen.inputs.currentText()
+    panel.current_screen.output.name.setText('재생_결과');panel.current_screen.update_ready()
+    assert panel.current_screen.stage_options()['storage_name']=='재생_결과' and '재생_결과' in panel.current_screen.output.preview.text()
+    panel.current_screen.picker.task.setText('no-such-task');assert panel.current_screen.inputs.count()==0
+    panel.current_screen.picker.task.clear();panel.current_screen.picker.search.clear();panel.current_screen.inputs.setCurrentIndex(panel.current_screen.inputs.findData(first['id']))
+    assert not hasattr(panel.current_screen,'metrics')
+    panel.select_stage('train:minivla',artifact_id='dataset-id')
+    assert panel.current_screen.metrics.training_metrics_path()==model/'metrics.jsonl'
+    panel.current_screen.metrics.show_training_loss();dialog=panel.current_screen.metrics._loss_dialog
     choices=dialog.findChild(QComboBox,'lossModelChoice');assert choices.findData(policy['id'])>=0
     choices.setCurrentIndex(choices.findData(policy['id']));choices.activated.emit(choices.currentIndex())
     chart=dialog.findChild(TrainingLossPlot,'trainingLossPlot');assert chart.path==model/'metrics.jsonl'

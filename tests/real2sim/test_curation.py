@@ -413,18 +413,18 @@ def test_workflow_entry_opens_latest_stage_and_labels_artifact(tmp_path,motion_w
         registry.register('datagen',selected)
     monkeypatch.setattr(ui,'Registry',lambda:registry)
     panel=ui.WorkflowPanel(lambda *args:None)
-    panel.task_selector.configure(motion_workspace,'source',active_object_ids=['cube_red'])
-    opened=[]
-    def inspect_dialog(dialog):
-        # Process the entry point's queued automatic load, including both frame decoders.
-        wait_qt(lambda:dialog.path is not None and dialog.reader is not None and dialog.job is None and dialog.frame_job is None)
-        assert dialog.path==str(selected) and dialog.workspace==panel.task_selector.workspace_identity
-        assert dialog.kind==latest_kind and dialog.dataset_label.text().startswith('Annotation' if latest_kind=='annotated' else 'DataGen')
-        assert set(dialog.trajectory.payload['rgb_frames'])=={'side','wrist'}
-        opened.append(dialog.path);dialog.close();return 0
-    monkeypatch.setattr(CurationDialog,'exec',inspect_dialog)
-    panel.open_curation();assert opened==[str(selected)]
+    panel.select_workspace(motion_workspace['root'])
+    panel.select_stage('curation')
+    screen=panel.current_screen
+    assert screen.picker.combo.currentData()==registry.latest({'source','annotated','datagen'})['id']
+    screen.open_selected()
+    dialog=screen.dialog
+    wait_qt(lambda:dialog.path is not None and dialog.reader is not None and dialog.job is None and dialog.frame_job is None)
+    assert dialog.path==str(selected) and dialog.workspace==panel.context.workspace_identity()
+    assert dialog.kind==latest_kind and dialog.dataset_label.text().startswith('Annotation' if latest_kind=='annotated' else 'DataGen')
+    assert set(dialog.trajectory.payload['rgb_frames'])=={'side','wrist'}
     panel.timer.stop();panel.close()
+
 
 
 @pytest.mark.parametrize('storage',['canonical','hdf5'])

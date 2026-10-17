@@ -25,20 +25,14 @@ QCheckBox::indicator:checked { background: #55d6b0; border-color: #55d6b0; }
 
 STYLE += """
 QWidget { font-family: 'Noto Sans CJK KR', 'Noto Sans', sans-serif; }
-QWidget#dashboardHeader { background: #222833; border-radius: 20px; }
-QWidget#navigationPanel { background: #202631; border-radius: 18px; }
-QWidget#workspaceCanvas { background: transparent; }
-QScrollArea#settingsPanel { background: #222833; border-radius: 18px; }
-QWidget#actionCard, QWidget#previewCard, QWidget#logCard { background: #222833; border-radius: 18px; }
 QLabel#dashboardTitle { font-size: 25px; font-weight: 600; background: transparent; padding: 3px 8px; }
-QLabel#eyebrow { color: #8ba3b2; font-size: 11px; font-weight: 600; background: transparent; padding: 8px; }
 QLabel#sectionTitle { font-size: 18px; font-weight: 600; padding: 8px; }
 QLabel#mutedLabel { color: #a1aebc; background: transparent; padding: 6px; }
 QLabel#taskBadge { background: #253e3b; border-radius: 10px; padding: 10px; color: #a2e0cb; }
-QListWidget#stageNavigation { background: transparent; border: none; outline: none; }
-QListWidget#stageNavigation::item { padding: 14px 8px; margin: 4px 0; border-radius: 12px; color: #aeb9c7; }
-QListWidget#stageNavigation::item:selected { background: #31554e; color: #b8ffe7; }
-QListWidget#stageNavigation::item:hover { background: #303b4a; }
+QTreeWidget#workflowNavigation { background: transparent; border: none; outline: none; }
+QTreeWidget#workflowNavigation::item { padding: 4px 6px; border-radius: 12px; color: #aeb9c7; }
+QTreeWidget#workflowNavigation::item:selected { background: #31554e; color: #b8ffe7; }
+QTreeWidget#workflowNavigation::item:hover { background: #303b4a; }
 QPushButton, QToolButton { border-radius: 12px; padding: 10px 14px; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { border-radius: 10px; }
 QWidget#settingCard { border-radius: 14px; }
@@ -46,9 +40,4 @@ QPlainTextEdit#console { border: none; border-radius: 12px; font-family: monospa
 QTabBar::tab { border-radius: 10px; margin: 4px; }
 QTabBar::tab:selected { background: #31554e; }
 QSplitter::handle { background: transparent; width: 10px; height: 10px; }
-"""
-STYLE += """
-QWidget#settingsContent { background: #222833; border-radius: 18px; }
-QWidget#settingsContent QLabel, QWidget#settingsContent QCheckBox { background: transparent; }
-QWidget#logCard QLabel, QWidget#logCard QCheckBox, QWidget#previewCard QLabel { background: transparent; }
 """

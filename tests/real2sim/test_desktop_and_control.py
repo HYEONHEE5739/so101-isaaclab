@@ -291,6 +291,8 @@ def test_workspace_connection_does_not_replace_capture_profile(tmp_path, monkeyp
     window.workflow_panel.workspace.setText(str(scene))
     window.live_workspace.setChecked(True)
     monkeypatch.setattr(package, 'load', lambda p: {'root':scene})
+    # This fixture checks profile routing only; scene/task compatibility has its own fixture.
+    monkeypatch.setattr(window.workflow_panel, 'scene_tasks', lambda: [])
     window.runtime_launcher.connect = Mock(return_value='request')
     window.connect_hw(backend='isaac')
     payload = window.runtime_launcher.connect.call_args.args[0]

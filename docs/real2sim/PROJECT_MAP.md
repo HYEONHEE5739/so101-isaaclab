@@ -63,7 +63,10 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
 |---|---|
 | 전체 workflow UI | `source/soarm101_lab/soarm101_lab/workflow/ui.py` |
-| 화면/view 구성 | `workflow/view.py`, `presentation.py` |
+| 화면/view 구성 | `workflow/ui_components/screens/`, `view.py`, `presentation.py` |
+| 공유 Context·준비 검사·실행 상태 | `workflow/ui_components/context.py`, `execution.py` |
+| 입력 선택·결과물 탐색 | `workflow/ui_components/artifact_picker.py`, `screens/artifacts.py` |
+| 카메라·run별 로그·학습 그래프 | `workflow/ui_components/preview.py`, `monitor.py`, `training_metrics.py` |
 | 단계 정의 | `workflow/stages.py` |
 | 실제 실행 operation | `workflow/operations.py` |
 | artifact 추적 | `workflow/artifacts.py` |

@@ -175,12 +175,12 @@ class Window(QMainWindow):
                 if isinstance(choices.get(key),bool):widget.setChecked(choices[key])
         from ..workflow.ui import WorkflowPanel
         self.workflow_panel=WorkflowPanel(self.work,self)
-        self.live_backend.setCurrentIndex(self.live_backend.findData(self.workflow_panel.backend.currentData()))
-        self.live_backend.currentIndexChanged.connect(lambda i:self.workflow_panel.backend.setCurrentIndex(i))
-        self.workflow_panel.backend.currentIndexChanged.connect(lambda i:self.live_backend.setCurrentIndex(i))
+        self.live_backend.setCurrentIndex(self.live_backend.findData(self.workflow_panel.context.backend.currentData()))
+        self.live_backend.currentIndexChanged.connect(self.sync_workflow_backend)
+        self.workflow_panel.context.backend.currentIndexChanged.connect(self.sync_live_backend)
         self.tabs.addTab(self.workflow_panel,'3 · Workspace Pipeline')
         self.live_scene.currentIndexChanged.connect(lambda:self.guard(self.select_live_scene))
-        self.workflow_panel.workspace.textChanged.connect(self.refresh_live_scenes)
+        self.workflow_panel.context.workspace.textChanged.connect(self.refresh_live_scenes)
         self.refresh_live_scenes()
         for widget in (self.live_workspace,self.use_precision,self.identity_sim):
             widget.toggled.connect(self.save_settings)
@@ -195,12 +195,22 @@ class Window(QMainWindow):
         except Exception as exc:
             self.log.appendPlainText(str(exc));QMessageBox.warning(self,'확인 필요',str(exc))
 
+    def sync_workflow_backend(self):
+        context = self.workflow_panel.context
+        context.backend.setCurrentIndex(context.backend.findData(self.live_backend.currentData()))
+        self.sync_live_backend()
+
+    def sync_live_backend(self):
+        self.live_backend.blockSignals(True)
+        self.live_backend.setCurrentIndex(self.live_backend.findData(self.workflow_panel.context.backend.currentData()))
+        self.live_backend.blockSignals(False)
+
     def button(self,row,title,fn):
         button=QPushButton(title);button.clicked.connect(lambda checked=False:self.guard(fn));row.addWidget(button);return button
 
     def refresh_live_scenes(self):
         """List the existing registry; selecting a Scene never starts a worker."""
-        path=self.workflow_panel.workspace.text().strip()
+        path=self.workflow_panel.context.workspace.text().strip()
         self.live_scene.blockSignals(True);self.live_scene.clear()
         self.live_scene.addItem('Scene을 선택하세요', '')
         seen=set()
@@ -230,7 +240,7 @@ class Window(QMainWindow):
         self.update_scene_selection_hint()
 
     def update_scene_selection_hint(self):
-        path=self.workflow_panel.workspace.text().strip()
+        path=self.workflow_panel.context.workspace.text().strip()
         self.live_scene.setToolTip(path)
         selected=(Path(path).parent.name+'/'+Path(path).name if path else '없음') if self.live_workspace.isChecked() else '연결 설정의 Profile 사용'
         self.scene_selection_hint.setText('선택: '+selected+'\n연결 중 변경했다면 Disconnect → Connect하세요.')
@@ -242,7 +252,7 @@ class Window(QMainWindow):
                         'use_workspace':self.live_workspace.isChecked()}})
 
     def sync_scene_cameras(self):
-        path = self.workflow_panel.workspace.text().strip()
+        path = self.workflow_panel.context.workspace.text().strip()
         if not path or path == getattr(self,'_live_scene_path',None): return
         from .workspaces.package import load as load_workspace
         try: workspace = load_workspace(path)
@@ -324,7 +334,7 @@ class Window(QMainWindow):
             raise ValueError('먼저 Capture/Real-Sim에서 Disconnect하세요. Calibration은 Teleop과 장치를 공유하지 않습니다.')
         if self.runtime_enabled and self.runtime_session==s.get('session') and s.get('backend')=='calibration':
             return self.send('precision.connect',payload)
-        identifier=self.runtime_launcher.connect({'precision':payload},self.workflow_panel.python.text().strip(),backend='calibration',headless=True)
+        identifier=self.runtime_launcher.connect({'precision':payload},self.workflow_panel.context.python.text().strip(),backend='calibration',headless=True)
         self.runtime_enabled=True;self.requested_backend='calibration';self.runtime_session=s.get('session') if identifier else None
         if identifier:self.pending[identifier]='connect'
 
@@ -343,10 +353,10 @@ class Window(QMainWindow):
         payload={'hardware':hardware,'preview_only':preview,'real_camera_preview':self.live_real_preview.isChecked()}
         backend=backend or self.live_backend.currentData()
         profile=None
-        if backend != 'real' and self.live_workspace.isChecked() and self.workflow_panel.workspace.text().strip():
+        if backend != 'real' and self.live_workspace.isChecked() and self.workflow_panel.context.workspace.text().strip():
             from .workspaces.package import load as load_workspace
-            w=load_workspace(self.workflow_panel.workspace.text());profile=str(w['root']/'profile.json');payload['workspace']=str(w['root'])
-            selected=self.workflow_panel.task_selector.selection()
+            w=load_workspace(self.workflow_panel.context.workspace.text());profile=str(w['root']/'profile.json');payload['workspace']=str(w['root'])
+            selected=self.workflow_panel.scene_tasks()
             if selected:payload['task_definition']=selected[0]
         payload['profile']=profile or self.profile_path()
         payload['precision_options']={'use_precision':self.use_precision.isChecked(),
@@ -359,7 +369,7 @@ class Window(QMainWindow):
                 self.log.appendPlainText(f'{renderer} 사용 불가 · {resolved}로 렌더링합니다.')
                 self.live_renderer.setCurrentText(resolved)
             renderer=resolved
-        identifier=self.runtime_launcher.connect(payload,self.workflow_panel.python.text().strip(),headless=self.workflow_panel.mode.currentData()=='operator',backend=backend,renderer=renderer)
+        identifier=self.runtime_launcher.connect(payload,self.workflow_panel.context.python.text().strip(),headless=self.workflow_panel.context.mode.currentData()=='operator',backend=backend,renderer=renderer)
         # A superseded connection may never reply after its worker is cancelled.
         self.pending={key:value for key,value in self.pending.items() if value!='connect'}
         self.runtime_enabled=True
@@ -391,7 +401,7 @@ class Window(QMainWindow):
         backend=self.requested_backend if starting else s.get('backend')
         # Choice is for the next explicit Connect; old status must not override or lock it.
         self.live_backend.setEnabled(not starting and not self.workflow_panel.busy)
-        self.workflow_panel.backend.setEnabled(not starting and not self.workflow_panel.busy);self.live_renderer.setEnabled(not starting)
+        self.workflow_panel.context.backend.setEnabled(not starting and not self.workflow_panel.busy);self.live_renderer.setEnabled(not starting)
         for widget in (self.live_scene,self.scene_browse,self.scene_refresh,self.live_workspace,self.use_precision,self.identity_sim):
             widget.setEnabled(not starting and not self.workflow_panel.busy)
         fresh=bool(self.runtime_enabled and self.runtime_session == s.get('session') and self.bus.responsive(s))
