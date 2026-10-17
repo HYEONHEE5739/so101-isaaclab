@@ -199,6 +199,9 @@ def cached_replay(reader,request,adapter,output,bridge=None):
 
 
 def execute(request):
+    if request['stage']=='datagen':
+        from ..simulation.ik import validate_solver,validate_failure_policy
+        request={**request,'options':{**request['options'],'ik_solver':validate_solver(request['options'].get('ik_solver','scipy_ls')),'ik_failure_policy':validate_failure_policy(request['options'].get('ik_failure_policy','strict'))}}
     output=Path(request['output']).resolve()
     if output.exists():raise FileExistsError('Choose a new workflow output directory')
     output.mkdir(parents=True,exist_ok=False);original=Path(request['input']).resolve();reader=EpisodeDataset(original)
@@ -234,7 +237,9 @@ def execute(request):
     request={**request,'input':str(reader.path),'options':opts}
     from .presentation import current
     app=None;native=None;adapter=None;bridge=current();writer=None;keyboard=None
-    if stage=='datagen' and bridge:bridge.start_datagen(opts['num_successful_demos'],opts['num_envs'])
+    if stage=='datagen' and bridge:
+        bridge.details['ik_solver']=opts['ik_solver'];bridge.details['ik_failure_policy']=opts['ik_failure_policy']
+        bridge.start_datagen(opts['num_successful_demos'],opts['num_envs'])
     previous_interrupt=signal.getsignal(signal.SIGINT)
     from .data_resume import deferred_interrupt
     try:
@@ -287,7 +292,9 @@ def execute(request):
         return result
     except KeyboardInterrupt:
         if stage=='datagen':
-            result={'passed':False,'stopped':True,'successes':0,'requested':opts['num_successful_demos'],
+            from ..simulation.ik import solver_configuration
+            result={'ik_failure_policy':opts['ik_failure_policy'],'ik_solver':opts['ik_solver'],'ik_configuration':solver_configuration(opts['ik_solver'],opts['ik_failure_policy']),
+                'passed':False,'stopped':True,'successes':0,'requested':opts['num_successful_demos'],
                 'dataset':None,'backend':backend,'stage':stage,'episode_schema':SCHEMA}
             atomic(output/'report.json',result)
             return result

@@ -82,9 +82,14 @@ def episode_arrays(e, cameras, hz, reader=None):
         instructions={str(reader.meta.tasks.iloc[int(i)].name) for i in values['task_index'].reshape(-1)}
         if instructions!={e['instruction']}:raise ValueError('LeRobot Task instruction differs from recorded episode')
         endpoints=e['_storage']['canonical_coordinates']
-        coords=RobotCoordinates(endpoints['gripper_closed_rad'],endpoints['gripper_open_rad'])
-        arrays={'state':coords.to_policy(values['observation.state'],measured=True),
-                'action':coords.to_policy(values['action']),'timestamp':ts,
+        coords=RobotCoordinates(endpoints['gripper_closed_rad'],endpoints['gripper_open_rad'],
+            measured_gripper_limits=endpoints.get('measured_gripper_limits_rad'))
+        converted={}
+        for key,measured in (('observation.state',True),('action',False)):
+            try:converted[key]=coords.to_policy(values[key],measured=measured)
+            except ValueError as exc:raise ValueError(f"{e['id']} ({e['_storage']['root']}) {key}: {exc}") from exc
+        arrays={'state':converted['observation.state'],
+                'action':converted['action'],'timestamp':ts,
                 'action_timestamp':values.get('action_timestamp',ts).reshape(-1).astype(np.float64)}
         t=len(ts)
     else:

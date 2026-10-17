@@ -1,5 +1,213 @@
 # SO-101 / Real2Sim 개발 인수인계
 
+## 최신 — MiniVLA 신규 학습 Batch8·Accumulation1 (2026-10-17)
+
+사용자 요청대로 신규 MiniVLA는 Batch 기본8, Accumulation1이다. 이미 연결된 Batch QSpinBox·TRAIN_KEYS·
+options 전달을 재사용했다. `training_config` 및 직접 trainer 신규 실행에서 accumulation1을 적용하며,
+기존 generic batch 루프는 그 경우8샘플 collate→Forward/Backward1회→optimizer1회다.
+Resume이면 누적값을 바꾸지 않는다. Config.load/from_dict는 옛 batch_size 생략을1로, 둘 다 생략을1/8로
+읽는다. policy checkpoint reader와 validate_resume도 같은 해석을 사용한다. UI checkpoint 선택은 저장 Batch를
+복원하며, 다른 Batch를 지정한 Resume은 준비 단계에서 거절한다. 기존 Batch8/Accum8 체크포인트도 그대로 유지.
+기존 파일을 재저장/이동하지 않는다. default.json은 batch8/accum1만 변경했고 구조/LR/H40/Loss는 동일하다.
+ACT/SmolVLA 설정은 유지하고 Accumulation UI·OOM 축소/재시도는 추가하지 않았다.
+
+실제 UI→worker에서 Train100/Val30, Batch8/Accum1로 GPU1step+기존Val30/240표본·checkpoint 저장 성공.
+state(8,6), actions(8,40,6), mask(8,40), images/instructions8, samples/effective8,
+forward_backward_batches1 및 optimizer state 확인. 단 한 번 실행했으며 OOM/재시도/비교 벤치마크 없음.
+CPU 실제 trainer 루프는 새 Batch8의 Forward/Backward1회·optimizer1회 및 옛 Resume1/8의8회·1회를 검사했다.
+local Qwen processor Batch8의 언어 padding/attention mask/이미지 grid, 실제 collate/Flow loss와 OOM 전파 검사.
+learning/processor28PASS, UI/Resume60PASS. 합성 Resume fixture의 pinned revision 누락 실패는 fixture에서 정정했다.
+기존 원본 두 Dataset/옛 checkpoint fingerprint, head/backbone/data/compute_loss·이전 Workflow/IK 코드 hash 보존.
+보고서 outputs/workflow_validation/minivla_batch_update/REPORT.md, 실제 result.json/settings.png/finished.png.
+실물/정책 성능/장시간·추가 Batch 비교/실제 OOM 유발/commit/push 없음. 사용자 실행 중 Sim Eval은 유지했다.
+
+## 최신 — 사용자 저장 이름·단계별 Artifact 폴더 (2026-10-17)
+
+새 Workflow는 `artifacts.output_location`을 UI 미리보기/Operations 계획에서 공유한다.
+Source→sources, Annotation→annotations, DataGen→datagen, Convert→datasets, Train→models,
+평가/Replay/Hub receipt→evaluations 아래 사용자 이름으로 저장한다. `runs/<Run ID>`에는 요청/상태/로그/
+presentation만 두며 Registry JSON은 artifacts다. 원래 엔진별 파일/폴더 및 trainer 하위 구조는 유지한다.
+명시 output도 유지하되 이름/확장자 충돌을 거절한다. 이름·기존 경계 검사+배타적 예약으로 덮어쓰기/동시 저장을
+차단한다. DataGen/Source/MiniVLA Resume은 새 이름, ACT/SmolVLA는 원래 Resume 위치를 유지한다.
+canonical ACT worker는 확인된 in-place Resume일 때만 기존 출력 디렉터리 사용을 허용한다.
+
+Registry는 별도 display_name을 기록하며 기존 이름 없는 항목은 읽을 때만 경로 기반 이름을 표시한다.
+기존 ID/Path/SHA256/Parent를 갱신하거나 결과를 이동하지 않는다. 새 Annotation은 원본 Source와 별도로
+저장/등록한다. 명시적인 promote_annotation API와 원자적 rollback 검사는 유지한다.
+Curation 저장 이름/미리보기→filtered 또는 splits 제안, Train/Val 각각 이름/부모/partition 보존하여 등록.
+기존 선택창에 이름/종류/Task 필터·실제 경로/계보를 추가했고 등록 모델에서 Resume/그래프를 선택한다.
+ACT 중간 checkpoint import는 상위 request 또는 Registry의 runs request에서 출력 관계를 확인한다.
+수동 JSONL 선택/기존 runs 탐색도 유지한다. CLI run/ready --storage-name, register --display-name 지원.
+
+실제 UI→worker 9실행: MuJoCo/Isaac2환경 DataGen, Val 생성, 새 경로1→2재개, Train/Val 변환,
+MiniVLA1→2step재개, 이름 선택 모델의 MuJoCo10step rollout. 별도 실제 Legacy3실행: Source1 Annotation,
+이전 DataGen4→5개 재개, 옛 MiniVLA2→3step 재개. 원본 입력/체크포인트 fingerprint 유지.
+선별/Train14-Val6는 synthetic Source20의 실제 HDF5/Registry 저장 검사다. 신규 Source teleop/실물/
+ACT·SmolVLA GPU 재학습/Isaac 정책 rollout/Hub 업로드는 이번에 실행하지 않았다.
+53개 수치 배열·MP4 SHA 보존, 이름 검색/모델 ID/Checkpoint/그래프 캡처 및 보호 코드 hash 확인.
+USD와 MuJoCo를 혼합한 초기 suite 실패는 프로세스를 분리했다. 이전 MiniVLA UI 기대값을 현재 설정으로
+정정하고 route-only fixture의 실제 데이터 검증을 분리했다. 최종 native/UI/Curation138PASS, USD25PASS,
+후속 storage/Resume52PASS·planner34PASS(겹치므로 합산 안 함). 모든 Registry hash도 최종 재확인했다.
+보고서 outputs/workflow_validation/artifact_storage/REPORT.md, final_audit.json, runtime_results.json,
+legacy_results.json. 기존 장시간 사용자 학습 유지, 의존성/Physics/IK/Mimic/학습 알고리즘 변경·commit/push 없음.
+
+## 최신 — MiniVLA 실제 Batch Size UI 연결 (2026-10-17)
+
+기존 SettingsForm 숫자 입력을 MiniVLA에도 노출했다. MiniVLA 기본1, ACT/SmolVLA 기본8 유지.
+`options.batch_size → training_config → MiniVLAConfig.batch_size → trainer`로 전달한다.
+trainer는 accumulation×batch개를 샘플링하고 batch개씩 collate/forward/backward한다. 기존 loss/accumulation,
+optimizer step/Validation/저장 로직은 유지했다. Accumulation UI·OOM 자동 축소/재시도는 없다.
+실행 첫 tensor shape 및 stdout/metrics에 실제 batch를 남긴다. 과거 Resume의 생략된 batch는1로 해석하고
+새 checkpoint 선택은 저장된 batch를 UI에 복원한다. 다른 batch로 Resume은 기존 config 검사에서 거절한다.
+
+실제 UI 기본1→8 입력→기존 worker로 Train100/Val30, frozen Qwen, 기존 accumulation8을 사용해
+단 한 번의 GPU 1step 검증 성공. state(8,6)/actions(8,40,6), effective64, Val30/240표본 및 checkpoint 저장 확인.
+기존 사용자 장시간 학습은 중단하지 않았다. CPU trainer17PASS, UI/Resume/표시48PASS.
+OOM은 합성 예외의 즉시 전파/무재시도 검사만 수행했으며 실제 Batch8에서는 발생하지 않았다.
+원본 두 LeRobot fingerprint·IK/Adapter/DataGen/모델/Loss·Dataset 코드 hash 보존. 비교 벤치마크/실물/commit/push 없음.
+보고서: outputs/workflow_validation/minivla_batch_size/REPORT.md, 실제 증거 result.json 및 batch8_settings.png.
+
+## 최신 — LeRobot형 학습 로그·실시간 그래프 자동 연결 (2026-10-17)
+
+학습 그래프가 service.session(presentation) 안에서 metrics를 찾아 선택창을 띄우던 경로 오류 수정.
+`WorkflowPanel.training_metrics_path`가 run state.plan.output/resume_output, 선택 policy, 동일 Train 입력의
+최근 run을 찾는다. custom 출력 및 새 UI 재연결 지원. 일반 그래프 버튼은 선택창 없음, 첫 기록 전 대기,
+1.5초 incremental LogTail 읽기, nonmodal dialog. 선택 버튼으로만 다른 metrics.jsonl을 연다.
+`presentation.training_status_text`를 trainer stdout과 UI LogTail.summary가 함께 사용한다. 기존 JSON 로그도
+요약 표시. LeRobot 현재 공식main의 metric 항목을 참고(step/smpl/loss/grdn/lr/updt/data/prep/memory), 실제 Val만
+추가한다. 새 trainer는 load/collate·device prepare·update 시간도 JSONL에 보존. 구조/학습 수치/일정/데이터 변경 없음.
+
+실제 사용자124006 RUNNING 학습을 read-only로 붙여688→692step 자동 갱신,20k 목표·custom 출력·재연결·기존
+JSON 로그 요약 캡처 확인. 학습 중단/새 GPU 학습 실행 없음. 현재 열려 있는 예전 UI는 아래 실제 metrics를
+직접 선택하면 기존 timer로 실시간 확인 가능하다. 새 UI부터 자동/비모달 표시가 반영된다.
+outputs/workflow/runs/20261017_124006_train_cube_red_to_cup_a_8652f7da/policy/policy/metrics.jsonl
+
+UI/표시37PASS, 실제 CPU trainer loop14PASS(주기/early-stop/SIGINT·새 stdout/JSON 필드).
+이전 IK/관측/모델 코드 hash 보존. 보고서 outputs/workflow_validation/training_live_view/REPORT.md.
+공식 참고: github.com/huggingface/lerobot의 main/src/lerobot/{scripts/lerobot_train,utils/logging_utils}.py.
+새 라이브러리 설치/모델·원본 데이터 변경/commit/push 없음. 다음 검증 주기 전까지 그래프 Val 점은 미측정이 정상이다.
+
+## 최신 — MiniVLA Val30 측정 그리퍼 범위 오류 수정 (2026-10-17)
+
+사용자122600 학습은 Train100/Val30 계보 검증 후 Val episode5 frame43/44의 measured gripper
+−0.04528482/−0.04189385rad가 기존2% 허용(하한−0.03490659rad)을 넘어 실패했다. action은 정상이고
+HDF5/Parquet가 일치한다. 실행 URDF의 하한−0.174533rad 안이다. 원본 변환 오류가 아니다.
+`episodes.training_coordinates`가 recorded simulation_model.robot_model의 URDF 경로/SHA를 검증하여
+측정 범위를 가져온다. `RobotCoordinates`의 선택적 measured_gripper_limits는 관측만 모델 범위로 검사하고
+기존 fraction 포화 유지. action/팔/물리/IK는 불변. 새 index와 checkpoint coordinates에 범위를 보존하고
+Direct loader·공통 Isaac MiniVLA wrapper·MuJoCo PolicyEnvironment에 전달한다. 옛 index/checkpoint 또는
+URDF 근거 없는 Legacy의2% 규칙은 자동 변경하지 않는다. 모델 밖 관측/잘못된 명령은 계속 거절한다.
+
+실제 동일 사용자 Train100/Val30로 기본 frozen Qwen/accum8,2step+Val30/240고정표본 계산 통과.
+원본 두HDF5/두LeRobot fingerprint, Train의mean/std, IK/Adapter/DataGen/head/backbone/train.py hash 보존.
+실제 Readiness READY, learning33/core46 PASS. Synthetic는 명령 거절/물리 범위 거절/URDF hash 변조/Legacy 및
+공통 추론 wrapper의 음수 measured 상태를 확인한다. 보고서 outputs/workflow_validation/minivla_gripper_observation/REPORT.md.
+데이터 재변환 불필요. 같은 입력으로 새 학습을 시작하면 된다.20k 전체 학습/실물/정책 품질/commit/push 없음.
+
+## 최신 — MiniVLA Workflow 통합 (2026-10-17)
+
+사용자 첨부 명세의 구현/검증을 완료했다. 일반 UI는 Train Dataset / 호환되는 Validation Dataset,
+원본 provenance 자동사용(source_groups 숨김), 고급 Config/Legacy/Patience, MiniVLA 초기값50k/val1k/save2.5k/
+Early Stopping OFF다. 체크한 일정 > JSON > 기본 JSON이며 최종 config 저장. ACT/SmolVLA 기본값 보존.
+`episodes.validate_training_inputs`는 엔진 없는 Readiness/worker 공통 검증이다. Partition/Lineage/Group/원본 ID,
+Robot/Workspace/좌표·6축·gripper·카메라/FPS/Task 검증. Train 전용 재분할 금지. Legacy는 기록된 독립 그룹+
+고급 명시 옵션만 허용한다. Val은 원본 직접 변환 또는 Val Source만 별도 DataGen→변환이며 자동 실행하지 않는다.
+기존 Dataset 폴더 선택으로 Val 등록 시 Train을 유지하고 Val 선택기에 연결한다. 사용자 Registry에는 테스트 artifact를 자동 추가하지 않았다.
+
+Trainer는 val_every와 save_freq 독립, 번호별 policy/checkpoints/step_XXXXXX.pt, best/last 보존.
+메트릭 기존 필드+training_loss/측정 validation_loss/LR/시간/VRAM, 검증 방식·표본 수 별도 JSON.
+Loss UI는1.5초 갱신 및 다시 열기. MiniVLA Resume은 원본 metadata/양쪽 데이터 byte identity를 유지하고
+새 출력에 저장(기존 파일 있는 출력 거절), 일정·early/patience 변경 허용. 선택 중간 파일보다 미래의 best는 복사하지 않는다.
+SIGINT는 완료 step 저장을 위해 지연 처리하고 parent worker가 trainer를 기다린다. 기존 Workflow cancel 자동 등록 제한은 유지한다.
+저장 policy는 명시적으로 등록 가능하다. 중지 시 준비가 끝나지 않았거나 강제 종료/OOM이면 마지막 저장 파일 기준이다.
+Sim 평가에서 best/last/번호별 파일 선택→두 엔진이 정확한 파일 로드, 상위 policy에서 계약 읽기,
+결과 checkpoint_path/step 및 selected_checkpoint.json 보존. Isaac JSON과 상세 폴더 충돌 수정.
+
+실제 Train100/Val6(Source14/6)3step, 2→총5step 재개, 실제 SIGINT4step 저장, 양 엔진 선택2step 파일4step 평가,
+양 엔진4환경 DataGen 목표1개 및4worker IK 호출 통과. core97 / learning+head36 / USD-UI51 PASS.
+검증용 frozen NF4 Qwen 캐시 revision 사용. 품질/50k/실물/ACT·Smol 전체 GPU 재학습은 미검증.
+원본 데이터/체크포인트 fingerprint·시작 시 IK/Adapter/DataGen hash 보존. head/loss/preprocess/Mimic 본문 보존.
+보고서와 재현 명령: outputs/workflow_validation/minivla_workflow/{REPORT,VALIDATION}.md, 최종 audit.json.
+일부 초기 실패 로그도 남아 있다. 의존성 변경/commit/push 없음. 앞선 IK/실패진단 미커밋 변경을 유지했다.
+
+## 최신 — MiniVLA Validation 안내·체크포인트 간격 (2026-10-17)
+
+사용자094548 학습 오류는 Train100개/Val 미선택. Registry에 변환된Val 없음. UI의 모호한 자동분리 문구를
+‘별도 검증 데이터 없음 (Train 전용 입력은 선택 필요)’로 교체하고 Operations readiness에서 사전 안내.
+원본 Source Partition 재분할 없음. 기존 Val Source 또는 Val 생성물을 LeRobot 변환 후 별도 선택해야 한다.
+MiniVLA TRAIN_KEYS에 save_freq 추가→worker config 전달→기존 학습 루프 번호별 step_XXXXXX.pt 저장.
+기본1000, 최종/early-stop 저장, 기존 validation 기반 best/last 유지. 옛 config의 save_freq 생략 호환,
+Resume에서 저장 간격만 변경 가능. 기존 best.pt 동반 요구 유지(최초 validation 전 snapshot 단독 Resume 미지원).
+실제 사용자 요청 NOT_READY 확인. CPU 실제 loop/optimizer/checkpoint IO5step으로2/4/5번 저장 확인.
+learning21 / integration18 / UI39 PASS. 최초 혼합pytest USD/MuJoCo 경계 오류는 분리실행으로 해결.
+GPU 재학습/새데이터/실물/commit/push 없음. 보고서 outputs/workflow_validation/minivla_training_controls/REPORT.md.
+
+
+## 최신 — DataGen 실패 원인·생성 시간 표시 (2026-10-17)
+
+공통 Adapter에 진단 전용 drop_failure 추가. 기존 StableGrasp 완료 이후, 그리퍼 명령을 열기 전에
+양쪽 접촉이 모두 없고 잡았을 때 대비 상대 위치가6mm 초과 이탈한 상태가0.2초 지속되면 놓침 기록.
+성공 조건·제어·Mimic은 불변이다. commanded grip이 잡은 시점보다1e-4rad 이상 증가하면 release로
+구분해 의도적 놓기를 drop으로 분류하지 않는다. 물리적 놓침의 완전한 추론은 아니며 접촉 기반 진단이다.
+Attempts에 failure_diagnostics 보존, 양 엔진 공통 UI에 전체/Env별 집기 실패·이동 중 놓침·컵 배치 실패.
+Scheduler의 target_completed_seconds는 마지막 성공 commit 후 고정, UI는 생성 경과/목표N개 저장 완료를
+분·초 표시. 환경 준비 제외, pause 포함, Resume은 이번 실행만임을 표시. 상세 검증 보고서는
+outputs/workflow_validation/datagen_failure_timing/REPORT.md. 기존100개 실행은424.53초·place_failure5이며
+과거 데이터는 수정/재분류하지 않았다. GUI 재시작 및 새 worker부터 적용. Commit/push 없음.
+
+
+## 최신 — IK 실패 정책 분리 (2026-10-17)
+
+기존 solver 선택에 `ik_failure_policy=strict|hold|best_effort`를 추가했다. 기본 Strict는 그대로다.
+UI SettingsForm 두 번째 QComboBox→options→Operations→worker→Adapter→solve_selected 연결.
+Hold는 수치 실패에 측정 팔 유지, Best Effort는 유효 candidate 적용 후 physics/Mimic 계속 실행.
+SciPy solve_pose에는 reject_on_error 반환 옵션만 추가, 수치 본문·DLS·공식 Mimic·성공 기준은 보존했다.
+Hold/Best Effort의 팔 명령 점프 기준은 이전 명령 대비 관절별 0.5rad/step이며 초과/비유한/shape/limit
+후보는 abort한다. Strict의 jump는 진단만. invalid measured hold도 별도 abort, clipping/fallback 없음.
+Resume은 solver+policy/config 검사, 옛 policy 생략=Strict. HDF5 프레임/attrs와 report/attempts에 정책·native
+수렴·pose gate·candidate 적용/hold/invalid를 기록한다. 시도당 8개 물리 전후 측정 증거도 보존한다.
+
+실제 같은 Source14/seed1047 Mu1: DLS Hold4/7, Best Effort4/4; SciPy Strict4/11, Best Effort4/5.
+Best Effort 실패 후보 적용+physics 진행 DLS57/SciPy47회; 실제 이동 합1.6379/0.4279rad.
+Mu2/4 및 Isaac1 두 solver smoke 포함9개 UI→worker 실제 실행 통과. 단일 seed이며 품질/일반 성능 우위 아님.
+회귀 core82/native27/USD-UI39 PASS. 원본 hash/알고리즘/assets 보존 및9개 HDF5/영상 검사 통과.
+보고서·벤치·LeRobot 변환 증거는 outputs/workflow_validation/ik_failure_policy/ 아래에 있다.
+Source 자동 사전 replay 없음, Overall+Env0 Side/Wrist 유지. GUI 재시작 후 정책을 명시 선택한다.
+실물/새 학습 없음. 사용자 요청대로 commit/push하지 않는다. 이전 IK 선택 변경도 미커밋 상태다.
+
+
+## 최신 — 공통 DataGen IK 선택·실제 비교 (2026-10-16)
+
+기준 GitHub/local HEAD8f2cd29. `ik_solver=scipy_ls|pinocchio_dls`를 기존 SettingsForm QComboBox,
+UI options→Operations→worker→unified→두 Adapter에 연결했다. 기본 SciPy, unknown 즉시 거부,
+숨겨진 fallback 없음. 기존 SO101Kinematics.inverse_kinematics와 SciPy solve_pose 본문은 변경하지 않았다.
+DLS는 native 설정 weight1/.01/max200/tol.001/damping.001/step.3, measured seed, 실패 hold다.
+SciPy는 previous-command seed/기존3mm·.12rad 탈락이다. MuJoCo world→base/기록 URDF/worker별
+Pinocchio를 사용한다. 측정 hold가 MuJoCo 기존 command limit 밖이면 held_measured_joint_limit IKFailure.
+
+report/attempts/데이터 generation_configuration과 episode attrs/ik arrays에 선택·수렴·오차·시간을 기록한다.
+Native 수렴, candidate common pose gate, post-step 실제 tool0 추종, 최종 grasp/place를 구분한다.
+Resume은 solver/config 불일치면 복사 전 거부, 이전 생략값은 SciPy다. Source 자동 물리 재생 없음.
+기존3뷰 유지. 진행 상태가 두 줄 높이로 잘리던 실제 화면 문제를 최소 높이 계산으로 수정했다.
+GUI는 재시작해야 새 선택/높이 코드가 반영된다. 기존 실행중 worker를 자동 재시작하지 않았다.
+
+실제 Source14의560목표 동일 seed offline: DLS0.518ms/0.831mm/.612°, SciPy4.083ms/
+.000034mm/.000170°, 모두 수렴. MuJoCo vs Pinocchio FK 최대2.12e-13m/1.55e-12rad 미만.
+MuJoCo1 최종 재측정 DLS2/2성공·13.48/min, SciPy2/4·6.72/min(준비 제외).
+Isaac1 DLS2/5·.80/min, SciPy2/2·2.29/min. Isaac DLS 미수렴hold가 집기 실패로 이어져
+offline 속도가 그대로 end-to-end 우위가 되지 않았다. MuJoCo1/2/4, Isaac1/4 실제 두 IK 실행,
+네 조합 UI QComboBox→request→worker 전환경 선택/호출 확인. 초기 일부 동시 부하/단일 seed 한계 명시.
+core79PASS / native16PASS / USD-UI39PASS. Qt+Pinocchio 합친 pytest import segfault 로그 보존,
+기존 프로세스 경계대로 native/GUI를 분리 검사했다. 의존성 변경 없음.
+
+보고서: outputs/workflow_validation/ik_solver_comparison/REPORT.md 및 BENCHMARK.md.
+검증 runner/원시 결과/audit.json/display_audit.json/verified_display.png도 같은 폴더다.
+최종 MuJoCo1은 *_1_verified, MuJoCo4 DLS는 ui_mujoco_pinocchio_dls_4_verified를 따른다.
+초기1환경 Isaac DLS는 frame failure_reason 문자열 추가 전 표본이며 최신 Isaac4에서 해당 필드 확인.
+원본 Source hash 불변, 원본 solver/공식 Mimic/assets diff 없음. 실물·새 정책·장시간/여러 seed·Isaac2/8 미검증.
+사용자 요청에 따라 이 기능은 commit/push하지 않았다. 기존 사용자 로그2개는 그대로다.
+
+
 ## 최신 — DataGen 자동 Source 사전 재생 제거 (2026-10-16)
 
 사용자 요청: 실제 생성 전에 Source14개를 순차 물리 재생하지 말고 바로 병렬 생성할 것.

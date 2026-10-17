@@ -112,6 +112,10 @@ Real2Sim으로 맞춘 한 실제 작업공간을 재사용 가능한 environment
 - UI: `ui.py`, `view.py`, `presentation.py`
 
 두 backend는 같은 WorkflowPanel, Operations, Registry, Presentation을 사용한다. `operations.plan`은 명령 계획,
+`artifacts.output_location`은 UI/worker의 공통 저장 경로 계약이다. 실행 로그는 `runs/<Run ID>`, 실제 새 결과는
+sources/annotations/curation/datagen/datasets/models/evaluations 아래 사용자 이름으로 분리한다.
+Registry ID/Parent/Path/SHA256은 유지하고 사람에게 보이는 `display_name`만 별도로 기록한다.
+기존 runs 결과는 이동하지 않는다. 경로·Resume 예외와 탐색 동작은 [DATA_FLOW](DATA_FLOW.md#사용자-이름저장-경로--2026-10-17)에 있다.
 `execute_request`는 worker dispatch다. Workspace Replay/Annotation/DataGen은 형식과 엔진에 관계없이 `unified.execute`로 간다.
 `dataset.EpisodeDataset`가 공통/과거 형식을 읽고, 과거 입력만 `migrate`로 별도 공통 파일에 Import한다.
 유효한 공통 입력은 그대로 사용한다. `unified.replay`는 관절 목표의 실제 재생과 집기/배치를 검사한다.

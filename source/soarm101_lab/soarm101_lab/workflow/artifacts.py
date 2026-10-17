@@ -6,6 +6,7 @@ import time
 import uuid
 import os
 import shutil
+from datetime import datetime
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import ROOT, load, metadata
 from ..real2sim.workspaces.demo import coordinate_contract
@@ -13,10 +14,82 @@ from ..so101_dataset_contract import read_contract
 from ..representation import describe
 
 TYPES = {'workspace', 'source', 'replay', 'annotated', 'datagen', 'dataset', 'policy', 'sim_eval', 'real_eval', 'hf_dataset', 'hf_policy'}
-DEFAULTS = {'profile': 'outputs/real2sim', 'workspace': 'outputs/real2sim/environments',
-            'source': 'datasets', 'annotated': 'datasets/annotated', 'datagen': 'datasets/generated',
-            'dataset': 'datasets/LerobotDataset', 'policy': 'policy', 'replay': 'outputs/workflow',
-            'sim_eval': 'outputs/sim_eval', 'real_eval': 'outputs/real_eval'}
+DEFAULTS = {'profile': 'outputs/real2sim', 'workspace': 'outputs/real2sim/environments'}
+
+OUTPUT_FOLDERS = {'source':'sources','annotate':'annotations','datagen':'datagen',
+                  'convert':'datasets','train':'models','sim_eval':'evaluations','real_eval':'evaluations',
+                  'replay':'evaluations','hf_dataset':'evaluations','hf_policy':'evaluations'}
+
+
+def validate_storage_name(value):
+    """A single portable leaf name; never interpret user names as paths."""
+    if not isinstance(value,str) or not value or value!=value.strip() or len(value)>100 or len(value.encode('utf-8'))>200:
+        raise ValueError('저장 이름은 1–100자(UTF-8 200바이트 이내)의 한글/영문/숫자/밑줄/하이픈으로 입력하세요.')
+    if any(not (c.isalnum() or c in '_-') for c in value) or value.upper() in {'CON','PRN','AUX','NUL',*(f'COM{i}' for i in range(10)),*(f'LPT{i}' for i in range(10))}:
+        raise ValueError('저장 이름에 경로, 공백, 점 또는 금지 문자를 사용할 수 없습니다.')
+    return value
+
+
+def suggested_name(stage, artifact=None):
+    tasks=(artifact or {}).get('tasks',[])
+    task=tasks[0].get('task_id','') if len(tasks)==1 else ''
+    task=''.join(c for c in task if c.isalnum() or c in '_-')[:35]
+    return f'{stage}_{task+"_" if task else ""}{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:4]}'
+
+
+def artifact_name(artifact):
+    """Legacy fallback is computed at read time; stored paths and hashes stay untouched."""
+    path=Path(artifact['path'])
+    if artifact.get('display_name'):return artifact['display_name']
+    if path.name in ('dataset.hdf5','source.hdf5','policy','pretrained_model','dataset','report.json'):
+        return path.parent.name
+    return path.stem if path.is_file() else path.name
+
+
+def artifact_description(artifact):
+    partition=artifact.get('source_partition') or artifact.get('provenance',{}).get('source_partition') or {}
+    info=artifact.get('format');info=info if isinstance(info,dict) else {}
+    count=artifact.get('episode_count',info.get('total_episodes'))
+    fields=[f"[{artifact['type']}] {artifact_name(artifact)}"]
+    if partition:fields.append(f"{partition['split']} Source {len(partition['source_ids'])}")
+    if count is not None:fields.append(f'Episodes {count}')
+    if isinstance(artifact.get('format'),dict) and artifact['type']=='dataset':fields.append('LeRobot')
+    if artifact.get('latest_step') is not None:fields.append(f"Step {artifact['latest_step']}")
+    fields.extend([','.join(t['task_id'] for t in artifact.get('tasks',[])),artifact.get('backend',''),
+                   time.strftime('%m/%d %H:%M',time.localtime(artifact['created_at'])) if artifact.get('created_at') else '',
+                   '#'+artifact['id'][:8]])
+    return ' · '.join(f for f in fields if f)
+
+
+def output_location(stage, artifact, options, root):
+    """Return the existing worker's file/directory contract and its reserved boundary."""
+    backend=options.get('backend','isaac')
+    file_output=(stage=='source' and backend!='mujoco') or stage in ('real_eval','hf_dataset','hf_policy') or (stage=='sim_eval' and backend!='mujoco')
+    supplied=options.get('storage_name')
+    if supplied is not None:validate_storage_name(supplied)
+    if options.get('output'):
+        output=Path(options['output']).expanduser().resolve()
+        if file_output and output.suffix.lower() not in (('.hdf5','.h5') if stage=='source' else ('.json',)):
+            raise ValueError('이 단계의 출력 경로에는 '+('HDF5 파일 확장자가' if stage=='source' else 'JSON 파일 확장자가')+' 필요합니다.')
+        if supplied and supplied not in (output.stem if file_output else output.name,output.parent.name if file_output else output.name):
+            raise ValueError('저장 이름과 지정 출력 경로의 이름이 다릅니다. 이름을 맞추거나 출력 경로 설정을 해제하세요.')
+        return output,output
+    if stage=='train' and options.get('resume_checkpoint') and options.get('architecture','smolvla')!='minivla':
+        from .policy import resume_output
+        output=resume_output(options['resume_checkpoint'],options.get('architecture','smolvla'))
+        if supplied and supplied!=output.name:
+            raise ValueError('ACT/SmolVLA Resume은 기존 출력 위치를 사용합니다. 새 이름으로 저장하려면 같은 이름의 output 경로도 명시하세요.')
+        return output,output
+    leaf=supplied or suggested_name(stage,artifact)
+    folder=Path(root).resolve()/OUTPUT_FOLDERS[stage]/leaf
+    output=folder/('source.hdf5' if stage=='source' else 'result.json') if file_output else folder
+    return output,folder
+
+
+def resumes_in_place(stage,options,output):
+    if stage!='train' or not options.get('resume_checkpoint') or options.get('architecture','smolvla')=='minivla':return False
+    from .policy import resume_output
+    return Path(output).resolve()==resume_output(options['resume_checkpoint'],options.get('architecture','smolvla')).resolve()
 
 
 def fingerprint(path):
@@ -101,6 +174,8 @@ def inspect_artifact(kind, path):
                 raise ValueError('Policy weights missing')
             result['processors'] = {n: json.loads((p / (n + '.json')).read_text())
                                     for n in ('policy_preprocessor', 'policy_postprocessor')}
+            step_file=p.parent/'training_state/training_step.json'
+            if step_file.is_file():result['latest_step']=json.loads(step_file.read_text()).get('step')
         if kind == 'dataset' and not list((p / 'data').rglob('*.parquet')):
             raise ValueError('Dataset parquet data missing')
         provenance = p / 'workflow_provenance.json'
@@ -137,10 +212,12 @@ def inspect_canonical(kind, path):
               'coordinates': provenance['coordinates'],
               'representation': {'action_space': 'arm_rad_gripper_fraction', 'backend': provenance.get('backend')}}
     if kind == 'policy':
-        if not (p / 'best.pt').is_file() or not (p / 'config.json').is_file():
+        if not any((p/name).is_file() for name in ('best.pt','last.pt')) or not (p / 'config.json').is_file():
             raise ValueError('MiniVLA checkpoint weights/config missing')
         result['format'] = 'so101.minivla-policy/1'
         result['model_config'] = json.loads((p / 'config.json').read_text())
+        status=p/'training_status.json'
+        if status.is_file():result['latest_step']=json.loads(status.read_text()).get('step')
         result['coordinates'] = read_contract(p)
         result['representation'] = describe(result['coordinates'])
         return result
@@ -182,7 +259,8 @@ class Registry:
         self.root = Path(root or ROOT / 'outputs/workflow')
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def register(self, kind, path, parents=(), extra=None):
+    def register(self, kind, path, parents=(), extra=None, display_name=None):
+        if display_name is not None:validate_storage_name(display_name)
         details = inspect_artifact(kind, path)
         lineage = [self.get(i) for i in parents]
         workspaces = [a.get('workspace') for a in lineage if a.get('workspace')]
@@ -196,11 +274,13 @@ class Registry:
             for existing in reversed(self.all()):
                 if (existing['type'] == kind and existing['path'] == resolved and
                         existing.get('sha256') == content_hash and existing.get('status') == 'SUCCEEDED'
-                        and (not parents or existing.get('parents') == list(parents))):
+                        and (not parents or existing.get('parents') == list(parents))
+                        and (display_name is None or existing.get('display_name')==display_name)):
                     return existing
         artifact = {**details, 'id': uuid.uuid4().hex, 'type': kind, 'path': resolved,
                     'created_at': time.time(), 'status': 'SUCCEEDED', 'parents': list(parents),
                     'sha256': content_hash, 'execution': extra or {}}
+        artifact['display_name']=display_name or artifact_name(artifact)
         if workspaces:
             artifact['workspace'] = workspaces[0]
         for key in ('coordinates', 'representation', 'tasks', 'backend'):
@@ -230,7 +310,7 @@ class Registry:
         for a in artifacts:
             for parent in a.get('parents', []):
                 if parent in children: children[parent].append(a['id'])
-        records = [{'id': a['id'], 'type': a['type'], 'backend': a.get('backend', 'isaac'),
+        records = [{'id': a['id'], 'display_name':artifact_name(a), 'type': a['type'], 'backend': a.get('backend', 'isaac'),
                     'tasks': [t['task_id'] for t in a.get('tasks', [])], 'path': a['path'],
                     'status': a.get('status'), 'exists': Path(a['path']).exists(),
                     'parents': a.get('parents', []), 'used_by': children[a['id']]} for a in artifacts]
@@ -315,6 +395,7 @@ def browse_directory(kind, current='', registry=None, workspace=None):
         a = registry.latest({kind}, workspace)
         if a:
             p = Path(a['path']); return str(p if p.is_dir() else p.parent)
-    p = ROOT / DEFAULTS.get(kind, 'outputs/workflow')
+    stage={'annotated':'annotate','dataset':'convert','policy':'train'}.get(kind,kind)
+    p = (registry.root if registry else ROOT/'outputs/workflow') / OUTPUT_FOLDERS[stage] if stage in OUTPUT_FOLDERS else ROOT / DEFAULTS.get(kind,'outputs/workflow')
     p.mkdir(parents=True, exist_ok=True)
     return str(p)

@@ -35,15 +35,22 @@ class MiniVLAConfig:
     head_lr: float = 1e-4
     lora_lr: float = 1e-5
     weight_decay: float = 0.01
-    accumulation: int = 8
+    accumulation: int = 1
+    batch_size: int = 8
     steps: int = 5000
+    save_freq: int = 1000
     val_every: int = 100
+    early_stopping: bool = False
     patience: int = 10
     seed: int = 42
     replan_steps: int = 4
 
     def __post_init__(self):
         self.cameras = tuple(self.cameras)
+        if type(self.save_freq) is not int or self.save_freq<1:raise ValueError("Positive integer save_freq required")
+        if type(self.early_stopping) is not bool:raise ValueError('early_stopping must be boolean')
+        for key in ('steps','val_every','patience','batch_size','accumulation'):
+            if type(getattr(self,key)) is not int or getattr(self,key)<1:raise ValueError(f'Positive integer {key} required')
         assert self.adaptation in ('frozen', 'qlora')
         if self.architecture_schema != ARCHITECTURE_SCHEMA:
             raise ValueError('Unsupported MiniVLA architecture; retrain with Flow-DiT')
@@ -69,4 +76,29 @@ class MiniVLAConfig:
 
     @classmethod
     def load(cls, path):
-        with open(path) as f: return cls(**json.load(f))
+        with open(path) as f: return cls.from_dict(json.load(f))
+
+    @classmethod
+    def from_dict(cls, values):
+        values=dict(values)
+        # Configs from the original trainer omitted batch_size and used accumulation 8.
+        if 'batch_size' not in values:
+            values['batch_size']=1
+            values.setdefault('accumulation',8)
+        return cls(**values)
+
+
+def training_config(path, options):
+    """Explicit training options override JSON; omitted values retain JSON settings."""
+    try:
+        cfg=MiniVLAConfig.load(path)
+        if not options.get('resume_checkpoint'):cfg.accumulation=1
+        elif 'batch_size' in options and options['batch_size']!=cfg.batch_size:
+            raise ValueError(f'Resume Batch Size는 저장된 {cfg.batch_size}을 유지해야 합니다. 새 Batch Size는 신규 학습에서 설정하세요.')
+        for key in ('steps','val_every','save_freq','early_stopping','patience','batch_size'):
+            if key in options:setattr(cfg,key,options[key])
+        cfg.__post_init__()
+        cfg.validate_architecture()
+    except (TypeError,AssertionError,ZeroDivisionError) as exc:
+        raise ValueError(f'MiniVLA 설정 JSON을 확인하세요: {path} ({exc})') from exc
+    return cfg

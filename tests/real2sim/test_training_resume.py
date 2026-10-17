@@ -102,6 +102,7 @@ def test_resume_output_is_original_folder(tmp_path):
     assert resume_output(dest / 'pretrained_model') == tmp_path / 'policy'
     (tmp_path / 'mini').mkdir()
     for name in ('last.pt', 'best.pt'): (tmp_path / 'mini' / name).touch()
+    (tmp_path/'mini/config.json').write_text('{}')
     assert resume_output(tmp_path / 'mini/last.pt', 'minivla') == tmp_path / 'mini'
 
 
@@ -133,3 +134,26 @@ def test_workflow_resume_plan_reuses_training_output(tmp_path, monkeypatch, back
         {'resume_checkpoint': str(dest), 'steps': 100000, 'backend': backend}, run_dir=run)
     assert plan['output'] == str(tmp_path / 'policy')
     assert json.loads((run / 'request.json').read_text())['output'] == str(tmp_path / 'policy')
+
+
+def test_minivla_train_only_requires_validation_before_worker(tmp_path,monkeypatch):
+    from soarm101_lab.workflow import operations
+    from soarm101_lab.workflow.artifacts import Registry
+    monkeypatch.setattr(operations,'inspect_artifact',lambda *a:{})
+    service=operations.Operations(Registry(tmp_path/'registry'))
+    artifact={'type':'dataset','path':str(tmp_path),'provenance':{'source_partition':{'split':'train'}}}
+    state,reason=service.readiness('train',artifact,options={'architecture':'minivla'})
+    assert state=='NOT_READY' and 'TRAIN 전용' in reason and 'Validation Dataset' in reason
+    state,reason=service.readiness('train',artifact,options={'architecture':'minivla','save_freq':0})
+    assert state=='NOT_READY' and '저장 간격' in reason
+
+
+def test_periodic_minivla_checkpoint_is_not_replaced(tmp_path):
+    from soarm101_lab.workflow.policy import selected_minivla_checkpoint,resume_output
+    root=tmp_path/'policy';(root/'checkpoints').mkdir(parents=True)
+    for name in ('best.pt','last.pt','checkpoints/step_000002.pt'):(root/name).touch()
+    (root/'config.json').write_text('{}')
+    chosen=root/'checkpoints/step_000002.pt'
+    assert selected_minivla_checkpoint(root,str(chosen))==chosen
+    assert resume_output(chosen,'minivla')==root
+    with pytest.raises(ValueError):selected_minivla_checkpoint(root,str(tmp_path/'outside.pt'))

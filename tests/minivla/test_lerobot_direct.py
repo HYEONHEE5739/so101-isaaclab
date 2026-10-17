@@ -43,7 +43,7 @@ def direct_data(tmp_path,monkeypatch):
         (model/'project_provenance.json').write_text(json.dumps(provenance))
         return {'passed':True}
     monkeypatch.setattr(worker,'train',prepared)
-    worker.train_from_lerobot(artifact,{'workspace':'unused'},out)
+    worker.train_from_lerobot(artifact,{'workspace':'unused','legacy_group_split':True},out)
     return artifact,out
 
 
@@ -121,4 +121,25 @@ def test_unverified_source_group_lineage_rejected(direct_data,groups):
     from soarm101_lab.workflow import mujoco as worker
     artifact,out=direct_data;artifact['provenance']['source_groups']=groups
     with pytest.raises(ValueError,match='verified source_groups'):
-        worker.train_from_lerobot(artifact,{'workspace':'unused'},out.parent/'unverified')
+        worker.train_from_lerobot(artifact,{'workspace':'unused','legacy_group_split':True},out.parent/'unverified')
+
+
+def test_validation_measured_gripper_uses_saved_model_limits(direct_data):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from soarm101_lab.workflow.artifacts import fingerprint
+    from soarm101_lab.learning.minivla.data import episode_arrays
+    artifact,out=direct_data;root=Path(artifact['path']);prepared=out/'dataset'
+    file=next((root/'data').rglob('*.parquet'));table=pq.read_table(file)
+    values=np.array(table['observation.state'].to_pylist(),np.float32);values[5:7,5]=[-.04528482,-.04189385]
+    table=table.set_column(table.schema.get_field_index('observation.state'),'observation.state',pa.array(values.tolist(),type=table['observation.state'].type));pq.write_table(table,file)
+    manifest=json.loads((prepared/'manifest.json').read_text());manifest['storage']['sha256']=fingerprint(root)
+    manifest['storage']['canonical_coordinates']['measured_gripper_limits_rad']=[-.174533,1.74533]
+    (prepared/'manifest.json').write_text(json.dumps(manifest))
+    stats=fit_statistics(prepared/'manifest.json',prepared/'statistics.json')
+    val=Episodes(prepared/'manifest.json',stats,MiniVLAConfig(),'val')
+    assert len(val)==5 and np.array_equal(val.arrays[0]['state'][:2,5],[0,0])
+    assert np.array(pq.read_table(file,columns=['observation.state'])['observation.state'].to_pylist())[5,5]<-.04
+    entry=val.episodes[0];entry['_storage']['canonical_coordinates'].pop('measured_gripper_limits_rad')
+    with pytest.raises(ValueError,match='episode_0001.*observation.state.*canonical endpoints'):
+        episode_arrays(entry,('side',),30,val.reader)

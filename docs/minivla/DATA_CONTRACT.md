@@ -22,6 +22,10 @@ camera 존재/숫자 shape·단위·시각을 확인하고, decode 실패·누�
 640×480 원본은 유지하고 기존 Backbone에서만 256×256 Letterbox로 변환한다.
 
 Batch 형식과 H40 padding/mask는 아래와 동일하다. chunk는 episode를 넘지 않는다.
+신규 학습은 UI Batch Size(기본8)와 accumulation1로 실행한다. collate는 state `[B,6]`,
+actions `[B,40,6]`, mask `[B,40]`를 만들고 이미지/문장은 B개 목록으로 유지한다. 기존 Qwen processor가
+언어 길이를 padding하고 attention mask·이미지 grid를 각 샘플에 맞춘다. optimizer step당 Forward/Backward는
+한 번이다. Resume은 저장된 accumulation을 유지하며, batch_size가 없는 과거 설정은1로 읽는다.
 새 checkpoint는 전체 dataset byte identity와 manifest identity를 저장한다. Resume는 동일한
 데이터·통계·config·주파수와 optimizer를 요구한다. 기존 Canonical 학습은 같은 저장 포맷으로
 재개하며 Direct로 자동 전환하지 않는다. 구형 Canonical checkpoint의 byte identity는 원래 Workflow의
@@ -30,6 +34,22 @@ Batch 형식과 H40 padding/mask는 아래와 동일하다. chunk는 episode를 
 
 검증 결과: [VALIDATION.md](VALIDATION.md), 상세 근거:
 `outputs/workflow_validation/lerobot_direct_calibration/REPORT.md`.
+
+## 측정 그리퍼와 명령 범위 — 2026-10-17
+
+LeRobot의 state/action은 원본 model rad 그대로 읽는다. 명령의 닫힘/열림 endpoint와 측정 관절의
+유효 범위는 구분한다. 예를 들어 닫힘 명령0rad 이후 관성이 있는 측정값−0.045rad는 명령으로는
+거절하지만, 기록된 실행 URDF의 gripper 범위[−0.174533,1.74533]rad 안이라면 관측으로 허용한다.
+`workflow.episodes.training_coordinates`는 recorded simulation_model의 실행 URDF 경로·SHA256을
+실제 Workspace 파일과 비교한 뒤 범위를 읽는다. 새 학습 index/checkpoint의 canonical coordinates에
+`measured_gripper_limits_rad`를 저장하고, 로더와 MuJoCo/공통 MiniVLA 추론에서 동일하게 사용한다.
+
+관측은 URDF 범위를 검사한 후 기존 fraction 변환과[0,1]포화를 적용한다. 팔5축/명령/원본 rad는 바꾸지 않는다.
+URDF 밖 측정값, 비유한 값, endpoint 밖 명령은 계속 거절한다. 오류는 dataset 경로·episode·column을 표시한다.
+URDF 근거가 없는 Legacy나 기존 checkpoint/index는 기존2% measured tolerance를 유지한다. 과거 manifest,
+통계, 데이터셋과 checkpoint를 자동 수정하지 않는다. 새 범위 metadata는 manifest/statistics fingerprint와
+Resume dataset identity에 포함되므로 재개 시 정규화 계약이 임의로 바뀌지 않는다. 이는 시뮬레이션 모델
+범위 검사이며 실물 관절/물성 검증을 의미하지 않는다.
 
 ## 명시 Source Partition / 별도 Validation artifact
 

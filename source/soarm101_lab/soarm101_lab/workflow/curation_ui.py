@@ -5,7 +5,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QPointF, QRectF, QEvent, pyqtSignal, QThread, QTimer, QElapsedTimer
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QImage, QPixmap
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QListWidget,
-    QListWidgetItem,QSpinBox,QDoubleSpinBox,QFileDialog,QMessageBox,QSplitter,QCheckBox,QWidget,QSlider,QComboBox,QFormLayout,QTabWidget,QScrollArea,QStyle,QStyleOptionSlider,QToolTip)
+    QListWidgetItem,QSpinBox,QDoubleSpinBox,QFileDialog,QMessageBox,QSplitter,QCheckBox,QWidget,QSlider,QComboBox,QFormLayout,QTabWidget,QScrollArea,QStyle,QStyleOptionSlider,QToolTip,QLineEdit)
 from .curation import analyze, load_episode, EpisodeReader, select_distribution, export_subset
 from .view import CameraView
 
@@ -410,6 +410,11 @@ class CurationDialog(QDialog):
         self.assign_split.setToolTip('현재 선택한 에피소드와 같은 원본 그룹을 함께 이동합니다. 복제된 원본이 학습/검증 양쪽에 섞이지 않도록 합니다.')
         self.cancel_split=QPushButton('미리보기 지우기');self.cancel_split.clicked.connect(self.cancel_source_split);assignbar.addWidget(self.cancel_split);assignbar.addStretch()
         self.split_status=QLabel('비율과 랜덤값을 정한 뒤 미리보기를 누르면 분포 그림에 색으로 표시됩니다.');self.split_status.setWordWrap(True);advanced_layout.addWidget(self.split_status)
+        from .artifacts import suggested_name
+        names=QFormLayout();page.addLayout(names)
+        self.storage_name=QLineEdit(suggested_name('curated'));names.addRow('저장 이름',self.storage_name)
+        self.output_preview=QLabel();self.output_preview.setWordWrap(True);self.output_preview.setTextFormat(Qt.TextFormat.PlainText);names.addRow('예상 저장 위치',self.output_preview)
+        self.storage_name.textChanged.connect(self.update_output_preview)
         footer=QHBoxLayout();layout.addLayout(footer);footer.addWidget(QLabel('원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.'));footer.addStretch()
         self.export_button=QPushButton('데이터 저장');self.export_button.setObjectName('primaryAction');self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.save);footer.addWidget(self.export_button)
@@ -671,6 +676,18 @@ class CurationDialog(QDialog):
             self.split_status.clear()
             self.split_status.setToolTip('')
         self.split_status.setVisible(planned or locked)
+        self.update_output_preview()
+
+    def curation_destination(self):
+        from .artifacts import validate_storage_name
+        name=validate_storage_name(self.storage_name.text())
+        split=self.split_plan is not None
+        root=self.registry.root/'curation'/('splits' if split else 'filtered')
+        return root/(name if split or (self.path and Path(self.path).is_dir()) else name+'.hdf5')
+
+    def update_output_preview(self):
+        try:self.output_preview.setText(str(self.curation_destination()))
+        except ValueError as exc:self.output_preview.setText(str(exc))
 
     def clear_split_preview(self):
         self.split_generation+=1;self.split_plan=None
@@ -796,8 +813,16 @@ class CurationDialog(QDialog):
 
     def save_source_split(self):
         if not self.split_plan:return self.error('Source 분할을 먼저 확인하세요.')
-        dest,_=QFileDialog.getSaveFileName(self,'새 Train/Validation 출력 폴더','source_split','폴더 이름 (*)')
+        try:proposed=self.curation_destination();proposed.parent.mkdir(parents=True,exist_ok=True)
+        except ValueError as exc:return self.error(exc)
+        dest,_=QFileDialog.getSaveFileName(self,'새 Train/Validation 출력 폴더',str(proposed),'폴더 이름 (*)')
         if not dest:return
+        from .artifacts import validate_storage_name
+        try:
+            name=validate_storage_name(Path(dest).name)
+            for split in ('train','val'):validate_storage_name(name+'_'+split)
+        except ValueError as exc:return self.error(exc)
+        if Path(dest).exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
         from .episodes import export_source_splits
         source,kind=self.path,self.kind;names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         assignments={n:self.split_plan['assignments'][n] for n in names}
@@ -805,7 +830,7 @@ class CurationDialog(QDialog):
         def work():
             result=export_source_splits(source,dest,ratio,seed,assignments,names)
             parent=next((a for a in self.registry.all() if a['path']==source),None)
-            for output in result['outputs'].values():self.registry.register(kind,output,parents=[parent['id']] if parent else [])
+            for split,output in result['outputs'].items():self.registry.register(kind,output,parents=[parent['id']] if parent else [],display_name=name+'_'+split)
             return result
         self.run_job(work,lambda result:self.info.setText(f'Train {result["counts"]["train"]} / Validation {result["counts"]["val"]} 저장·등록 완료 · 원본 불변 · {dest}'))
 
@@ -813,14 +838,22 @@ class CurationDialog(QDialog):
         if not self.path:return
         if self.split_plan is not None:return self.save_source_split()
         canonical=Path(self.path).is_dir()
-        dest,_=QFileDialog.getSaveFileName(self,'새 데이터셋 저장','curated' if canonical else 'curated.hdf5','폴더 이름 (*)' if canonical else 'HDF5 (*.hdf5)')
+        try:proposed=self.curation_destination();proposed.parent.mkdir(parents=True,exist_ok=True)
+        except ValueError as exc:return self.error(exc)
+        dest,_=QFileDialog.getSaveFileName(self,'새 데이터셋 저장',str(proposed),'폴더 이름 (*)' if canonical else 'HDF5 (*.hdf5)')
         if not dest:return
+        if not canonical and not Path(dest).suffix:dest+='.hdf5'
+        if not canonical and Path(dest).suffix.lower() not in ('.h5','.hdf5'):return self.error('HDF5 파일 확장자를 사용하세요.')
+        from .artifacts import validate_storage_name
+        try:name=validate_storage_name(Path(dest).name if canonical else Path(dest).stem)
+        except ValueError as exc:return self.error(exc)
+        if Path(dest).exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
         names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         source,kind=self.path,self.kind
         self.info.setText('새 데이터 저장·검증·등록 중… 원본은 유지됩니다.')
         def work():
             output=export_subset(source,dest,names)
             parent=next((a for a in self.registry.all() if a['path']==source),None)
-            self.registry.register(kind,output,parents=[parent['id']] if parent else [])
+            self.registry.register(kind,output,parents=[parent['id']] if parent else [],display_name=name)
             return output
         self.run_job(work,lambda output:self.info.setText(f'저장·등록 완료: {output} · {len(names)} episodes'))

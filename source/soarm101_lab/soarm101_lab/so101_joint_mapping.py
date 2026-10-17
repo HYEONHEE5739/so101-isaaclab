@@ -126,21 +126,32 @@ def require_capture_mapping(state):
 
 
 class RobotCoordinates:
-    def __init__(self, closed_rad=None, open_rad=None):
+    def __init__(self, closed_rad=None, open_rad=None, *, measured_gripper_limits=None):
         mapper = DEFAULT_MAPPER.metadata()
         self.closed = mapper['gripper_zero_offset_rad'] if closed_rad is None else float(closed_rad)
         self.open = self.closed + 100 * mapper['gripper_rad_per_percent'] if open_rad is None else float(open_rad)
         if not np.isfinite([self.closed, self.open]).all() or self.open <= self.closed:
             raise ValueError('Explicit finite increasing closed/open gripper endpoints required')
+        self.measured_gripper_limits = None
+        if measured_gripper_limits is not None:
+            bounds=np.asarray(measured_gripper_limits,dtype=float)
+            if (bounds.shape!=(2,) or not np.isfinite(bounds).all() or bounds[0]>=bounds[1]
+                    or bounds[0]>self.closed+1e-6 or bounds[1]<self.open-1e-6):
+                raise ValueError('Measured gripper model limits must enclose canonical command endpoints')
+            self.measured_gripper_limits=tuple(float(v) for v in bounds)
         self.saturated_states = 0
 
     def metadata(self):
-        return {'schema': 'so101.minivla-coordinates/1', 'joint_order': list(JOINTS),
+        result = {'schema': 'so101.minivla-coordinates/1', 'joint_order': list(JOINTS),
                 'model_units': ['rad'] * 6, 'policy_units': list(POLICY_UNITS),
                 'gripper_closed_rad': self.closed, 'gripper_open_rad': self.open,
                 'source': 'configured endpoints; default is existing hardware-percent mapper, legacy_unverified',
                 'measured_gripper_saturation_tolerance_fraction': .02,
                 'measured_state_saturations': self.saturated_states}
+        if self.measured_gripper_limits is not None:
+            result['measured_gripper_limits_rad']=list(self.measured_gripper_limits)
+            result['measured_gripper_saturation_tolerance_fraction']=None
+        return result
 
     @staticmethod
     def _array(value):
@@ -151,9 +162,13 @@ class RobotCoordinates:
 
     def to_policy(self, model_rad, measured=False):
         q = self._array(model_rad)
+        if measured and self.measured_gripper_limits is not None:
+            low,high=self.measured_gripper_limits
+            if np.any(q[...,5]<low-1e-6) or np.any(q[...,5]>high+1e-6):
+                raise ValueError(f'Measured gripper outside recorded model limits [{low}, {high}] rad; observed [{q[...,5].min()}, {q[...,5].max()}]')
         q[..., 5] = (q[..., 5] - self.closed) / (self.open - self.closed)
         tolerance = .02 if measured else 1e-6
-        if np.any(q[..., 5] < -tolerance) or np.any(q[..., 5] > 1 + tolerance):
+        if not (measured and self.measured_gripper_limits is not None) and (np.any(q[..., 5] < -tolerance) or np.any(q[..., 5] > 1 + tolerance)):
             raise ValueError('Gripper outside declared canonical endpoints')
         clipped = np.clip(q[..., 5], 0, 1)
         self.saturated_states += int(np.count_nonzero(clipped != q[..., 5])) if measured else 0

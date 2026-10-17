@@ -206,9 +206,42 @@ def test_datagen_ui_uses_identical_progress_for_both_backends(tmp_path,monkeypat
     panel.backend.setCurrentIndex(panel.backend.findData(backend))
     panel.active_stage='datagen';panel.busy=True
     root=session(tmp_path,monkeypatch,'datagen');bridge=module.current();panel.service.session=root
+    bridge.details['ik_solver']='pinocchio_dls'
     bridge.start_datagen(100,4);bridge.source_progress(1,14,'demo_1',88,440);bridge.status()
     panel.show();app.processEvents();panel.poll_preview()
     assert 'Source 검증 완료 1/14' in panel.task_state.text()
     assert '전체 성공 0/100' in panel.task_state.text() and 'Env 3: 대기' in panel.task_state.text()
     assert 'Source 사전 검증 중' in panel.status.text()
+    panel.resize(1440,1050);app.processEvents();panel.poll_preview();app.processEvents()
+    from PyQt6.QtCore import QRect,Qt
+    bounds=panel.task_state.fontMetrics().boundingRect(QRect(0,0,panel.task_state.width()-20,10000),
+        Qt.TextFlag.TextWordWrap,panel.task_state.text())
+    assert 'IK: pinocchio_dls' in panel.task_state.text()
+    assert panel.task_state.height()>=bounds.height()+16
     panel.busy=False;panel.close()
+
+
+def test_datagen_failure_reasons_and_frozen_completion_duration():
+    status={'target_successes':100,'successes':100,'attempts':108,'failures':5,
+        'target_completed_seconds':125.9,'wall_seconds':999.,
+        'failure_breakdown':{'grasp_failure':1,'drop_failure':2,'place_failure':2},
+        'env_status':{'0':{'state':'interrupted','attempts':27,'successes':24,'failures':{'drop_failure':2}}}}
+    text=module.datagen_status_text(status)
+    assert '목표 100개 저장 완료: 2분 05초' in text
+    assert '집기 실패: 1' in text and '이동 중 놓침: 2' in text and '컵 배치 실패: 2' in text
+    assert '실패 원인: 이동 중 놓침 2' in text
+    status.pop('target_completed_seconds');status['successes']=20;status['wall_seconds']=61
+    assert '이번 생성 경과: 1분 01초' in module.datagen_status_text(status)
+
+
+def test_training_status_text_reports_only_observed_metrics():
+    from soarm101_lab.workflow.presentation import training_status_text
+    row=dict(step=1200,target_steps=20000,samples=9600,loss=.4321,grad_norm=.765,
+        learning_rate=[1e-4,1e-5],dataloading_s=.1,preprocessing_s=.02,update_s=.3,seconds=.42,
+        peak_allocated_gib=1.64)
+    text=training_status_text(row)
+    assert 'step:1,200/20,000' in text and 'smpl:9,600' in text
+    assert 'lr:1.0e-04,1.0e-05' in text and 'updt_s:0.300' in text and 'data_s:0.100' in text
+    assert 'val:' not in text
+    row.update(validation_loss=.51,best_validation_loss=.48)
+    assert 'val:0.510' in training_status_text(row) and 'best_val:0.480' in training_status_text(row)

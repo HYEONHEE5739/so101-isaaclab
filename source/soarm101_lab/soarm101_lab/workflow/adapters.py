@@ -10,7 +10,7 @@ import torch
 
 from .dataset import as_pose7,cartesian_actions
 from .mimic import GenerationStopped,configuration
-from ..real2sim.workspaces.grasp import StableGrasp
+from ..real2sim.workspaces.grasp import StableGrasp, HOLD_SECONDS, RELATIVE_DRIFT_M
 from ..so101_joint_mapping import JOINTS
 
 
@@ -42,7 +42,7 @@ class EpisodeBuffer:
         self.metrics['video_enqueue_s']+=time.perf_counter()-t
         self.queue_peak=max(self.queue_peak,max((v._queue.qsize() for v in self.video.writers.values()),default=0))
         self.rows.append({'state':state,'joint_target':np.array(joints,copy=True),'eef_target':np.array(target,copy=True),
-            'grasp':bool(a.tracker.completed),'place':bool(a.place_success())})
+            'grasp':bool(a.tracker.completed),'place':bool(a.place_success()),'ik':a.last_ik})
 
     def finish(self,attrs):
         if not self.rows or self.video is None:raise ValueError('No completed episode frames')
@@ -57,6 +57,13 @@ class EpisodeBuffer:
                 'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
                     'object_pose':objects,'subtask_term_signals':{'grasp':np.array([r['grasp'] for r in self.rows],dtype=np.uint8)[:,None]}},
                 'camera_timestamps':{name:ts for name in a.camera_names}},'initial_state':self.initial}
+        if all(r.get('ik') is not None for r in self.rows):
+            values['ik']={key:np.asarray([r['ik'][key] for r in self.rows]) for key in
+                ('ik_converged','ik_candidate_applied','ik_held','ik_invalid_candidate','ik_invalid_command','ik_numerical_failure',
+                 'ik_position_error_mm','ik_orientation_error_deg','ik_success','ik_duration_ms','ik_iterations_or_evaluations','position_error_mm',
+                 'orientation_error_deg','joint_limit_violation','common_pose_passed','command_applied')}
+            values['ik']['candidate_joint_rad']=np.asarray([r['ik']['fitted_joint_rad'] for r in self.rows])
+            values['ik']['failure_reason']=np.asarray([r['ik']['failure_reason'].encode() for r in self.rows],dtype='S64')
         events={key:np.array([r[key] for r in self.rows],dtype=np.uint8)[:,None] for key in ('grasp','place')}
         if a.check_success():events['place'][-1]=1
         values['obs']['events']=events
@@ -91,7 +98,29 @@ class SimulationAdapter:
         self.buffer=EpisodeBuffer(self,output);self.recorder_manager=_RecorderProtocol(self)
         self.scene=SimpleNamespace(get_state=lambda is_relative=True:self.initial_state())
         self.obs_buf={};self.reset_count=0;self.step_index=0;self.pending_pose=None;self.metrics=defaultdict(float)
+        self.ik_solver="scipy_ls";self.ik_failure_policy="strict";self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
+        self.grasp_reference=None;self.grasp_command=None;self.release_commanded=False;self.loss_steps=0;self.drop_step=None
         self.tracker=StableGrasp(1/hz,workspace['profile']['objects'][workspace['task']['pick']]['dimensions_m'])
+
+    def configure_ik(self,solver,failure_policy="strict"):
+        from ..simulation.ik import validate_solver,validate_failure_policy
+        self.ik_solver=validate_solver(solver);self.ik_failure_policy=validate_failure_policy(failure_policy)
+
+    def record_ik(self,details):
+        self.last_ik=details
+        if details is None:return
+        increments={'ik_calls':1,'ik_s':details['duration_s'],'ik_residual_samples':int(details['position_error_mm'] is not None),
+            'ik_nonconverged':int(not details['ik_success']),
+            'ik_pose_failures':int(not details['common_pose_passed']),
+            'ik_position_error_mm_sum':details['position_error_mm'] or 0.,
+            'ik_candidate_applied':int(details.get('ik_candidate_applied',False)),
+            'ik_unconverged_applied':int(details.get('ik_candidate_applied',False) and details.get('ik_numerical_failure',False)),
+            'ik_held':int(details.get('ik_held',False)),
+            'ik_invalid_candidate':int(details.get('ik_invalid_candidate',False)),
+            'ik_invalid_command':int(details.get('ik_invalid_command',False)),
+            'ik_orientation_error_deg_sum':details['orientation_error_deg'] or 0.}
+        for key,value in increments.items():
+            self.metrics[key]+=value;self.ik_attempt[key]+=value
 
     def _check_stop(self):
         if self.stop.is_set():raise GenerationStopped()
@@ -116,12 +145,47 @@ class SimulationAdapter:
         s=self.state();ee=s['eef_pose'];obj=s['object_poses'][self.workspace['task']['pick']]
         rel=np.linalg.inv(ee)@obj;left,right=self.contacts()
         self.tracker.update(self.step_index,rel[:3,3],Rotation.from_matrix(rel[:3,:3]).as_quat(),ee[:3,3],obj[:3,3],left,right)
+        self._update_failure_evidence(rel[:3,3],left,right)
+        if self.pending_pose is not None:
+            from ..simulation.ik import pose_error
+            position,rotation=pose_error(ee,self.pending_pose)
+            for key,value in {'physics_tracking_samples':1,'physics_position_error_mm_sum':position*1000,
+                              'physics_orientation_error_deg_sum':float(np.degrees(rotation))}.items():
+                self.metrics[key]+=value;self.ik_attempt[key]+=value
+        if self.last_ik and self.last_ik.get('ik_numerical_failure'):
+            movement=float(np.linalg.norm(s['joint_pos'][:5]-np.asarray(self.last_ik['measured_joint_rad'])[:5]))
+            for key,value in {'ik_failed_physics_steps':1,'ik_failed_motion_rad_sum':movement}.items():
+                self.metrics[key]+=value;self.ik_attempt[key]+=value
+            if len(self.ik_motion_evidence)<8:
+                self.ik_motion_evidence.append({'step':self.step_index,'candidate_applied':self.last_ik['ik_candidate_applied'],
+                    'held':self.last_ik['ik_held'],'candidate':self.last_ik['fitted_joint_rad'],
+                    'measured_before':self.last_ik['measured_joint_rad'],'command':self.previous.tolist(),
+                    'measured_after':s['joint_pos'].tolist(),'motion_rad':movement})
         self.step_index+=1
 
     def check_success(self):return bool(self.place_success() and self.tracker.completed)
-    def failure_category(self):return 'grasp_failure' if not self.tracker.completed else 'place_failure'
+    def _update_failure_evidence(self,relative,left,right):
+        # Diagnostics only: do not change the latched grasp or place success gate.
+        if not self.tracker.completed:return
+        grip=float(self.previous[5])
+        if self.grasp_reference is None:
+            self.grasp_reference=np.asarray(relative).copy();self.grasp_command=grip
+        if grip>self.grasp_command+1e-4:self.release_commanded=True
+        separated=not (left or right) and np.linalg.norm(relative-self.grasp_reference)>RELATIVE_DRIFT_M
+        self.loss_steps=self.loss_steps+1 if separated and not self.release_commanded else 0
+        if self.loss_steps/self.hz>=HOLD_SECONDS and self.drop_step is None:self.drop_step=self.step_index
+
+    def failure_category(self):
+        if not self.tracker.completed:return 'grasp_failure'
+        return 'drop_failure' if self.drop_step is not None else 'place_failure'
+
+    def failure_diagnostics(self):
+        return dict(grasp_confirmed=bool(self.tracker.completed),release_commanded=self.release_commanded,
+                    drop_step=self.drop_step,contact_loss_steps=self.loss_steps,grasp=dict(self.tracker.details))
     def after_reset(self):
         self.reset_count+=1;self.step_index=0;self.pending_pose=None
+        self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
+        self.grasp_reference=None;self.grasp_command=None;self.release_commanded=False;self.loss_steps=0;self.drop_step=None
         self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.workspace['task']['pick']]['dimensions_m'])
         self.buffer.begin();self.obs_buf={}
         state=self.state()
@@ -188,8 +252,12 @@ class MujocoAdapter(SimulationAdapter):
         noise=float((action_noise_dict or {}).get('tool0',0.))
         pose=self.resolve_target(target_eef_pose_dict['tool0'],noise)
         grip=float(gripper_action_dict['tool0'].reshape(-1)[0]);self.pending_pose=pose
-        t=time.perf_counter();command=self.backend.solve_pose(self.base_workspace@pose,np.r_[self.previous[:5],grip])
-        self.metrics['ik_s']+=time.perf_counter()-t
+        measured=self.backend.data.qpos[self.backend.q_indices].copy()
+        arm=measured[:5] if self.ik_solver=='pinocchio_dls' else self.previous[:5]
+        self.backend.last_ik=None
+        try:command=self.backend.solve_pose(self.base_workspace@pose,np.r_[arm,grip],solver=self.ik_solver,
+            failure_policy=self.ik_failure_policy,measured=measured,previous_command=self.previous)
+        finally:self.record_ik(self.backend.last_ik)
         return torch.as_tensor(command,dtype=torch.float64)
 
     def step(self,actions):
@@ -266,11 +334,15 @@ class IsaacAdapter(SimulationAdapter):
 
     def target_eef_pose_to_action(self,target_eef_pose_dict,gripper_action_dict,action_noise_dict=None,env_id=0):
         self._check_stop();self._check_step_limit();pose=self.resolve_target(target_eef_pose_dict['tool0'],float((action_noise_dict or {}).get('tool0',0.)));self.pending_pose=pose
-        from ..simulation.ik import solve_pose,IKFailure
-        t=time.perf_counter();grip=float(gripper_action_dict['tool0'].reshape(-1)[0])
-        try:command,self.last_ik=solve_pose(self.kinematics.forward_kinematics,pose,np.r_[self.previous[:5],grip],self.limits)
+        from ..simulation.ik import solve_selected,IKFailure
+        grip=float(gripper_action_dict['tool0'].reshape(-1)[0])
+        measured=self.native.scene['robot'].data.joint_pos[self.index,self.ids].cpu().numpy().copy()
+        arm=measured[:5] if self.ik_solver=='pinocchio_dls' else self.previous[:5]
+        self.last_ik=None
+        try:command,self.last_ik=solve_selected(self.kinematics.forward_kinematics,pose,np.r_[arm,grip],self.limits,solver=self.ik_solver,kinematics=self.kinematics,
+            failure_policy=getattr(self,"ik_failure_policy","strict"),measured=measured,previous_command=self.previous)
         except IKFailure as exc:self.last_ik=exc.details;raise
-        finally:self.metrics['ik_s']+=time.perf_counter()-t
+        finally:self.record_ik(self.last_ik)
         return torch.as_tensor(command,dtype=torch.float64)
 
     def before_batch_step(self,command):self.buffer.append(command,self.pending_pose)

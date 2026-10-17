@@ -1,11 +1,56 @@
 # SO-101 Real2Sim Data Flow
 
+## 사용자 이름·저장 경로 — 2026-10-17
+
+새 Workflow 실행은 **저장 이름**을 실제 경로와 Registry `display_name`에 사용한다.
+단계별 이름을 자동 추천하며 수정할 수 있다. 한글/영문/숫자/밑줄/하이픈을 지원한다.
+이름은 100자·UTF-8 200바이트 이내이며 경로 구분자·점·공백·장치 예약 이름은 거절한다.
+`artifacts.output_location`이 UI 미리보기와 Operations 계획에 같은 파일/폴더 계약을 제공한다.
+
+```text
+outputs/workflow/
+  sources/<이름>/              # Isaac: source.hdf5 / MuJoCo: dataset.hdf5 등
+  annotations/<이름>/         # 공통 dataset.hdf5 + 상대 MP4
+  curation/filtered/<이름>.hdf5  # 과거 canonical이면 <이름>/ 폴더
+  curation/splits/<이름>/     # train.hdf5, val.hdf5, source_split.json
+  datagen/<이름>/             # dataset.hdf5 + 영상·생성 report
+  datasets/<이름>/            # LeRobot meta/Parquet/MP4
+  models/<이름>/              # 기존 trainer의 policy/ 또는 checkpoints/ 구조
+  evaluations/<이름>/         # 엔진별 report/기록; Replay·Hub receipt도 이곳
+  runs/<고유 Run ID>/         # request.json, state.json, process.log, presentation/
+  artifacts/<고유 ID>.json    # 데이터가 아닌 Registry 인덱스
+```
+
+필요한 폴더는 새 저장 시 생성한다. Worker에는 실제 결과 경로를 전달하고 request/state.plan.output에
+동일하게 기록한다. 직접 지정한 `output`은 유지한다. 저장 이름도 지정했다면 경로의 마지막 이름(파일은
+stem 또는 포함 폴더)과 일치해야 한다. 파일형 Source/Evaluation은 HDF5/JSON 확장자를 검사한다.
+기존 결과가 있으면 거절하고, 동시 실행은 저장 경계 옆의 배타적 예약 파일로 중복 사용을 차단한다.
+중단 결과도 삭제/덮어쓰지 않는다. DataGen/Source 이어 수집·MiniVLA Resume은 기존 입력과 **새 저장 이름**을
+선택한다. ACT/SmolVLA는 기존 Resume 출력 계약을 유지하며, 기본 Resume 위치는 미리보기에 표시한다.
+CLI에서 ACT/SmolVLA 재개의 새 이름을 지정하려면 일치하는 새 `output`도 명시해야 한다.
+강제 kill로 예약 파일이 남았다면 자동 삭제하지 않고 해당 파일에 기록된 Run의 종료 여부를 먼저 확인한다.
+
+새 Annotation은 지정한 위치에 등록하고 Source를 부모로 연결하여 원본을 보존한다.
+기존 명시적 `Registry.promote_annotation`의 검증·rollback API는 유지한다. Curation은 같은 저장 버튼으로
+선별 결과와 분할 결과를 각각 filtered/splits에 제안한다. 이름 입력 후 저장창에서 최종 경로를 고를 수 있다.
+Split의 Train/Val은 `<이름>_train`, `<이름>_val`로 따로 등록하며 기존 Hash/Inventory/Assignments를 사용한다.
+
+입력 선택기는 저장 이름·종류·Task로 좁히고 날짜/episode/partition/backend/짧은 ID를 표시한다.
+선택 내용의 실제 경로·부모 계보를 확인하고 **입력 폴더 열기**로 열 수 있다. 현재 단계에 호환되는 유형만
+선택할 수 있다. 등록 모델은 Resume과 Loss Graph 목록에서도 선택한다. 그래프는 현재 실행/선택 정책/
+Train 입력의 등록 모델에서 metrics.jsonl을 자동 탐색하고 수동 JSONL 선택도 유지한다.
+Checkpoint import는 모델의 상위 폴더 또는 Registry의 Run request에서 기록된 출력 관계를 검증한다.
+
+기존 runs 내부 결과는 이동/수정하지 않는다. 이름 없는 Registry 항목은 읽을 때 경로 기반 이름을 보여주며
+ID/Path/SHA256/Parent는 그대로 사용한다. `workflow.py run|ready --storage-name 이름`,
+`register --display-name 이름`도 같은 경계를 사용한다. 명시적 `worker --output` 경로는 그대로 유지한다.
+
 ## 통합 Episode 계약 — 2026-10-16
 
 새 Workspace Source / Annotation / DataGen은 두 엔진 모두 `so101.common-episode/2`를 사용한다.
 숫자·주석·메타데이터는 HDF5, 영상은 상대 경로로 연결한 Side/Wrist **640×480 H.264 MP4**다.
 Backend는 `data.attrs.env_args.backend`에 기록하며, 좌표·모델 계약은 원본을 상속한다.
-기존 Canonical NPY+MP4와 Isaac HDF5는 계속 읽는다. Workflow가 필요한 Legacy 입력을 새 run에
+기존 Canonical NPY+MP4와 Isaac HDF5는 계속 읽는다. Workflow가 필요한 Legacy 입력을 새 결과 폴더에
 자동 Import하므로 엔진을 바꾸기 위해 사용자가 파일을 수동 변환할 필요가 없다.
 
 ```text
@@ -20,6 +65,45 @@ Backend는 `data.attrs.env_args.backend`에 기록하며, 좌표·모델 계약�
 `workflow.dataset.EpisodeDataset` / `DatasetWriter` / `validate_dataset`가 계약을 담당한다.
 Curation의 기존 `EpisodeReader`는 같은 HDF5 키와 external video resolver를 읽으며,
 전체 RGB를 RAM에 적재하지 않는다. 영상·숫자 복제는 Import/선택 저장/새 결과 작성 시에만 수행한다.
+
+### DataGen IK 선택
+
+기존 SettingsForm의 DataGen `IK Solver`에서 `scipy_ls`(기본) / `pinocchio_dls`를 선택한다.
+MuJoCo와 Isaac 모두 같은 옵션을 사용한다. UI 드롭다운 자체가 `options.ik_solver`의 편집기이며
+별도의 JSON 덮어쓰기는 없다. 실행 중/완료 상태에도 선택값이 표시된다.
+공통 CLI `workflow.py worker --backend mujoco|isaac --stage datagen ... --ik-solver pinocchio_dls`를
+사용할 수 있다. `--ik-solver`가 `--options` JSON보다 우선하며, immutable `--request` 사용 시에는
+request의 options 안에 설정해야 한다. Workspace Isaac CLI는 `--ik_solver`를 받는다.
+잘못된 이름은 엔진 초기화 전에 거부한다. Source를 자동 물리 재생하는 단계는 추가하지 않는다.
+
+`Mimic → Adapter → simulation.ik.solve_selected → 기존 solve_pose / SO101Kinematics.inverse_kinematics`
+순으로 실행한다. 기존 두 계산 본문과 공식 Mimic은 변경하지 않는다. DLS는 원래 Isaac 설정
+(position/orientation weight 1/.01, 200 iterations, tolerance .001, damping .001, step .3)이다.
+MuJoCo world 목표를 기록된 robot base로 변환하고, 기록된 simulation model의 URDF를 사용한다.
+관절 영점은 URDF/MJCF에 이미 반영되므로 별도 보정을 더하지 않는다. Pinocchio Model/Data는 worker별 소유다.
+
+SciPy는 이전 명령, DLS는 측정 관절에서 시작한다. 별도 `IK Failure Policy`는 기본 `strict`이며
+`hold` / `best_effort`를 선택할 수 있다. Strict는 기존 SciPy 3 mm / .12 rad 탈락, DLS native 미수렴 hold를
+보존한다. Hold는 native 미수렴 또는 pose 오차 초과 시 측정 팔 각도를 유지하고 다음 목표로 진행한다.
+Best Effort는 수렴 여부와 무관하게 유효한 candidate를 적용하고 실제 grasp/place로 최종 성공을 판단한다.
+SciPy의 `reject_on_error=False`는 candidate 반환만 허용하며 least_squares 수치 알고리즘은 그대로다.
+
+공통 candidate의 5축 순서·finite·관절 제한을 검사하고 gripper는 원래 명령을 유지한다.
+Hold/Best Effort는 이전 팔 명령 대비 어느 관절이든 1 step에 0.5 rad를 넘으면 attempt를 중단한다.
+이 값은 급격한 명령을 검출하는 고정 기준이며 Strict에서는 기존 동작 보존을 위해 진단만 기록한다.
+잘못된 candidate나 제한 밖의 measured hold는 적용하지 않는다. clipping/solver fallback/제한 완화는 없다.
+CLI는 `--ik-failure-policy best_effort`, Workspace Isaac CLI는 `--ik_failure_policy best_effort`다.
+UI → options → worker → Adapter.configure_ik → solve_selected → 기존 physics 경로를 사용한다.
+
+`generation_configuration`, report/attempts와 episode attrs에 solver/config 및 `ik_failure_policy`,
+`ik_policy_configuration`을 기록한다. optional `ik/*`에는 `ik_converged`, candidate 위치(mm)/방향(deg) 오차,
+`ik_candidate_applied`, `ik_held`, `ik_invalid_candidate`, 시간(ms)과 실패 이유를 저장한다.
+Native 수렴과 `common_pose_passed`는 독립이다. `ik_unconverged_applied` 집계는 native 실패 **또는** pose gate
+실패 후보의 적용 수다. invalid candidate와 invalid hold command도 별도 집계한다. 실패 시도는 attempts에 남는다.
+`ik_motion_evidence`는 시도당 최대 8개의 실패 시점 candidate/실제 명령/물리 전후 측정을 기록한다.
+물리 추종 오차와 candidate 오차는 구분하며 기존 grasp/place 성공 조건을 바꾸지 않는다.
+Resume은 solver·policy·설정 불일치를 복사 전에 거부한다. 옛 생략값은 SciPy/Strict로 해석한다.
+실제 비교 및 변환 검사는 `outputs/workflow_validation/ik_failure_policy/REPORT.md`에 있다.
 
 ### 키·단위·시점
 
@@ -117,6 +201,11 @@ Workflow에서 입력과 실행 Backend를 선택하고 성공 데이터 수, �
 두 엔진의 DataGen 진행 UI는 같은 `Presentation`의 Scheduler provider와 `datagen_status_text`를 사용한다.
 환경 준비/생성을 표시하며, 전체 성공/목표·시도·실패·성공률과 환경별 상태/시도/성공/실패/step,
 최근 결과의 환경 번호를 표시한다. DataGen에는 Source 사전 재생 단계가 없다.
+실패 원인은 전체/환경별 집기 실패·이동 중 놓침·컵 배치 실패 및 IK/계획/저장 오류로 표시한다.
+놓침은 안정 집기 확인 뒤 release 명령 전에 양 접촉 소실+상대 위치6mm 이탈이0.2초 지속된 진단이다.
+기존 성공 조건은 그대로이며 attempts의 failure_diagnostics로 판정 증거를 확인한다.
+생성 경과는 wall_seconds, 목표 저장 완료 시간은 마지막 성공 commit 시 고정한 target_completed_seconds다.
+분·초로 표시하며 환경 준비 제외/일시정지 포함, Resume이면 이번 실행 구간만 표시한다.
 종료/일시정지에서도 provider의 최신 snapshot을 반영한다. 성공0개에서 사용자 중지는 STOPPED이며 빈 artifact를 등록하지 않는다.
 
 ```bash
@@ -141,6 +230,22 @@ ACT/MiniVLA는 기존 관측/6D action/정규화/체크포인트를 사용한다
 state/action trace를 보존한다. 기존 배치 성공 조건과 안정 집기 측정은 별도 필드다. 미완성 평가는
 정식 episode로 저장하지 않는다. Legacy 단일 camera/review scene과 실제 로봇 평가 경로는 유지한다.
 검증 보고서: `outputs/workflow_validation/unified_mimic/REPORT.md`.
+
+## MiniVLA Train/Val과 학습 기록 — 2026-10-17
+
+Registry의 Train/Validation LeRobot 입력→`episodes.validate_training_inputs`(메타데이터 사전검사)→
+`mujoco.train_from_lerobot`(기존 Parquet/MP4를 읽는 작은 index)→train-only 통계→기존 MiniVLA trainer로 이어진다.
+검증된 Source Partition/Lineage를 최우선 사용하며 Train 전용 데이터를 다시 나누지 않는다. 일반 UI에
+`source_groups` 입력은 없고 기록과 충돌하는 매핑은 거절한다. Partition 없는 Legacy는 검증된 독립 Group과
+고급 호환 옵션이 있어야 기존 `split_episodes`를 사용할 수 있다. Val 준비 경로와 UI 사용법은
+[MiniVLA 통합](MINIVLA_INTEGRATION.md#minivla-학습-화면과-체크포인트--2026-10-17)을 참조한다.
+
+일정 설정은 체크된 UI 값→사용자 JSON→기본 JSON 순서다. MiniVLA UI 초기값50k/검증1k/저장2.5k,
+Early Stopping OFF이며 기존 ACT/SmolVLA 설정과 분리한다. 매 step train loss, 검증 시에만 val loss를 기록한다.
+검증은 episode당 최대8개의 고정 시점 평균을 episode별 동일 가중 평균한다. 실제 표본 수는
+`validation_protocol.json`에 남긴다. 저장 주기는 검증과 독립이며 번호별/best/last를 보존한다.
+Resume은 원본 모델·통계·양쪽 dataset identity를 검사하고 새 출력에 저장한다. Sim 평가의 명시적
+체크포인트 파일 선택과 실제 step을 두 엔진의 결과에 기록한다. 모델·손실·전처리·Mimic 본문은 유지한다.
 
 ## 관련 계약과 이력
 

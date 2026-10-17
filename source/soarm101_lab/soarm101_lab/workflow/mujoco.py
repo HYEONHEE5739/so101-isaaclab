@@ -2,13 +2,14 @@
 import json
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import time
 
 import numpy as np
 
 from ..simulation.mujoco_backend import PolicyEnvironment
-from .episodes import grasp_tracker, subtask_signals
+from .episodes import grasp_tracker, subtask_signals, validate_training_inputs, training_coordinates
 from .operations import mujoco_request, MODEL_ROOT, ROOT
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import load, metadata
@@ -52,6 +53,7 @@ def _environment(request, output, coordinates=None, hz=None):
                               width=options.get('width', RGB_WIDTH), height=options.get('height', RGB_HEIGHT),
                               closed_rad=coords.get('gripper_closed_rad', options.get('gripper_closed_rad')),
                               open_rad=coords.get('gripper_open_rad', options.get('gripper_open_rad')),
+                              measured_gripper_limits=coords.get('measured_gripper_limits_rad'),
                               task_definition=options.get('task_definition'),
                               full_workspace=options.get('full_workspace', True),
                               viewer=options.get('mode') == 'developer', physics_profile=physics_profile,
@@ -262,11 +264,8 @@ def train(request, output):
         model = Path(request['options'].get('resume_output', output / 'policy'))
         train_lerobot(artifact, request['options'], model)
         return {'passed': True, 'checkpoint': str(model / 'checkpoints/last/pretrained_model')}
-    cfg = MiniVLAConfig.load(request['config'])
-    if 'steps' in request['options']:
-        cfg.steps = int(request['options']['steps'])
-        if cfg.steps < 1:
-            raise ValueError('Positive training steps required')
+    from ..learning.minivla.config import training_config
+    cfg=training_config(request['config'],request['options'])
     stats_path = dataset / 'statistics.json'
     stats = json.loads(stats_path.read_text())
     manifest = json.loads((dataset / 'manifest.json').read_text())
@@ -288,13 +287,19 @@ def train(request, output):
         if resume.is_dir(): resume = resume / 'last.pt'
         argv += ['--resume', str(resume)]
     from ..real2sim.launcher import worker_environment
-    subprocess.run(argv, cwd=ROOT, env=worker_environment(ROOT), check=True)
+    # The process group sends SIGINT to both this worker and its trainer. Let the
+    # trainer complete its atomic step/save before attaching policy provenance.
+    previous_sigint=signal.signal(signal.SIGINT,lambda signum,frame:None)
+    try:
+        subprocess.run(argv, cwd=ROOT, env=worker_environment(ROOT), check=True)
+    finally:
+        signal.signal(signal.SIGINT,previous_sigint)
     if fingerprint(dataset) != identity:
         raise ValueError('Training dataset changed during the run')
     from ..learning.minivla.data import lerobot_storages
     if any(fingerprint(st['root'])!=st['sha256'] for st in lerobot_storages(manifest)):
         raise ValueError('LeRobot dataset changed during the run')
-    if not (model / 'best.pt').is_file() or not (model / 'last.pt').is_file():
+    if not (model / 'last.pt').is_file():
         raise ValueError('Model trainer did not produce complete checkpoints')
     import xml.etree.ElementTree as ET
     from ..so101_joint_mapping import JOINTS
@@ -309,7 +314,8 @@ def train(request, output):
     from ..so101_dataset_contract import write_contract, JOINT_SPACE
     from ..real2sim.workspaces.demo import coordinate_contract
     write_contract(model, {**provenance.get('coordinate_contract', coordinate_contract(workspace)), 'action_space': JOINT_SPACE})
-    return {'passed': True, 'checkpoint': str(model / 'best.pt'), 'model': 'custom_so101_minivla'}
+    return {'passed': True, 'checkpoint': str(model / ('best.pt' if (model/'best.pt').is_file() else 'last.pt')), 'model': 'custom_so101_minivla',
+            'stopped':json.loads((model/'training_status.json').read_text()).get('stopped',False) if (model/'training_status.json').is_file() else False}
 
 
 def _lerobot_index(artifact,options,prefix=''):
@@ -327,7 +333,7 @@ def _lerobot_index(artifact,options,prefix=''):
     if coordinate_contract!=read_contract(root) or coordinate_contract['action_space']!=JOINT_SPACE:
         raise ValueError('LeRobot training requires unchanged model-radian coordinates')
     endpoints=provenance.get('canonical_coordinates') or {}
-    coords = RobotCoordinates(endpoints.get('gripper_closed_rad'),endpoints.get('gripper_open_rad'))
+    coords = training_coordinates(artifact,options.get('workspace'))
     manifest = {'schema_version': 1, 'joint_names': list(coords.metadata()['joint_order']),
         'units': ['rad'] * 5 + ['fraction'], 'control_hz': info['fps'],
         'action_semantics': 'absolute_target_after_observation', 'episodes': [],
@@ -339,7 +345,9 @@ def _lerobot_index(artifact,options,prefix=''):
         'camera_keys':{k.removeprefix('observation.images.').removesuffix('_cam'):k for k in info['features'] if k.startswith('observation.images.')},
         'decode':'torchcodec_cpu_exact','num_workers':0,'decoder_cache_limit':2,'rgb_cache_frames':8,'rgb_cache_bytes':16*2**20}
     # Converted generated variants need explicit source groups, never random frame splitting.
-    source_groups = options.get('source_groups') or provenance.get('source_groups', {})
+    source_groups = provenance.get('source_groups', {})
+    if options.get('source_groups') and options['source_groups']!=source_groups:
+        raise ValueError('수동 Source Group은 기록된 원본 계보를 대체할 수 없습니다. 근거 없는 Group 매핑은 거부합니다.')
     source_tasks = {str(e['episode_index']):e.get('task_definition') for e in provenance.get('episodes',[])}
     partition=provenance.get('source_partition')
     if partition:
@@ -368,6 +376,7 @@ def _lerobot_index(artifact,options,prefix=''):
     return manifest,coords
 
 
+
 def train_from_lerobot(artifact, options, output):
     """Publish small index/statistics only; Episodes reads original Parquet/MP4 lazily."""
     from .episodes import split_episodes
@@ -385,11 +394,14 @@ def train_from_lerobot(artifact, options, output):
         validation=options.get('validation_artifact');saved=previous.get('validation_source')
         if validation and (not saved or Path(validation['path']).resolve()!=Path(saved['path']).resolve() or fingerprint(validation['path'])!=saved['sha256']):
             raise ValueError('Resume Validation dataset differs from the original Source Partition')
+        output.mkdir(parents=True,exist_ok=False)
+        destination=output/'policy'
         request = {'input': str(prepared), 'workspace': options['workspace'],
-                   'config': str(model / 'config.json'), 'options': {**options, 'resume_output': str(model)}}
+                   'config': str(model / 'config.json'), 'options': {**options, 'resume_output': str(destination)}}
         result = train(request, output)
-        atomic(model / 'project_provenance.json', {**_provenance(model), 'lerobot_source_dataset': str(root.resolve())})
+        atomic(destination / 'project_provenance.json', {**_provenance(destination), 'lerobot_source_dataset': str(root.resolve())})
         return result
+    validate_training_inputs(artifact,options)
     manifest,coords=_lerobot_index(artifact,options)
     provenance=artifact.get('provenance',{});source_identity=fingerprint(root)
     validation=options.get('validation_artifact')
@@ -448,11 +460,13 @@ def rollout(request, output, publish, bridge, policy_factory=None):
     checkpoint = Path(request['checkpoint'])
     if checkpoint.is_dir():
         return rollout_lerobot(request, output, publish, bridge)
-    provenance = _provenance(checkpoint.parent)
+    from .policy import minivla_root
+    provenance = _provenance(minivla_root(checkpoint))
     _verify_workspace(request, provenance)
     policy = (policy_factory or MiniVLA)(checkpoint)
     rows = []
     options = request['options']
+    atomic(output/'selected_checkpoint.json',{'path':str(checkpoint.resolve()),'step':getattr(policy,'checkpoint_step',None)})
     from .tasks import object_metrics,evaluation_distribution
     if int(options.get('episodes', 1)) < 1 or int(options.get('max_steps', 300)) < 1:
         raise ValueError('Positive rollout episodes/max_steps required')
@@ -468,7 +482,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
             env.reset(options.get('seed', 0) + episode)
             guard.reset()
             tracker = grasp_tracker(env)
-            recorder=evaluation_recorder(env.backend,env.backend.workspace,'mujoco',checkpoint.parent,
+            recorder=evaluation_recorder(env.backend,env.backend.workspace,'mujoco',checkpoint,
                 output/f'evaluation_{episode:04d}.hdf5',env.hz,options.get('seed',0)+episode,recordings)
             remaining, trace = [], []
             metric_state = {};active=env.backend.workspace['task']['dynamic'];pick=env.backend.metadata['pick']
@@ -512,7 +526,8 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                     outcome_reason='컵 안 정지 조건 충족' if row['success'] else '최대 step 도달 · 컵 안 정지 조건 미충족')
                 bridge.status()
             atomic(output / f'episode_{episode:04d}.json', {'summary': row, 'trace': trace})
-        return {'passed': True, 'episodes': rows, 'success_rate': sum(r['success'] for r in rows) / len(rows),
+        return {'passed': True, 'checkpoint_path':str(checkpoint.resolve()),
+                'checkpoint_step':getattr(policy,'checkpoint_step',None), 'episodes': rows, 'success_rate': sum(r['success'] for r in rows) / len(rows),
                 'scope': 'synchronous simulated rollout; passed means execution validation, not task success',
                 'coordinates': env.coordinates.metadata(), 'scene': env.backend.metadata,
                 'scene_configuration':env.backend.metadata.get('scene_configuration'),
@@ -599,7 +614,8 @@ def execute(request):
     output = Path(request['output']).resolve()
     if request.get('workspace') and output.is_relative_to(Path(request['workspace']).resolve()):
         raise ValueError('Output must be outside immutable workspace')
-    output.mkdir(parents=True, exist_ok=False)
+    from .artifacts import resumes_in_place
+    output.mkdir(parents=True, exist_ok=resumes_in_place(request['stage'],request['options'],output))
     from .presentation import current
     bridge = current()
 

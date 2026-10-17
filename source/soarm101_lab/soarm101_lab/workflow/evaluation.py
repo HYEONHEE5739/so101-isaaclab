@@ -6,7 +6,7 @@ from pathlib import Path
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import load, metadata
 from ..real2sim.workspaces.demo import coordinate_contract
-from .policy import load_policy, observation
+from .policy import load_policy, observation, minivla_root
 
 
 class EvaluationRecorder:
@@ -23,11 +23,18 @@ class EvaluationRecorder:
         else:
             self.adapter = MujocoAdapter(native, hz, Path(output).parent, seed, threading.Event())
         self.adapter.workspace = workspace
-        contract = {**read_contract(checkpoint), 'action_space': MIMIC_SPACE}
+        contract = {**read_contract(minivla_root(checkpoint)), 'action_space': MIMIC_SPACE}
+        from ..so101_joint_mapping import RobotCoordinates
+        mapping=contract['mapping']
+        coordinates=RobotCoordinates(mapping['gripper_zero_offset_rad'],
+            mapping['gripper_zero_offset_rad']+100*mapping['gripper_rad_per_percent']).metadata()
+        policy_provenance=minivla_root(checkpoint)/'project_provenance.json'
+        if policy_provenance.is_file():
+            coordinates=json.loads(policy_provenance.read_text()).get('coordinates',coordinates)
         definition = selected(workspace)
         scene = configured(workspace, definition, workspace['task']['dynamic'], backend)['scene_configuration']
         provenance = {'backend': backend, 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
-            'coordinate_contract': contract, 'scene_configuration': scene,
+            'coordinate_contract': contract, 'coordinates':coordinates, 'scene_configuration': scene,
             'scene': {'task_definition': definition, 'pick': workspace['task']['pick'],
                 'target': workspace['task']['place'], 'dynamic_objects': workspace['task']['dynamic']}}
         args = recording_args(provenance, {'control_hz': hz})
@@ -138,7 +145,12 @@ def evaluate(request):
             remote = json.loads(Path(path).read_text())
             from huggingface_hub import snapshot_download
             path = snapshot_download(repo_id=remote['repo_id'], revision=remote['commit'])
+        if opts.get('checkpoint_file'):
+            from .policy import selected_minivla_checkpoint
+            path=str(selected_minivla_checkpoint(path,opts['checkpoint_file']))
         policy, pre, post = load_policy(path, coordinate_contract(w), device)
+        if hasattr(policy,'policy') and hasattr(policy.policy,'checkpoint_step'):
+            atomic(Path(request['output']).with_suffix('')/'selected_checkpoint.json',{'path':path,'step':policy.policy.checkpoint_step})
         from .tasks import catalog, selected, validate, configured, active_objects, object_metrics, evaluation_distribution
         active = active_objects(w,opts.get('active_object_ids'))
         definitions = [t for t in catalog(w) if t['pick_object_id'] in active] if opts.get('task_scope') == 'all' else opts.get('tasks') or [selected(w)]
@@ -153,7 +165,7 @@ def evaluate(request):
             used_seed = evaluation_seed(opts)
             from ..so101_dataset_contract import read_contract
             cfg = make_config(w['root'], device, task_definition=definitions[0],
-                              coordinates=read_contract(path), active_object_ids=active)
+                              coordinates=read_contract(minivla_root(path)), active_object_ids=active)
             cfg.seed = used_seed
             cfg.events.reset_episode.params['randomization_seed'] = used_seed
             print(f"[WORKFLOW] Sim 평가 seed={used_seed} ({opts.get('eval_seed_mode', 'fixed')})", flush=True)
@@ -250,7 +262,7 @@ def evaluate(request):
                 mapper = getattr(follower, 'precision_mapper', None)
                 from ..real2sim.precision import require_hardware_policy_frame
                 from ..so101_dataset_contract import read_contract
-                require_hardware_policy_frame(read_contract(path), w['profile'], mapper)
+                require_hardware_policy_frame(read_contract(minivla_root(path)), w['profile'], mapper)
                 held, _ = follower.read()
                 held_q = real_observation({n+'.pos':v for n,v in held.items()},mapper)
                 (mapper or DEFAULT_MAPPER).urdf_to_calibrated(dict(zip(JOINTS,held_q.tolist())))
@@ -302,9 +314,10 @@ def evaluate(request):
                 print(f"[WORKFLOW] 평가 완료 · {definition['task_id']} · 성공 {wins}/{len(subset)} · 성공률 {100*wins/len(subset):.1f}%", flush=True)
         atomic(request['output'], {'status': 'SUCCEEDED', 'mode': stage, 'workspace': metadata(w),
                'scene_configuration':configured(w,definitions[0],active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'],
-               'simulation_configuration':cfg.simulation_configuration if stage=='sim_eval' else read_contract(path).get('simulation_model'),
+               'simulation_configuration':cfg.simulation_configuration if stage=='sim_eval' else read_contract(minivla_root(path)).get('simulation_model'),
                'scene_configurations':[configured(w,d,active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'] for d in definitions],
-               **evaluation_distribution(artifact,w,active), 'policy_artifact': artifact['id'], 'task_definitions': definitions, 'evaluation_seed': used_seed,
+               **evaluation_distribution(artifact,w,active), 'policy_artifact': artifact['id'], 'checkpoint_path': str(path),
+               'checkpoint_step': getattr(getattr(policy,'policy',None),'checkpoint_step',None), 'task_definitions': definitions, 'evaluation_seed': used_seed,
                'hardware_mapping': follower.metadata.get('precision_mapping') if stage == 'real_eval' else None,
                'metrics_per_task': evaluation_metrics(definitions, rows, stage == 'sim_eval'), 'episodes' if stage == 'sim_eval' else 'steps': rows,
                'task_success': 'simulation geometric condition' if stage == 'sim_eval' else 'unmeasured; human review required'})

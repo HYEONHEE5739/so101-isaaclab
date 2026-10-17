@@ -119,9 +119,9 @@ def test_model_specific_options_are_isolated_and_preserved(panel):
     assert 'model_config' not in panel.options.editors
     assert 'source_groups' not in panel.options.editors
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
-    assert set(panel.options.editors) == {'model_config', 'source_groups', 'steps', 'output'}
+    assert set(panel.options.editors) == {'model_config','batch_size','steps','val_every','save_freq','early_stopping','patience','legacy_group_split','output'}
     assert not hasattr(panel, "minivla_head")
-    assert 'batch_size' not in panel.stage_options()
+    assert panel.stage_options()['batch_size']==8
     opts = panel.stage_options()
     from pathlib import Path
     assert json.loads(Path(opts['model_config']).read_text())['layers'] == 4
@@ -156,7 +156,7 @@ def test_minivla_custom_json_overrides_head_preset_and_drops_foreign_options(pan
     panel.options.setPlainText(json.dumps({'model_config': config, 'batch_size': 999, 'base_model': 'unused'}))
     opts = panel.stage_options()
     assert opts['model_config'] == config and not hasattr(panel, "minivla_head")
-    assert 'batch_size' not in opts and 'base_model' not in opts
+    assert opts['batch_size']==999 and 'base_model' not in opts
 
 
 @pytest.mark.parametrize('backend', ['isaac', 'mujoco'])
@@ -187,11 +187,14 @@ def test_source_uses_common_execution_and_keyboard(panel, tmp_path, backend):
 @pytest.mark.parametrize('architecture', ['act', 'smolvla', 'minivla'])
 def test_lerobot_training_is_independent_of_selected_engine(panel, tmp_path, monkeypatch, backend, architecture):
     from soarm101_lab.workflow import operations
+    from soarm101_lab.workflow import episodes
     from soarm101_lab.workflow.tasks import selected
     from soarm101_lab.so101_dataset_contract import JOINT_SPACE
     monkeypatch.setattr(operations, 'require_compatible', lambda *args: None)
     monkeypatch.setattr(operations, 'coordinate_contract', lambda *args: {'action_space': JOINT_SPACE})
     monkeypatch.setattr(panel.registry, 'verify', lambda *args: None)
+    # This routing fixture has no dataset bytes; lineage is covered by partition tests.
+    monkeypatch.setattr(episodes,'validate_training_inputs',lambda *args:None)
     w = operations.load('fixture')
     artifact = {'id': 'dataset', 'type': 'dataset', 'path': str(tmp_path / 'lerobot'),
         'format': {'codebase_version': 'v3.0'}, 'workspace': operations.metadata(w),

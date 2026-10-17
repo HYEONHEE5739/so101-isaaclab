@@ -11,7 +11,8 @@ class MiniVLA:
     def __init__(self, checkpoint):
         ck=torch.load(checkpoint,map_location='cpu',weights_only=True)
         require_architecture(ck)
-        self.cfg=MiniVLAConfig(**ck['config']); self.control_hz=ck['control_hz']
+        self.checkpoint_path=str(checkpoint);self.checkpoint_step=ck['step']
+        self.cfg=MiniVLAConfig.from_dict(ck['config']); self.control_hz=ck['control_hz']
         from .backbone import QwenBackbone
         self.backbone=QwenBackbone(self.cfg); restore_adapter(self.backbone,ck['adapter'])
         self.head=ActionHead(self.cfg).to('cuda:0'); self.head.load_state_dict(ck['head'])

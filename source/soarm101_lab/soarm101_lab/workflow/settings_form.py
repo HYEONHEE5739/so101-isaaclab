@@ -3,10 +3,10 @@ import json
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                              QLineEdit, QSpinBox, QComboBox, QToolButton, QPushButton, QTableWidget,
-                             QTableWidgetItem, QHeaderView)
+                             QTableWidgetItem, QHeaderView, QFileDialog)
 from .option_help import FIELDS, KEYS
 
-LABELS = {'steps': '총 학습 step', 'batch_size': 'Batch 크기', 'num_workers': '데이터 로더 workers',
+LABELS = {'val_every':'검증 간격 (step)','early_stopping':'Early Stopping','patience':'조기 종료 Patience','legacy_group_split':'Legacy 단일 데이터 Group 분리','ik_failure_policy': 'IK Failure Policy', 'ik_solver': 'IK Solver', 'steps': '총 학습 step', 'batch_size': 'Batch 크기', 'num_workers': '데이터 로더 workers',
           'num_envs': '동시 생성 환경 수', 'max_attempts': '전체 최대 시도 수',
           'save_freq': '체크포인트 저장 간격', 'num_successful_demos': '목표 성공 데이터 수',
           'episodes': 'Task당 평가 에피소드', 'max_steps': '에피소드 최대 step',
@@ -40,18 +40,29 @@ class SettingsForm(QWidget):
         while self.layout_.count():
             item = self.layout_.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
         self.editors = {}
         keys = [k for k in KEYS[self.stage] if k != 'architecture']
         if getattr(self, 'allowed_keys', None) is not None:
             keys = [k for k in keys if k in self.allowed_keys]
         self.extra = {k: v for k, v in values.items() if k not in keys}
+        advanced_layout=None
+        if getattr(self,'minivla',False):
+            from ..learning.minivla.config import MODEL_ROOT
+            note=QLabel('기본 모델 설정: '+str(MODEL_ROOT/'configs/default.json')+'\n체크한 학습 값 > 선택한 JSON > 기본 JSON. 체크를 해제하면 JSON 값을 사용합니다.\nValidation: episode당 최대 8개 고정 시점 평균. 실제 loss만 기록합니다.');note.setWordWrap(True);self.layout_.addWidget(note)
+            toggle=QToolButton();toggle.setText('고급 모델 설정 / Legacy 호환');toggle.setCheckable(True)
+            advanced=QWidget();advanced_layout=QVBoxLayout(advanced);advanced.hide();toggle.toggled.connect(advanced.setVisible)
+            self.layout_.addWidget(toggle);self.layout_.addWidget(advanced)
         for key in keys:
             kind, default, description = FIELDS[key]
+            if key=='batch_size' and getattr(self,'minivla',False):
+                default=8
+                description='한 번의 Forward/Backward와 optimizer 업데이트에 묶는 샘플 수. 신규 학습 기본 8, Accumulation 1입니다. Resume은 저장된 Batch/Accumulation을 유지합니다. OOM이면 실패하며 자동 축소·재시도하지 않습니다.'
             card = QWidget(); card.setObjectName('settingCard'); card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             box = QVBoxLayout(card)
             row = QHBoxLayout(); box.addLayout(row)
-            enabled = QCheckBox(LABELS.get(key, key))
+            enabled = QCheckBox('Batch Size' if key=='batch_size' and getattr(self,'minivla',False) else LABELS.get(key, key))
             enabled.setToolTip(key)
             enabled.setChecked(key in values)
             row.addWidget(enabled, 1)
@@ -60,7 +71,16 @@ class SettingsForm(QWidget):
             help_label = QLabel(description); help_label.setWordWrap(True); help_label.hide()
             help_button.toggled.connect(help_label.setVisible)
             value = values.get(key, default)
-            if kind == '환경 수':
+            if kind in ('IK Solver','IK Failure Policy'):
+                from ..simulation.ik import validate_solver,validate_failure_policy
+                (validate_solver if kind=="IK Solver" else validate_failure_policy)(value)
+                enabled.setChecked(True);enabled.setEnabled(False)
+                editor=QComboBox()
+                choices=[('SciPy Least Squares (현재 방식)','scipy_ls'),('Pinocchio DLS (기존 Isaac 방식)','pinocchio_dls')] if kind=='IK Solver' else [('Strict','strict'),('Hold (측정 자세 유지)','hold'),('Best Effort (유효한 candidate 적용)','best_effort')]
+                for label,data in choices:editor.addItem(label,data)
+                editor.setCurrentIndex(editor.findData(value))
+                editor.currentIndexChanged.connect(self.textChanged)
+            elif kind == '환경 수':
                 editor = QComboBox()
                 for count in (1, 2, 4, 8): editor.addItem(str(count), count)
                 editor.setCurrentIndex(editor.findData(value))
@@ -96,11 +116,17 @@ class SettingsForm(QWidget):
                 if value is None:
                     editor.setPlaceholderText('자동 기본값 사용 · 지정하려면 위 항목 체크')
                 editor.textChanged.connect(self.textChanged)
+            if key=='model_config':
+                browse=QPushButton('설정 JSON 선택');box.addWidget(browse)
+                def select_config(_,e=editor,c=enabled):
+                    path=QFileDialog.getOpenFileName(self,'MiniVLA 설정 JSON','','JSON (*.json)')[0]
+                    if path:c.setChecked(True);e.setText(path)
+                browse.clicked.connect(select_config)
             editor.setEnabled(enabled.isChecked())
             enabled.toggled.connect(editor.setEnabled)
             enabled.toggled.connect(self.textChanged)
             box.addWidget(editor); box.addWidget(help_label)
-            self.layout_.addWidget(card)
+            (advanced_layout if advanced_layout is not None and key in ('model_config','patience','legacy_group_split') else self.layout_).addWidget(card)
             self.editors[key] = enabled, editor, kind
         self.textChanged.emit()
 
@@ -111,7 +137,7 @@ class SettingsForm(QWidget):
         for key, (enabled, editor, kind) in self.editors.items():
             if not enabled.isChecked():
                 continue
-            if kind == '환경 수':
+            if kind in ('환경 수','IK Solver','IK Failure Policy'):
                 value = editor.currentData()
             elif kind == '정수':
                 value = editor.value()

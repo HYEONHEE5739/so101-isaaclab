@@ -14,6 +14,27 @@ from ..real2sim.storage import atomic
 SESSION_ENV = 'SO101_WORKFLOW_SESSION'
 
 
+def training_status_text(row):
+    """Compact LeRobot-style display; structured measurements remain in JSONL."""
+    step=row['step'];target=row.get('target_steps')
+    fields=[f"step:{step:,}"+(f"/{target:,}" if target else '')]
+    if 'samples' in row:fields.append(f"smpl:{row['samples']:,}")
+    if 'batch_size' in row:fields.append(f"bs:{row['batch_size']}")
+    fields.append(f"loss:{row.get('training_loss',row.get('loss')):.3f}")
+    if 'grad_norm' in row:fields.append(f"grdn:{row['grad_norm']:.3f}")
+    rates=row.get('learning_rate',row.get('lr'))
+    if rates is not None:
+        rates=rates if isinstance(rates,list) else [rates]
+        fields.append('lr:'+','.join(f'{value:.1e}' for value in rates))
+    for key,label in (('update_s','updt_s'),('dataloading_s','data_s'),('preprocessing_s','prep_s'),('seconds','step_s')):
+        if key in row:fields.append(f'{label}:{row[key]:.3f}')
+    if 'peak_allocated_gib' in row:fields.append(f"mem_gb:{row['peak_allocated_gib']:.2f}")
+    validation=row.get('validation_loss',row.get('validation_action_loss'))
+    if validation is not None:fields.append(f'val:{validation:.3f}')
+    if 'best_validation_loss' in row:fields.append(f"best_val:{row['best_validation_loss']:.3f}")
+    return '[TRAIN] '+' '.join(fields)
+
+
 def send(root, command):
     identifier = f'{time.time_ns():020d}_{uuid.uuid4().hex}'
     atomic(Path(root) / 'commands' / (identifier + '.json'), {'command': command})
@@ -197,23 +218,34 @@ def datagen_status_text(status):
     states={'waiting':'대기','idle':'대기','resetting':'초기화','running':'실행 중','saving':'저장 중',
         'source_validation':'Source 검증','success':'성공','interrupted':'중단','target_already_reached':'목표 도달',
         'ik_failure':'IK 계산 탈락','planning_failure':'계획 실패','simulation_failure':'시뮬레이션 실패',
-        'grasp_failure':'집기 실패','place_failure':'배치 실패','timeout':'시간 초과','storage_failure':'저장 실패'}
+        'grasp_failure':'집기 실패','drop_failure':'이동 중 놓침','place_failure':'컵 배치 실패','timeout':'시간 초과','storage_failure':'저장 실패'}
     phase=status.get('workflow_phase','generation');title=phases.get(phase,phase)
     if status.get('target_successes') and status.get('successes',0)>=status['target_successes']:title='목표 달성'
     elif status.get('state')=='FINISHED':title='실행 종료'
     lines=[title]
+    if status.get('ik_solver'):lines.append('IK: '+status['ik_solver']+' · Policy: '+status.get('ik_failure_policy','strict'))
     if phase=='source_validation':
         lines.append(f"Source 검증 완료 {status.get('source_completed',0)}/{status.get('source_total',0)} · "
             f"현재 {status.get('source_episode') or '준비 중'} · frame {status.get('source_frame',0)}/{status.get('source_frames',0)}")
     rate=status.get('success_rate');rate=f'{rate*100:.1f}%' if rate is not None else '—'
     lines.append(f"전체 성공 {status.get('successes',0)}/{status.get('target_successes','—')} · 시도 {status.get('attempts',0)} · 실패 {status.get('failures',0)} · 성공률 {rate}")
+    elapsed=status.get('target_completed_seconds')
+    completed=elapsed is not None
+    if elapsed is None:elapsed=status.get('wall_seconds')
+    if elapsed is not None:
+        minutes,seconds=divmod(max(0,int(elapsed)),60)
+        label=f"목표 {status['target_successes']}개 저장 완료" if completed else '이번 생성 경과'
+        lines.append(f'{label}: {minutes}분 {seconds:02d}초 (환경 준비 제외·일시정지 포함)')
+        if status.get('resumed_successes'):lines.append(f"이어 수집: 기존 {status['resumed_successes']}개 제외, 이번 실행 시간")
     if status.get('latest_env_id') is not None:
         category=states.get(status.get('latest_category'),status.get('episode_outcome',''))
         lines.append(f"최근 결과: Env {status['latest_env_id']} · 시도 {status['latest_attempt']} · {category} {status.get('outcome_reason','')}")
     for index,worker in sorted(status.get('env_status',{}).items(),key=lambda item:int(item[0])):
         lines.append(f"Env {index}: {states.get(worker['state'],worker['state'])} · 시도 {worker['attempts']} · 성공 {worker['successes']} · 실패 {sum(worker.get('failures',{}).values())} · step {worker.get('steps',0)}")
+        if worker.get('failures'):
+            lines.append('  실패 원인: '+' · '.join(f'{states.get(key,key)} {value}' for key,value in worker['failures'].items()))
     if status.get('failure_breakdown'):
-        lines.append(' · '.join(f'{states.get(key,key)}: {value}' for key,value in status['failure_breakdown'].items()))
+        lines.append('실패 원인: '+' · '.join(f'{states.get(key,key)}: {value}' for key,value in status['failure_breakdown'].items()))
     return '\n'.join(lines)
 
 

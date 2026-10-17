@@ -1,10 +1,80 @@
 # MiniVLA — 기존 Workspace Pipeline 통합
 
 2026-10-16 통합 Workflow: 새 Source/Annotation/DataGen은 엔진 공통 HDF5+Side/Wrist MP4다.
-Legacy 입력은 자동 Import하고, 다른 엔진의 Source는 실제 replay를 검증한다. 공통 Mimic 생성·Source
+Legacy 입력은 자동 Import하고, 다른 엔진의 Source도 계약을 검사하며 DataGen 전에 전체 Source를 자동 물리 재생하지 않는다. 공통 Mimic 생성·Source
 Partition 계보가 기존 LeRobot→ACT/MiniVLA에 연결된다. 현재 MiniVLA Side-only 고정 모델/H40/6D와
 train-only 통계는 유지한다. 자세한 키/단위/시점은 [DATA_FLOW.md](DATA_FLOW.md#통합-episode-계약--2026-10-16).
 
+
+## MiniVLA 학습 화면과 체크포인트 — 2026-10-17
+
+일반 학습은 **Train Dataset**에 변환된 Train100, **Validation Dataset (MiniVLA)**에 Val6 또는
+Val Source에서 별도로 생성·변환한 데이터를 선택한다. 목록은 episode 수, partition 역할, 원본 Source 수,
+Task, backend, Workspace/version과 짧은 ID를 표시한다. 전체 ID·경로는 툴팁으로 확인한다.
+호환되는 등록 Val만 목록에 나오며 폴더 선택으로 기존 LeRobot MP4/Parquet를 등록할 수 있다.
+Source ID/Group/Lineage/partition, Workspace/Robot/좌표, 카메라/FPS/Task/gripper를 실행 전에 검사한다.
+Train 전용 입력만 있으면 READY가 되지 않는다. Train14에서 만든100개를 다시 분리하지 않는다.
+
+Val 준비는 둘 중 선택한다. **A:** Val Source6에 measured state, joint_targets, 시점, Side/Wrist 등 기존
+변환 계약이 있으면 기존 LeRobot 변환을 직접 실행한다. **B:** Val Source6만 입력으로 Annotation→DataGen을
+따로 실행한 뒤 변환한다. 이번에는 기존 변환 Val6로 A의 학습 호환성을 확인했다. UI는 어느 방법도 자동 실행하지 않는다.
+`source_groups`는 원본 그룹 매핑이며14/6 개수를 입력하는 설정이 아니다. 검증된 provenance를 자동 사용하고
+일반 UI에서 숨겼다. 기록과 다른 수동 매핑은 거절한다. Partition 없는 Legacy는 기록된 독립 원본 그룹이 있고
+**고급 모델 설정 / Legacy 호환 → Legacy 단일 데이터 Group 분리**를 켰을 때만 기존 공통 split을 사용한다.
+근거 없는 그룹, 그룹 부족, Source 누수는 거절한다.
+
+MiniVLA 일반 UI 초기값은 **Batch Size8 / 총 step50000 / 검증1000 / 체크포인트2500 / Early Stopping OFF**다.
+ACT/SmolVLA 초기값은 유지한다. 각 값은 독립적이다. **체크된 학습 값 > 선택한 JSON > 기본 JSON** 순서로
+적용한다. 체크를 해제하면 JSON 값을 쓴다. `model_config`는 모델/학습 설정 JSON 경로이며 고급 영역의
+**설정 JSON 선택**으로 바꾼다. 기본 경로는 화면에 표시된다. 구조·값을 사전 검사하고 실제 적용 설정을
+`training_config.json`, policy의 `config.json`에 저장한다. 기존 고정 Qwen3-VL+Flow-DiT 구조 검사는 유지한다.
+OFF이면 loss 정체로 중단하지 않는다. ON이면 고급 Patience를 적용한다. NaN/OOM은 실제 오류로 처리한다.
+Resume은 동일 구조·통계·데이터 byte identity·control Hz를 유지하면서 총 step/검증·저장 간격/조기 종료·Patience를
+변경할 수 있다. Patience의 stale 횟수는 체크포인트에서 복원하므로 ON 전환 후 다음 검증에서 종료될 수 있다.
+
+**Batch Size**는 Forward/Backward 한 번에 묶는 실제 샘플 수다. 신규 학습은 **Accumulation1**로 실행한다.
+Batch8이면8개를 한 번에 처리하고 optimizer를 한 번 갱신한다. Accumulation UI는 없다.
+시작 로그와 `metrics.jsonl`에 batch/accumulation/effective batch를, `forward_backward_batches`에
+optimizer step당 실제 완료한 Forward/Backward 수를 기록한다. CUDA OOM은 원래 오류로 실패하며
+batch를 자동으로 줄이거나 재시도하지 않는다.
+
+Resume은 저장된 Batch/Accumulation을 유지한다. 과거 config/checkpoint의 `batch_size` 생략은1로
+해석하고, 둘 다 생략된 원래 설정은1/8로 해석한다. 새 UI 기본8을 옛 체크포인트에 적용하지 않는다.
+체크포인트 선택기가 저장된 Batch를 복원하며, 다른 Batch를 지정한 Resume은 준비 단계에서 거절한다.
+선택한 JSON에 예전 accumulation8이 있어도 **신규 학습**에서는1로 적용하며, Resume에서는 저장값을 쓴다.
+
+기존 `metrics.jsonl`의 `loss`, `validation_action_loss`, `seconds`, GPU peak 필드를 유지하며
+`training_loss`, 측정된 step의 `validation_loss`, `learning_rate`(optimizer group별 배열), `step_duration`,
+`gpu_memory`를 추가한다. 기존 seconds는 학습 계산 시간이고 step_duration은 해당 step의 검증/저장까지 포함한다. 검증은 각 episode의 최대8개 균등 고정 시점 loss 평균을 구한 뒤 episode별
+평균을 동일 가중 평균한다. 최종 step에서도 검증한다. `validation_protocol.json`에 실제 episode/표본 수를 남긴다.
+Train100/Val6 smoke는6 episode×8=48표본이었다. **학습 Loss 그래프** 버튼은1.5초마다 실제 기록을 갱신한다.
+Train 선/실측 Val 점/Best Val step/현재·목표 step을 표시하며 완료 후 policy의 기록이나 선택한 JSONL을 다시 연다.
+
+검증과 별개로 `policy/checkpoints/step_002500.pt`처럼 주기별 저장한다. 최종·조기 종료·SIGINT 중지에도
+마지막 완료 step을 저장하고 `best.pt`, `last.pt`를 유지한다. 각 파일은 모델/adapter/optimizer/step/config/
+통계/dataset identity를 담는다. 사용자 SIGINT는 step을 마친 뒤 처리하며 Workflow는 trainer 저장 완료를 기다린다.
+강제 종료/OOM 시에는 직전에 저장된 파일이 기준이다. Workflow 중지의 기존 미완료 실행 자동 등록 제한은 유지한다.
+중지 후 저장 policy 폴더는 명시적으로 등록해 사용할 수 있다. Resume은 새 실행 policy 폴더에 저장하며
+기존 체크포인트가 있는 출력 폴더는 거절한다. MiniVLA 재개 선택기는 `.pt`를 고르고 ACT/SmolVLA는 기존 폴더를 고른다.
+
+학습 로그는 LeRobot 방식의 `step / smpl / loss / grdn / lr / updt_s / data_s / prep_s / mem_gb` 한 줄로 표시한다.
+Val은 실제 측정 step에만 표시하고 검증 시작/체크포인트 저장은 별도 로그로 남긴다. JSON 원본은
+`metrics.jsonl`에 계속 저장한다. 현재 실행 중인 이전 JSON stdout도 새 UI의 요약 보기에서 같은 형식으로 읽는다.
+
+**학습 Loss 그래프**는 현재 실행의 실제 출력에 자동 연결된다. 첫 step 전에도 창을 열어둘 수 있고,
+첫 기록이 생기면1.5초마다 추가분만 읽는다. 창을 열어도 메인 UI 조작이 가능하다. UI를 다시 열었으면
+선택한 모델의 기록 또는 같은 Train Dataset의 최근 학습 결과를 찾는다. 임의 출력 경로도 실행 계획으로
+찾으며 자동 버튼에서 파일 선택창을 띄우지 않는다. `다른 학습 기록 열기`는 선택 기능이다. 이때는 폴더가
+아니라 policy 폴더의 **metrics.jsonl 파일**을 고른다. Train은 매 step, Val은 설정된 검증 주기의 실측 점만
+표시한다. 아직 검증하지 않았으면 Best Val은 미측정이다. 기존 GUI는 해당 파일을 직접 선택해 실시간으로 볼 수 있다.
+
+**Sim 평가 → 평가 Checkpoint (MiniVLA)**에서 best/last/번호별 파일을 선택한다. 명시적 선택을 best로 바꾸지 않는다.
+MuJoCo/Isaac 결과의 `checkpoint_path`, `checkpoint_step`과 상세 `selected_checkpoint.json`에 실제 선택을 기록한다.
+번호별 파일은 상위 policy 폴더에서 계약을 읽고 가중치는 선택된 파일에서 읽는다. Isaac의 결과 JSON과 상세
+HDF5/MP4 폴더는 분리한다. 실물 평가는 이번 검증 범위가 아니다.
+
+실제 Train100·Val6의3step,2step 파일→총5step 재개, 양 엔진의 선택 파일4step 평가와4환경 DataGen 회귀를
+`outputs/workflow_validation/minivla_workflow/`에 기록했다. 짧은 경로 검사이며 학습 품질·정책 성공률 검증은 아니다.
 
 2026-10-15 현재 구조. 과거 Deterministic/Flow head 선택·별도 UV head 설명을 대체한다.
 MiniVLA 모델 package는 기존 `soarm101_lab.learning.minivla` 하나다.

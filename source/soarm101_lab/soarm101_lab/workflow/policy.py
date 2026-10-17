@@ -4,9 +4,25 @@ from pathlib import Path
 from ..representation import require_policy
 
 
+def minivla_root(path):
+    path=Path(path).expanduser().resolve()
+    root=path.parent if path.suffix=='.pt' else path
+    return root.parent if root.name=='checkpoints' else root
+
+
+def selected_minivla_checkpoint(path, selected=None):
+    root=minivla_root(path)
+    candidate=Path(selected).expanduser() if selected else (Path(path) if Path(path).suffix=='.pt' else root/('best.pt' if (root/'best.pt').is_file() else 'last.pt'))
+    if not candidate.is_absolute():candidate=root/candidate if selected else candidate
+    candidate=candidate.resolve()
+    if not candidate.is_relative_to(root) or candidate.suffix!='.pt' or not candidate.is_file():
+        raise ValueError('선택한 MiniVLA checkpoint가 해당 학습 폴더에 없습니다.')
+    return candidate
+
+
 def load_policy(path, expected, device):
-    if (Path(path) / 'best.pt').is_file():
-        require_policy(path, expected)
+    if Path(path).suffix=='.pt' or (Path(path) / 'best.pt').is_file() or (Path(path)/'last.pt').is_file():
+        require_policy(minivla_root(path), expected)
         return MiniVLAJointPolicy(path, device), lambda batch: batch, lambda action: action
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
@@ -62,13 +78,13 @@ def resume_checkpoint(path, artifact, options):
 
 
 def resume_output(path, architecture='smolvla'):
-    """Resolve the existing training directory, rather than creating a resume copy."""
+    """Resolve the source training directory for resume contract checks."""
     root = Path(path).expanduser().resolve()
     if architecture == 'minivla':
-        if root.is_dir(): root = root / 'last.pt'
-        if not root.is_file() or root.suffix != '.pt' or not (root.parent / 'best.pt').is_file():
-            raise ValueError('MiniVLA resume requires last.pt and best.pt in the policy directory')
-        return root.parent
+        folder=minivla_root(root)
+        selected_minivla_checkpoint(folder,root if root.is_file() else folder/'last.pt')
+        if not (folder/'config.json').is_file():raise ValueError('MiniVLA config.json missing')
+        return folder
     if root.name == 'train_config.json': root = root.parent
     if root.name == 'pretrained_model': root = root.parent
     config = json.loads((root / 'pretrained_model/train_config.json').read_text())
@@ -166,6 +182,13 @@ def import_checkpoint(path, registry):
         return registry.register('policy', model)
     request_path = next((p / 'request.json' for p in model.parents
                          if (p / 'request.json').is_file()), None)
+    if request_path is None and hasattr(registry,'root'):
+        for candidate in sorted((registry.root/'runs').glob('*/request.json'),reverse=True):
+            try:
+                recorded=json.loads(candidate.read_text())
+                if recorded.get('stage')=='train' and model.is_relative_to(Path(recorded['output']).resolve()/'checkpoints'):
+                    request_path=candidate;break
+            except (OSError,ValueError,KeyError):continue
     if request_path is None:
         raise ValueError('Workflow training provenance missing; cannot infer checkpoint workspace/coordinates')
     request = json.loads(request_path.read_text())
@@ -191,7 +214,7 @@ def import_checkpoint(path, registry):
         'episode_review':artifact.get('provenance',{}).get('episode_review',{}),
         'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{}),
         'checkpoint_import': True})
-    return registry.register('policy', model, parents=[artifact['id']])
+    return registry.register('policy', model, parents=[artifact['id']],display_name=request.get('options',{}).get('storage_name'))
 
 
 class MiniVLAJointPolicy:
@@ -200,11 +223,12 @@ class MiniVLAJointPolicy:
         import numpy as np
         from ..learning.minivla.policy import MiniVLA, ActionGuard
         from ..so101_joint_mapping import RobotCoordinates
-        self.policy = MiniVLA(Path(path) / 'best.pt')
+        self.policy = MiniVLA(selected_minivla_checkpoint(path))
         self.device = device
-        provenance = json.loads((Path(path) / 'project_provenance.json').read_text())
+        provenance = json.loads((minivla_root(path) / 'project_provenance.json').read_text())
         coords = provenance['coordinates']
-        self.coordinates = RobotCoordinates(coords['gripper_closed_rad'], coords['gripper_open_rad'])
+        self.coordinates = RobotCoordinates(coords['gripper_closed_rad'], coords['gripper_open_rad'],
+            measured_gripper_limits=coords.get('measured_gripper_limits_rad'))
         limits = np.asarray(provenance.get('joint_limits_rad') or provenance.get('scene', {}).get('joint_limits_rad'), dtype=float)
         if limits.shape != (6, 2): raise ValueError('MiniVLA checkpoint is missing model joint limits')
         self.guard = ActionGuard(np.r_[limits[:5, 0], 0.], np.r_[limits[:5, 1], 1.], [2.] * 5 + [1.], self.policy.control_hz)

@@ -242,10 +242,11 @@ def test_training_worker_uses_integrated_module_and_clean_source_path(tmp_path, 
         assert kwargs['env']['PYTHONPATH'] == str(ROOT / 'source/soarm101_lab')
         config = Path(argv[argv.index('--config') + 1])
         assert json.loads(config.read_text())['layers'] == 4
+        assert json.loads(config.read_text())['save_freq'] == 7
         raise RuntimeError('validated launch before GPU training')
     monkeypatch.setattr(worker.subprocess, 'run', launch)
     with pytest.raises(RuntimeError, match='validated launch'):
-        worker.train({'input': str(prepared), 'options': {},
+        worker.train({'input': str(prepared), 'options': {'save_freq':7},
                       'config': str(worker.MODEL_ROOT / 'configs/default.json')}, output)
 
 
@@ -339,14 +340,16 @@ def test_canonical_hub_upload_has_lerobot_at_repository_root(tmp_path):
     assert uploads == [str(root / 'lerobot')]
 
 
-def test_common_policy_facade_maps_and_guards_minivla_actions(tmp_path, monkeypatch):
+@pytest.mark.parametrize('measured_limits',[None,[-.174533,1.74533]])
+def test_common_policy_facade_maps_and_guards_minivla_actions(tmp_path, monkeypatch, measured_limits):
     from types import SimpleNamespace
     import torch
     import soarm101_lab.learning.minivla.policy as model_policy
     from soarm101_lab.workflow.policy import MiniVLAJointPolicy, observation
-    coordinates = RobotCoordinates()
+    coordinates = RobotCoordinates(measured_gripper_limits=measured_limits)
     (tmp_path / 'project_provenance.json').write_text(json.dumps({
         'coordinates': coordinates.metadata(), 'joint_limits_rad': [[-2, 2]] * 5 + [[0, 2]]}))
+    (tmp_path/'best.pt').write_bytes(b'fixture; model loader replaced below')
     calls = []
     class Policy:
         cfg = SimpleNamespace(cameras=('side',), horizon=4, replan_steps=2)
@@ -366,6 +369,13 @@ def test_common_policy_facade_maps_and_guards_minivla_actions(tmp_path, monkeypa
     assert policy.guard.violations == 2
     policy.reset(); policy.select_action(batch)
     assert len(calls) == 2
+    if measured_limits:
+        policy.reset();q[5]=-.04528482
+        policy.select_action(observation(q,rgb,rgb,'pick red','cpu'))
+        assert calls[-1][5]==0 and policy.coordinates.measured_gripper_limits==tuple(measured_limits)
+        policy.reset();q[5]=-.3
+        with pytest.raises(ValueError,match='recorded model limits'):
+            policy.select_action(observation(q,rgb,rgb,'pick red','cpu'))
 
 
 def test_front_camera_dataset_and_policy_contract(tmp_path,monkeypatch):

@@ -548,3 +548,96 @@ def test_resume_history_travels_with_hdf5_bundle(tmp_path,episode):
     with DatasetWriter(tmp_path/'resumed.hdf5',args,contract) as writer:
         count,actual=_resume(writer,{'resume_data':str(moved/'data.hdf5'),'generation_seed':9})
         assert count==1 and actual==history and writer.count==1
+
+
+def test_resume_rejects_solver_mix_before_copy(tmp_path,episode):
+    from soarm101_lab.workflow.datagen import _resume
+    from soarm101_lab.simulation.ik import solver_configuration
+    values,attrs,videos,args,contract=episode
+    args={**args,'generation_seed':9,'generation_provenance':{'source_sha256':'same'}}
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
+    new={**args,'generation_configuration':{'ik_solver':'pinocchio_dls','ik_configuration':solver_configuration('pinocchio_dls')}}
+    with DatasetWriter(tmp_path/'new.hdf5',new,contract) as writer:
+        with pytest.raises(ValueError,match='IK solver differs'):
+            _resume(writer,{'resume_data':str(source),'generation_seed':9})
+        assert writer.count==0
+
+
+def test_resume_rejects_changed_ik_parameters(tmp_path,episode):
+    from soarm101_lab.workflow.datagen import _resume
+    from soarm101_lab.simulation.ik import solver_configuration
+    values,attrs,videos,args,contract=episode
+    config=solver_configuration('scipy_ls')
+    args={**args,'generation_seed':9,'generation_provenance':{'source_sha256':'same'},
+          'generation_configuration':{'ik_solver':'scipy_ls','ik_configuration':config}}
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
+    import copy
+    changed=copy.deepcopy(args);changed['generation_configuration']['ik_configuration']['parameters']['max_nfev']=81
+    with DatasetWriter(tmp_path/'new.hdf5',changed,contract) as writer:
+        with pytest.raises(ValueError,match='IK configuration differs'):
+            _resume(writer,{'resume_data':str(source),'generation_seed':9})
+        assert writer.count==0
+
+
+def test_resume_failure_policy_mismatch_and_old_strict_compatibility(tmp_path,episode):
+    from soarm101_lab.workflow.datagen import _resume
+    from soarm101_lab.simulation.ik import policy_configuration
+    values,attrs,videos,args,contract=episode
+    args={**args,'generation_seed':9,'generation_provenance':{'source_sha256':'same'}}
+    source=tmp_path/'source.hdf5'
+    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
+    for policy in ('strict','hold','best_effort'):
+        new={**args,'generation_configuration':{'ik_failure_policy':policy,'ik_policy_configuration':policy_configuration(policy)}}
+        with DatasetWriter(tmp_path/(policy+'.hdf5'),new,contract) as writer:
+            if policy=='strict':assert _resume(writer,{'resume_data':str(source),'generation_seed':9})[0]==1
+            else:
+                with pytest.raises(ValueError,match='failure policy differs'):
+                    _resume(writer,{'resume_data':str(source),'generation_seed':9})
+                assert writer.count==0
+
+
+def test_invalid_ik_candidate_progress_has_no_fake_residual():
+    from soarm101_lab.workflow.mimic import GenerationScheduler
+    scheduler=GenerationScheduler(1,2,1)
+    attempt=scheduler.claim(0)
+    scheduler.finish(0,attempt,'ik_failure',{'steps':0,'ik':{
+        'ik_invalid_candidate':True,'position_error_m':None,'rotation_error_rad':None,
+        'failure_reason':'candidate_nonfinite'}},lambda:None)
+    status=scheduler.progress()
+    assert status['failures']==1 and status['successes']==0
+    assert 'candidate_nonfinite' in status['outcome_reason'] and 'mm' not in status['outcome_reason']
+
+
+def test_drop_diagnostic_distinguishes_release_and_sustained_loss():
+    from types import SimpleNamespace
+    from soarm101_lab.workflow.adapters import SimulationAdapter
+    import numpy as np
+    def adapter():
+        a=object.__new__(SimulationAdapter);a.hz=30;a.previous=np.zeros(6);a.step_index=0
+        a.tracker=SimpleNamespace(completed=True,details={})
+        a.grasp_reference=None;a.grasp_command=None;a.release_commanded=False;a.loss_steps=0;a.drop_step=None
+        a._update_failure_evidence(np.zeros(3),True,True)
+        return a
+    a=adapter()
+    for i in range(5):
+        a.step_index=i+1;a._update_failure_evidence(np.array([.02,0,0]),False,False)
+    assert a.failure_category()=='place_failure'
+    a.step_index=6;a._update_failure_evidence(np.array([.02,0,0]),False,False)
+    assert a.failure_category()=='drop_failure' and a.failure_diagnostics()['drop_step']==6
+    a=adapter();a.previous[5]=.1
+    for i in range(10):a._update_failure_evidence(np.array([.02,0,0]),False,False)
+    assert a.failure_category()=='place_failure' and a.release_commanded
+    a.tracker.completed=False
+    assert a.failure_category()=='grasp_failure'
+
+
+def test_target_completion_time_stops_at_successful_commit(monkeypatch):
+    from soarm101_lab.workflow import mimic
+    clock=[100.];monkeypatch.setattr(mimic.time,'perf_counter',lambda:clock[0])
+    scheduler=mimic.GenerationScheduler(1,10,1);attempt=scheduler.claim(0)
+    clock[0]=165.;scheduler.finish(0,attempt,'success',{},lambda:'demo_0')
+    clock[0]=200.
+    assert scheduler.progress()['target_completed_seconds']==65.
+    assert scheduler.progress()['wall_seconds']==100.

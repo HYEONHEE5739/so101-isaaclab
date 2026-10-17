@@ -21,11 +21,15 @@ def main():
         sub.add_argument('--artifact')
         sub.add_argument('--workspace', default='')
         sub.add_argument('--options', help='JSON options file')
+        sub.add_argument('--ik-solver', choices=['scipy_ls','pinocchio_dls'], help='DataGen only; overrides options JSON')
+        sub.add_argument('--ik-failure-policy',choices=['strict','hold','best_effort'],help='DataGen only; overrides options JSON')
         sub.add_argument('--registry')
         sub.add_argument('--summary', action='store_true')
-    worker = commands.add_parser('worker', help='Execute a UI request or explicit MuJoCo stage')
+        sub.add_argument('--storage-name',help='신규 결과물의 저장 이름')
+        sub.add_argument('--display-name',help='등록 Artifact의 표시 이름')
+    worker = commands.add_parser('worker', help='Execute a UI request or explicit simulation stage')
     worker.add_argument('--request', help='Immutable worker request JSON')
-    worker.add_argument('--backend', choices=['common', 'mujoco'], default='mujoco')
+    worker.add_argument('--backend', choices=['common', 'mujoco', 'isaac'], default='mujoco')
     worker.add_argument('--stage', choices=sorted(MUJOCO_STAGES))
     worker.add_argument('--workspace', default='')
     worker.add_argument('--input', default='')
@@ -33,7 +37,9 @@ def main():
     worker.add_argument('--checkpoint', default='')
     worker.add_argument('--renderer', choices=['egl', 'software-egl', 'osmesa', 'none'], default='egl')
     worker.add_argument('--options', default='{}', help='JSON options object')
+    worker.add_argument('--ik-failure-policy',choices=['strict','hold','best_effort'])
     worker.add_argument('--output')
+    worker.add_argument('--ik-solver', choices=['scipy_ls','pinocchio_dls'], help='Overrides --options; incompatible with immutable --request')
     importer = commands.add_parser('import-hdf5', help='Convert an explicit HDF5 recipe to canonical NPY episodes')
     importer.add_argument('recipe')
     importer.add_argument('output')
@@ -58,13 +64,22 @@ def main():
         print(migrate(args.source,args.output));return
     if args.command == 'worker':
         if args.request:
+            if args.ik_solver is not None or args.ik_failure_policy is not None:worker.error('Set ik_solver inside the immutable request options')
             request = json.loads(Path(args.request).read_text())
         else:
-            if args.backend != 'mujoco' or not args.stage or not args.output:
-                worker.error('--request or MuJoCo --stage and --output are required')
+            if args.backend not in ('mujoco','isaac') or not args.stage or not args.output:
+                worker.error('--request or simulation --stage and --output are required')
+            if args.backend=='isaac' and args.stage not in ('replay','annotate','datagen'):
+                worker.error('Explicit Isaac worker supports replay, annotate and datagen; other stages use --request')
             request = {'backend': args.backend, 'stage': args.stage, 'workspace': args.workspace,
                        'input': args.input, 'config': args.config, 'checkpoint': args.checkpoint,
                        'renderer': args.renderer, 'options': json.loads(args.options), 'output': args.output}
+        if args.ik_solver is not None:
+            if request['stage']!='datagen':worker.error('--ik-solver requires datagen')
+            request['options']['ik_solver']=args.ik_solver
+        if args.ik_failure_policy is not None:
+            if request['stage']!='datagen':worker.error('--ik-failure-policy requires datagen')
+            request['options']['ik_failure_policy']=args.ik_failure_policy
         execute_request(request)
         return
     if args.command == 'import-hdf5':
@@ -78,9 +93,16 @@ def main():
     elif args.command == 'register':
         if args.type not in TYPES or not args.path:
             parser.error('--type must be a registered artifact type and --path is required')
-        result = registry.register(args.type, args.path)
+        result = registry.register(args.type, args.path,display_name=args.display_name)
     else:
         options = json.loads(Path(args.options).read_text()) if args.options else {}
+        if args.storage_name is not None:options['storage_name']=args.storage_name
+        if args.ik_solver is not None:
+            if args.stage!='datagen':parser.error('--ik-solver requires datagen')
+            options['ik_solver']=args.ik_solver
+        if args.ik_failure_policy is not None:
+            if args.stage!='datagen':parser.error('--ik-failure-policy requires datagen')
+            options['ik_failure_policy']=args.ik_failure_policy
         service = Operations(registry)
         artifact = registry.get(args.artifact)
         result = (service.readiness(args.stage, artifact, args.workspace, options)

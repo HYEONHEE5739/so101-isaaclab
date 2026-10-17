@@ -267,21 +267,42 @@ class MujocoBackend(SimBackend):
         self.mj.mj_forward(self.model, scratch)
         return self._pose(scratch.site_xpos[self.eef_id], scratch.site_xmat[self.eef_id])
 
-    def solve_pose(self, pose, seed, position_tolerance=.003, rotation_tolerance=.12):
-        """Bounded 5-axis IK. Unreachable 6D poses are rejected, never silently accepted."""
-        from .ik import solve_pose
+    def solve_pose(self, pose, seed, position_tolerance=.003, rotation_tolerance=.12, *, solver="scipy_ls", failure_policy="strict", measured=None, previous_command=None):
+        from .ik import validate_solver
+        validate_solver(solver)
+        # SciPy rejects residual failures; native DLS holds its measured seed.
+        from .ik import solve_selected
+        kinematics = None
+        if solver == "pinocchio_dls":
+            if not hasattr(self, "kinematics"):
+                from ..utils.so101_kinematics import SO101Kinematics
+                config = self.metadata.get("simulation_configuration")
+                if config is None:
+                    from ..real2sim.precision import simulation_configuration
+                    config = simulation_configuration(self.workspace, backend="mujoco", identity=self.metadata.get("simulation_joint_frame")=="urdf")
+                self.kinematics = SO101Kinematics(str(Path(self.workspace["root"])/config["robot_model"]["urdf"]),
+                    target_frame_name="tool0", joint_names=list(JOINTS[:5]))
+            kinematics = self.kinematics
         goal = self.world_from_workspace @ transform(pose)
         scratch = self._ik_data
         scratch.qpos[:] = self.data.qpos
-        q = self._target(seed).copy()
+        q = (np.asarray(seed,dtype=float) if solver=="pinocchio_dls" else self._target(seed)).copy()
         def forward(arm):
             scratch.qpos[self.q_indices] = np.r_[arm, q[5]]
             self.mj.mj_forward(self.model, scratch)
             actual=np.eye(4);actual[:3,3]=scratch.site_xpos[self.eef_id];actual[:3,:3]=scratch.site_xmat[self.eef_id].reshape(3,3)
             return actual
-        try:q,self.last_ik=solve_pose(forward,goal,q,self.limits,position_tolerance,rotation_tolerance,frame='world')
+        try:q,self.last_ik=solve_selected(forward,goal,q,self.limits,position_tolerance,rotation_tolerance,frame='world',
+            solver=solver,kinematics=kinematics,base_from_frame=np.linalg.inv(self.workspace["profile"]["robot_base"]["T_world"]),
+            failure_policy=failure_policy,measured=measured,previous_command=previous_command)
         except IKFailure as exc:self.last_ik=exc.details;raise
-        return self._target(q)
+        try:return self._target(q)
+        except ValueError as exc:
+            # Physics may measure beyond a hard joint limit. Native DLS still
+            # returns its measured hold; the existing command contract rejects it.
+            self.last_ik.update(joint_limit_violation=True,command_applied=False,ik_candidate_applied=False,ik_held=False,ik_invalid_command=True,applied_joint_rad=None,
+                failure_reason='held_measured_joint_limit' if solver=='pinocchio_dls' else 'joint_limit_violation')
+            raise IKFailure(self.last_ik) from exc
 
     def _snapshot(self):
         state = np.empty(self.mj.mj_stateSize(self.model, self.state_spec))
@@ -382,11 +403,12 @@ class MujocoBackend(SimBackend):
 class PolicyEnvironment:
     def __init__(self, output, workspace, renderer='egl', control_hz=30, width=320, height=240,
                  closed_rad=None, open_rad=None, task_definition=None, full_workspace=True, viewer=False,
-                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None):
+                 physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None,
+                 measured_gripper_limits=None):
         if not np.isfinite(control_hz) or not 10 <= control_hz <= 200:
             raise ValueError('control_hz must be in [10,200]')
         self.hz = float(control_hz)
-        self.coordinates = RobotCoordinates(closed_rad, open_rad)
+        self.coordinates = RobotCoordinates(closed_rad, open_rad, measured_gripper_limits=measured_gripper_limits)
         self.backend = MujocoBackend(output, workspace, render_backend=renderer, width=width,
                                      height=height, timestep=1 / (self.hz * 10), decimation=10,
                                      task_definition=task_definition, full_workspace=full_workspace,

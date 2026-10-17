@@ -74,3 +74,44 @@ def test_canonical_validation_partition_does_not_fit_statistics_or_lose_source_g
     assert json.loads((out/'statistics.json').read_text())['status']=='not_fitted'
     e=json.loads((out/'manifest.json').read_text())['episodes'][0]
     assert e['split']=='val' and e['source_group'].startswith('g') and e['group_id'].startswith('partition:')
+
+
+def test_preflight_preserves_partition_and_blocks_overrides(separate_datasets):
+    from soarm101_lab.workflow.mujoco import validate_training_inputs
+    a,b=separate_datasets
+    assert validate_training_inputs(a,{'validation_artifact':b})
+    with pytest.raises(ValueError,match='Source Group'):
+        validate_training_inputs(a,{'validation_artifact':b,'source_groups':{'0':'fake'}})
+    with pytest.raises(ValueError,match='both required'):
+        validate_training_inputs(a,{})
+    with pytest.raises(ValueError,match='Train/Val'):
+        validate_training_inputs(a,{'validation_artifact':a})
+
+
+@pytest.mark.parametrize('changed',['fps','camera','gripper','task','workspace'])
+def test_preflight_rejects_incompatible_validation_contract(separate_datasets,changed):
+    from soarm101_lab.workflow.episodes import validate_training_inputs
+    a,b=separate_datasets
+    if changed in ('fps','camera'):
+        path=Path(b['path'])/'meta/info.json';info=json.loads(path.read_text())
+        if changed=='fps':info['fps']=15
+        else:info['features']['observation.images.side_cam']['shape'][0]+=1
+        path.write_text(json.dumps(info))
+    elif changed=='gripper':b['provenance']['canonical_coordinates']['gripper_open_rad']+=.1
+    elif changed=='task':b['tasks']=[{'task_id':'different'}]
+    else:b['workspace']={'workspace_id':'different'}
+    with pytest.raises(ValueError,match='계약|순서'):validate_training_inputs(a,{'validation_artifact':b})
+
+
+def test_measured_limits_require_the_recorded_urdf_hash(tmp_path):
+    import hashlib
+    from soarm101_lab.workflow.episodes import training_coordinates
+    from soarm101_lab.so101_joint_mapping import RobotCoordinates
+    urdf=tmp_path/'robot.urdf'
+    urdf.write_text('<robot><joint name="gripper"><limit lower="-0.174533" upper="1.74533"/></joint></robot>')
+    a={'provenance':{'canonical_coordinates':RobotCoordinates().metadata()},'coordinates':{'simulation_model':{
+        'robot_model':{'urdf':'robot.urdf','urdf_sha256':hashlib.sha256(urdf.read_bytes()).hexdigest()}}}}
+    coords=training_coordinates(a,tmp_path)
+    assert coords.metadata()['measured_gripper_limits_rad']==[-.174533,1.74533]
+    urdf.write_text(urdf.read_text().replace('-0.174533','-1.0'))
+    with pytest.raises(ValueError,match='hash'):training_coordinates(a,tmp_path)

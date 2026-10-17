@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 from soarm101_lab.workflow.view import LogTail
 
 
@@ -160,3 +161,116 @@ def test_common_mimic_log_summary_keeps_diagnostic_values():
     summary=LogTail.summary(line)
     assert 'Env 2' in summary and 'IK 계산 탈락' in summary and '0.140/0.12 rad' in summary
     assert 'long raw diagnostics' not in summary and LogTail().relevant(line)
+
+
+@pytest.mark.parametrize('batch_size,accumulation,omitted',[(8,1,False),(1,8,True),(8,8,False)])
+def test_minivla_periodic_resume_picker_reads_model_root(tmp_path,monkeypatch,batch_size,accumulation,omitted):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    from soarm101_lab.learning.minivla.config import MiniVLAConfig
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    model=tmp_path/'model';(model/'checkpoints').mkdir(parents=True)
+    selected=model/'checkpoints/step_000002.pt';selected.write_bytes(b'not loaded by the GUI')
+    MiniVLAConfig(steps=17,batch_size=batch_size,accumulation=accumulation).save(model/'config.json')
+    if omitted:
+        saved=json.loads((model/'config.json').read_text());saved.pop('batch_size');(model/'config.json').write_text(json.dumps(saved))
+    panel=ui.WorkflowPanel(lambda *args:None)
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(str(selected),''))
+    panel.browse_checkpoint()
+    opts=panel.stage_options()
+    assert opts['resume_checkpoint']==str(selected) and opts['steps']==17 and opts['batch_size']==batch_size
+    assert opts['model_config']==str(model/'config.json')
+    panel.close()
+
+
+def test_training_log_json_uses_readable_lerobot_fields():
+    import json
+    row={'step':25,'loss':.125,'grad_norm':.5,'learning_rate':[.0001],'seconds':.75,'peak_allocated_gib':1.6}
+    line=LogTail.summary(json.dumps(row))
+    assert '[TRAIN] step:25' in line and 'loss:0.125' in line and 'lr:1.0e-04' in line
+    assert 'grdn:0.500' in line and 'val:' not in line
+    assert LogTail.summary('Traceback: example')=='Traceback: example'
+
+
+def test_training_graph_waits_and_updates_without_a_file_dialog(tmp_path,monkeypatch):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtTest import QTest
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(_ for _ in ()).throw(AssertionError('automatic graph must not ask for a file')))
+    panel=ui.WorkflowPanel(lambda *args:None);panel.busy=True;panel.active_stage='train'
+    panel.show_training_loss();chart=panel._loss_dialog.findChild(ui.TrainingLossPlot)
+    assert chart.path is None and chart.rows==[] and not panel._loss_dialog.isModal()
+    run=tmp_path/'run';(run/'presentation').mkdir(parents=True)
+    custom=tmp_path/'custom_output';metrics=custom/'policy/metrics.jsonl'
+    (run/'state.json').write_text(json.dumps({'stage':'train','plan':{'output':str(custom),'options':{'architecture':'minivla'}}}))
+    panel.service.session=run/'presentation';chart.reload()
+    assert chart.path==metrics and chart.rows==[]
+    metrics.parent.mkdir(parents=True);(metrics.parent/'config.json').write_text('{"steps":100}')
+    metrics.write_text('{"step":1,"loss":2.0}\n')
+    QTest.qWait(1700)
+    assert len(chart.rows)==1 and chart.target==100
+    with metrics.open('a') as f:f.write('{"step":2,"training_loss":1.5,"validation_loss":1.8}\n')
+    QTest.qWait(1700)
+    assert len(chart.rows)==2 and chart.rows[-1]['validation_action_loss']==1.8
+    chart.reload();assert len(chart.rows)==2
+    panel._loss_dialog.close();panel.busy=False;panel.close()
+
+
+def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monkeypatch):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    registry=Registry(tmp_path/'registry');monkeypatch.setattr(ui,'Registry',lambda:registry)
+    panel=ui.WorkflowPanel(lambda *args:None)
+    panel.inputs.blockSignals(True);panel.inputs.clear();panel.inputs.addItem('dataset','train_id');panel.inputs.blockSignals(False)
+    monkeypatch.setattr(registry,'get',lambda key:{'type':'dataset','path':str(tmp_path/'dataset')})
+    chosen=None
+    for stamp,source in [('20261017_100000','train_id'),('20261017_110000','train_id'),('20261017_120000','different_id')]:
+        run=registry.root/'runs'/(stamp+'_train_cube');run.mkdir(parents=True)
+        output=tmp_path/stamp;metrics=output/'policy/metrics.jsonl';metrics.parent.mkdir(parents=True);metrics.write_text('')
+        (run/'state.json').write_text(json.dumps({'stage':'train','source':source,'plan':{'output':str(output),'options':{'architecture':'minivla'}}}))
+        if stamp=='20261017_110000':chosen=metrics
+    assert panel.service.session is None and panel.training_metrics_path()==chosen
+    panel.close()
+
+
+def test_loss_graph_incremental_partial_rows_and_aliases(tmp_path):
+    import json
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.ui import TrainingLossPlot
+    app=QApplication.instance() or QApplication([])
+    path=tmp_path/'metrics.jsonl';(tmp_path/'config.json').write_text('{"steps":3000}')
+    rows=[{'step':i,'loss':float(i)} for i in range(1,2501)]
+    path.write_text(''.join(json.dumps(r)+'\n' for r in rows)+'{"step":2501,')
+    chart=TrainingLossPlot(path);chart.reload();assert len(chart.rows)==2500
+    with path.open('a') as f:f.write('"training_loss":1.25,"validation_loss":1.5}\n')
+    chart.reload();assert len(chart.rows)==2501 and chart.rows[-1]['validation_action_loss']==1.5
+    chart.reload();assert len(chart.rows)==2501
+    path.write_text('{"step":1,"loss":0.5}\n');chart.reload();assert len(chart.rows)==1
+    chart.close()
+
+
+def test_minivla_batch_size_defaults_and_stage_options(tmp_path,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    panel=ui.WorkflowPanel(lambda *args:None)
+    panel.stage.setCurrentIndex(panel.stage.findData('train'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    assert panel.options.editors['batch_size'][1].value()==8
+    panel.options.editors['batch_size'][1].setValue(4)
+    assert panel.stage_options()['batch_size']==4 and 'accumulation' not in panel.options.editors
+    panel.close()

@@ -62,6 +62,13 @@ class LogTail:
 
     @staticmethod
     def summary(line):
+        if line.startswith('{'):
+            try:
+                row=json.loads(line)
+                if 'step' in row and ('loss' in row or 'training_loss' in row):
+                    from .presentation import training_status_text
+                    return training_status_text(row)
+            except (ValueError,TypeError,KeyError):pass
         if not line.startswith('[MIMIC] {'):return line
         try:row=json.loads(line[len('[MIMIC] '):])
         except ValueError:return line

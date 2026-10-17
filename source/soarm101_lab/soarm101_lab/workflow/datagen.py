@@ -14,6 +14,7 @@ from .dataset import EpisodeDataset,DatasetWriter
 from .mimic import GenerationScheduler,GenerationStopped,MimicGenerator,source_pool,execute_trial
 from .adapters import MujocoAdapter,IsaacAdapter
 from ..real2sim.storage import atomic
+from ..simulation.ik import solver_configuration,validate_solver,validate_failure_policy,policy_configuration
 
 
 def _seed(seed,index):return int(np.random.SeedSequence([seed,index]).generate_state(1)[0])
@@ -39,6 +40,10 @@ def _output_args(reader,backend,opts):
         generation_provenance={'algorithm':'Isaac Lab Mimic 1.0.15 portable reference',
             'source_sha256':opts.get('source_pool_sha256') or fingerprint(reader.path)})
     args['generation_configuration']={key:opts[key] for key in ('num_envs','generation_seed','num_successful_demos','max_attempts','max_episode_steps') if key in opts}
+    args['generation_configuration'].update(ik_solver=validate_solver(opts.get('ik_solver','scipy_ls')),
+        ik_configuration=solver_configuration(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict')),
+        ik_failure_policy=validate_failure_policy(opts.get('ik_failure_policy','strict')),
+        ik_policy_configuration=policy_configuration(opts.get('ik_failure_policy','strict')))
     return args
 
 
@@ -51,6 +56,15 @@ def _resume(writer,opts):
         raise ValueError('Resume Source pool changed')
     if previous.contract!=writer.contract:raise ValueError('Resume coordinates/model differ')
     if previous.args.get('generation_seed')!=opts['generation_seed']:raise ValueError('Resume generation seed differs')
+    old=previous.args.get('generation_configuration',{})
+    new=writer.args.get('generation_configuration',{})
+    if old.get('ik_solver','scipy_ls')!=new.get('ik_solver','scipy_ls'):
+        raise ValueError('Resume IK solver differs; start a new run')
+    old_policy=old.get('ik_failure_policy','strict');new_policy=new.get('ik_failure_policy','strict')
+    if old_policy!=new_policy or old.get('ik_policy_configuration',policy_configuration(old_policy))!=new.get('ik_policy_configuration',policy_configuration(new_policy)):
+        raise ValueError('Resume IK failure policy differs; start a new run')
+    if old.get('ik_configuration',solver_configuration(old.get('ik_solver','scipy_ls')))!=new.get('ik_configuration',solver_configuration(new.get('ik_solver','scipy_ls'))):
+        raise ValueError('Resume IK configuration differs; start a new run')
     for name in previous.names:
         values,attrs,videos=previous.episode(name)
         videos={k:{**v,'file':str(previous.path.parent/v['file'])} for k,v in videos.items()}
@@ -75,6 +89,8 @@ def _save_trial(writer,reader,adapter,generator,seed):
         'task_definition':json.dumps(reader.args['task_definitions'][0]),'scene_configuration':json.dumps(reader.args['scene_configuration']),
         'split':partition['split'] if partition else '',
         'failure_reason':'','simulation_backend':writer.args['backend'],'episode_metrics':json.dumps(dict(adapter.buffer.metrics))}
+    attrs.update(ik_failure_policy=adapter.ik_failure_policy,ik_policy_configuration=json.dumps(policy_configuration(adapter.ik_failure_policy)),ik_solver=adapter.ik_solver,ik_configuration=json.dumps(solver_configuration(adapter.ik_solver,adapter.ik_failure_policy)),
+        ik_summary=json.dumps(dict(adapter.ik_attempt)))
     values,attrs,videos=adapter.buffer.finish(attrs)
     # Save exactly the pre-IK generated target trajectory and subtask transitions.
     values['mimic_plan']={str(i):{'target_eef_pose':t['poses'],'gripper_action':t['gripper'],'action_noise':t['noise']} for i,t in enumerate(generator.trace)}
@@ -82,7 +98,9 @@ def _save_trial(writer,reader,adapter,generator,seed):
 
 
 def _attempt_details(adapter,generator,started):
-    return {'steps':adapter.step_index,'reset_count':adapter.reset_count,'duration_s':time.perf_counter()-started,
+    return {'ik_failure_policy':adapter.ik_failure_policy,'ik_policy_configuration':policy_configuration(adapter.ik_failure_policy),'ik_solver':adapter.ik_solver,'ik_configuration':solver_configuration(adapter.ik_solver,adapter.ik_failure_policy),
+        'ik_summary':dict(adapter.ik_attempt),'ik_motion_evidence':adapter.ik_motion_evidence,'steps':adapter.step_index,'reset_count':adapter.reset_count,'duration_s':time.perf_counter()-started,
+        'failure_diagnostics':adapter.failure_diagnostics(),
         'initial_configuration':getattr(adapter,'initial_configuration',None),
         'selected_sources':generator.selection_trace,'ik':getattr(adapter,'last_ik',None) or getattr(getattr(adapter,'backend',None),'last_ik',None)}
 
@@ -106,7 +124,7 @@ def _run_one(adapter,reader,writer,scheduler,index,attempt,seed,pool):
 def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
     from .mujoco import _environment
     from ..simulation.mujoco_backend import MujocoBackend
-    opts=request['options'];num_envs=opts.get('num_envs',1);seed=opts['generation_seed']
+    opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));num_envs=opts.get('num_envs',1);seed=opts['generation_seed']
     if parent is None:parent=_environment(request,output,hz=reader.hz)
     args=_output_args(reader,'mujoco',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
     writer.args['execution_physics']={'backend':'mujoco','physics_dt':float(parent.backend.model.opt.timestep),
@@ -123,6 +141,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
     def worker(index):
         backend=MujocoBackend(output/'scene',render_backend=parent.backend.render_backend,shared_backend=parent.backend)
         adapter=MujocoAdapter(backend,reader.hz,output,_seed(seed,index),scheduler.stop)
+        adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
         adapter.control=scheduler.control;adapter.worker_index=index
         adapter.max_episode_steps=opts.get('max_episode_steps',2000)
         last_preview=[0.]
@@ -143,7 +162,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
                 _run_one(adapter,reader,writer,scheduler,index,attempt,_seed(seed,attempt),pool)
         finally:
             adapter.close()
-            metrics[index]={**dict(adapter.metrics),**dict(adapter.buffer.metrics),**backend.render_metrics,'video_queue_peak':adapter.buffer.queue_peak,
+            metrics[index]={'ik_failure_policy':adapter.ik_failure_policy,'ik_solver':adapter.ik_solver,**dict(adapter.metrics),**dict(adapter.buffer.metrics),**backend.render_metrics,'video_queue_peak':adapter.buffer.queue_peak,
                 'render_context':copy.deepcopy(backend.metadata.get('render_context')),
                 'reset_count':adapter.reset_count,'physics_steps':sum(r['steps'] for r in scheduler.records if r['env_id']==index)}
     executor=ThreadPoolExecutor(max_workers=num_envs,thread_name_prefix='mimic-mujoco')
@@ -169,7 +188,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
         # An error from a worker must not publish unverified/incomplete data.
         writer.record_attempts(scheduler.records);writer.close(publish=True);parent.close()
         atomic(output/'attempts.json',scheduler.records)
-    result={**scheduler.progress(),'stopped':stopped,'dataset':str(writer.path),'requested':scheduler.target,
+    result={'ik_failure_policy':opts.get('ik_failure_policy','strict'),'ik_policy_configuration':policy_configuration(opts.get('ik_failure_policy','strict')),'ik_solver':opts.get('ik_solver','scipy_ls'),'ik_configuration':solver_configuration(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict')),**scheduler.progress(),'stopped':stopped,'dataset':str(writer.path),'requested':scheduler.target,
         'passed':scheduler.successes==scheduler.target or (stopped and scheduler.successes>0),
         'shared_model_count':len(set(model_ids)),'independent_data_count':len(set(data_ids)),'num_envs':num_envs,
         'worker_metrics':metrics,'method':'isaaclab_mimic/1.0.15','is_isaac_mimicgen':True}
@@ -253,7 +272,7 @@ def _isaac_loop(native,adapters,reader,writer,scheduler,seed,bridge,boundary=Non
 
 
 def run_isaac(native,request,reader,output,bridge=None,boundary=None):
-    opts=request['options'];seed=opts['generation_seed'];count=opts['num_envs']
+    opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));seed=opts['generation_seed'];count=opts['num_envs']
     args=_output_args(reader,'isaac',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
     writer.args['execution_physics']={'backend':'isaac','physics_dt':float(native.physics_dt),'control_decimation':native.cfg.decimation,
         'device':str(native.device),'num_envs':count,'simulation_configuration':native.cfg.simulation_configuration}
@@ -264,7 +283,9 @@ def run_isaac(native,request,reader,output,bridge=None,boundary=None):
         writer.close(False);raise
     if bridge:bridge.bind_generation(scheduler)
     adapters=[IsaacAdapter(native,i,output,_seed(seed,i),scheduler.stop) for i in range(count)];stopped=False
-    for adapter in adapters:adapter.max_episode_steps=opts.get('max_episode_steps',2000)
+    for adapter in adapters:
+        adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
+        adapter.max_episode_steps=opts.get('max_episode_steps',2000)
     profile={'physics_step_s':0.,'render_s':0.,'physics_steps':0,'render_calls':0}
     step=native.sim.step;render=native.sim.render
     def profiled_render(*args,**kwargs):
@@ -287,8 +308,8 @@ def run_isaac(native,request,reader,output,bridge=None,boundary=None):
         writer.record_attempts(scheduler.records)
         writer.close()
         atomic(output/'attempts.json',scheduler.records)
-    return {**scheduler.progress(),'passed':scheduler.successes==scheduler.target or (stopped and scheduler.successes>0),
+    return {'ik_failure_policy':opts.get('ik_failure_policy','strict'),'ik_policy_configuration':policy_configuration(opts.get('ik_failure_policy','strict')),'ik_solver':opts.get('ik_solver','scipy_ls'),'ik_configuration':solver_configuration(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict')),**scheduler.progress(),'passed':scheduler.successes==scheduler.target or (stopped and scheduler.successes>0),
         'stopped':stopped,'dataset':str(writer.path),'requested':scheduler.target,'num_envs':count,
         'method':'isaaclab_mimic/1.0.15','is_isaac_mimicgen':True,'sim_profile':profile,
         'timing_semantics':'CPU wall time of SimulationContext.step excluding nested render; render calls include graphics synchronization; per-env batch wait overlaps',
-        'worker_metrics':{i:{**dict(a.metrics),**dict(a.buffer.metrics),'reset_count':a.reset_count,'video_queue_peak':a.buffer.queue_peak} for i,a in enumerate(adapters)}}
+        'worker_metrics':{i:{'ik_failure_policy':a.ik_failure_policy,'ik_solver':a.ik_solver,**dict(a.metrics),**dict(a.buffer.metrics),'reset_count':a.reset_count,'video_queue_peak':a.buffer.queue_peak} for i,a in enumerate(adapters)}}

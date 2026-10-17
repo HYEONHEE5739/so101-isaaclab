@@ -114,7 +114,7 @@ class GenerationScheduler:
         self.failures=Counter(r['category'] for r in history if r['category'] not in ('success','interrupted','target_already_reached'))
         self.workers={i:{'state':'idle','attempts':0,'successes':0,'failures':{}} for i in range(num_envs)}
         self.records=copy.deepcopy(list(history));self.stop=threading.Event();self.lock=threading.RLock();self.start_time=time.perf_counter();self.resumed=resumed
-        self.writer_lock=threading.Lock();self.reservations=0
+        self.writer_lock=threading.Lock();self.reservations=0;self.target_completed_seconds=None
         self.history_complete=not resumed or bool(history)
         self.control=PhysicsControl(num_envs)
 
@@ -145,7 +145,8 @@ class GenerationScheduler:
         with self.lock:
             if reserved:
                 self.reservations-=1;self.successes+=1;self.workers[worker]['successes']+=1
-                if self.successes>=self.target:self.stop.set()
+                if self.successes>=self.target:
+                    self.target_completed_seconds=time.perf_counter()-self.start_time;self.stop.set()
             self._record(worker,row)
         print('[MIMIC] '+json.dumps(row,ensure_ascii=False,allow_nan=False),flush=True)
         return row
@@ -160,10 +161,12 @@ class GenerationScheduler:
     def progress(self):
         with self.lock:
             latest=self.records[-1] if self.records else {};ik=latest.get('ik') or {};reason=latest.get('reason','')
-            if latest.get('category')=='ik_failure' and ik:
+            if latest.get('category')=='ik_failure' and ik and ik.get('position_error_m') is not None and ik.get('rotation_error_rad') is not None:
                 reason=f"위치 {ik['position_error_m']*1000:.2f}/{ik['position_tolerance_m']*1000:g} mm · 방향 {ik['rotation_error_rad']:.3f}/{ik['rotation_tolerance_rad']:g} rad"
+            if latest.get('category')=='ik_failure' and (ik.get('ik_invalid_candidate') or ik.get('ik_invalid_command')):
+                reason='IK 후보/명령 거부: '+ik.get('failure_reason','invalid_candidate')
             outcome={'success':'성공','ik_failure':'IK 계산 탈락','planning_failure':'계획 실패','simulation_failure':'시뮬레이션 실패',
-                'grasp_failure':'집기 실패','place_failure':'배치 실패','timeout':'시간 초과','interrupted':'중단'}.get(latest.get('category'),'생성 중')
+                'grasp_failure':'집기 실패','drop_failure':'이동 중 놓침','place_failure':'컵 배치 실패','timeout':'시간 초과','interrupted':'중단'}.get(latest.get('category'),'생성 중')
             if self.successes==self.target:outcome='목표 달성';reason=''
             decided=self.successes+sum(self.failures.values())
             return dict(target_successes=self.target,successes=self.successes,pending_successes=self.reservations,attempts=self.started,completed_attempts=self.completed,
@@ -173,6 +176,7 @@ class GenerationScheduler:
                 success_rate_definition='successful commits / (successful commits + classified failures); excludes interrupted/in-flight attempts',
                 env_status=copy.deepcopy(self.workers),latest_env_id=latest.get('env_id'),
                 latest_attempt=latest.get('attempt'),latest_category=latest.get('category'),
+                target_completed_seconds=self.target_completed_seconds,
                 wall_seconds=time.perf_counter()-self.start_time,episode_outcome=outcome,outcome_reason=reason,resumed_successes=self.resumed)
 
 

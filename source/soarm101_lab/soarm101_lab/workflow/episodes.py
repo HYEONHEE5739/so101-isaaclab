@@ -397,7 +397,7 @@ def split_episodes(eligible,splits=None,require_validation=True):
     groups = sorted({e['group_id'] for e in eligible})
     if splits is None:
         if require_validation and len(groups) < 2:
-            raise ValueError('Need independent train/val source groups')
+            raise ValueError('Need independent train/val source groups: 독립 원본 Group이 2개 이상 필요합니다. 같은 Source에서 생성한 episode는 나눌 수 없습니다.')
         # Deterministic group split. No frame split or generated-variant leakage.
         assignment = {g: 'train' for g in groups}
         if len(groups) >= 2: assignment[groups[-1]] = 'val'
@@ -415,7 +415,7 @@ def split_episodes(eligible,splits=None,require_validation=True):
             raise ValueError('Source group leakage')
         grouped[entry['group_id']] = entry['split']
     if require_validation and not {'train', 'val'}.issubset(grouped.values()):
-        raise ValueError('Training and validation groups both required')
+        raise ValueError('Training and validation groups both required: 학습·검증 데이터가 모두 필요합니다. Train 전용 입력은 Validation Dataset에 별도로 변환한 Val 데이터를 선택하세요. 이미 분할된 Train을 자동 재분할하지 않습니다.')
     return entries,grouped
 
 
@@ -529,3 +529,72 @@ def convert_hdf5(recipe_file, output):
     loaded=load_manifest(path)
     for e,spec in zip(loaded['episodes'],r['episodes']): episode_arrays(e,list(spec['cameras']),r['control_hz'])
     return path
+
+
+def training_coordinates(artifact, workspace=None):
+    """Separate measured joint limits from nominal gripper command endpoints."""
+    from ..so101_joint_mapping import RobotCoordinates
+    import hashlib
+    import xml.etree.ElementTree as ET
+    prov=artifact.get('provenance',{});endpoints=prov.get('canonical_coordinates') or {}
+    model=(artifact.get('coordinates') or {}).get('simulation_model')
+    limits=None
+    if model:
+        robot=model.get('robot_model') or {}
+        workspace=workspace or prov.get('workspace_path') or prov.get('source_env_args',{}).get('workspace_path')
+        if not workspace or not robot.get('urdf') or not robot.get('urdf_sha256'):
+            raise ValueError('측정 관절 범위 확인에 필요한 기록된 Workspace/URDF 근거가 없습니다.')
+        root=Path(workspace).expanduser().resolve();path=(root/robot['urdf']).resolve()
+        if not path.is_relative_to(root) or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=robot['urdf_sha256']:
+            raise ValueError('기록된 실행 URDF와 현재 파일의 hash가 다릅니다. 측정 범위를 추정하지 않습니다.')
+        limit=ET.parse(path).getroot().find("joint[@name='gripper']/limit")
+        if limit is None:raise ValueError('기록된 URDF에 gripper 관절 범위가 없습니다.')
+        limits=[float(limit.get(key)) for key in ('lower','upper')]
+    return RobotCoordinates(endpoints.get('gripper_closed_rad'),endpoints.get('gripper_open_rad'),measured_gripper_limits=limits)
+
+
+def validate_training_inputs(artifact, options):
+    """Metadata-only preflight shared by readiness and worker; never invent lineage."""
+    from ..representation import require_compatible
+    from ..so101_dataset_contract import JOINT_SPACE
+    validation=options.get('validation_artifact');records=[artifact]+([validation] if validation else [])
+    evidence=[]
+    for source,record in enumerate(records):
+        prov=record.get('provenance',{});partition=prov.get('source_partition');groups=prov.get('source_groups',{})
+        if options.get('source_groups') and options['source_groups']!=groups:
+            raise ValueError('수동 Source Group은 기록된 원본 계보와 일치해야 합니다.')
+        if not partition and (not groups or any(str(g).startswith('UNKNOWN') for g in groups.values())):
+            raise ValueError('MiniVLA Direct split requires verified source_groups; 원본 Group 근거가 없습니다.')
+        if not partition and not options.get('legacy_group_split'):
+            raise ValueError('명시적 Source Partition이 없습니다. 독립 원본 Group 기록이 있는 데이터만 고급 Legacy 단일 데이터 Group 분리를 사용하세요.')
+        info=json.loads((Path(record['path'])/'meta/info.json').read_text())
+        require_compatible(record['coordinates'],record['coordinates'],JOINT_SPACE)
+        coords=prov.get('canonical_coordinates') or {}
+        endpoints=[coords.get(k) for k in ('gripper_closed_rad','gripper_open_rad')]
+        if coords.get('joint_order')!=list(JOINTS) or any(v is None for v in endpoints) or not np.isfinite(endpoints).all() or endpoints[1]<=endpoints[0]:
+            raise ValueError('관절 순서·Gripper 정규화 계약이 없거나 잘못되었습니다. 검증된 원본을 다시 변환하세요.')
+        training_coordinates(record,options.get('workspace'))
+        if not np.isfinite(info['fps']) or info['fps']<=0:
+            raise ValueError('Dataset FPS가 유효하지 않습니다.')
+        for key in ('observation.state','action'):
+            feature=info.get('features',{}).get(key,{})
+            if feature.get('shape')!=[6] or feature.get('names')!=list(JOINTS):
+                raise ValueError('관측·action의 6축 관절 순서가 맞지 않습니다: '+key)
+        for i in range(info['total_episodes']):
+            evidence.append(dict(id=f'{source}_{i}',group_id=groups.get(str(i),'UNKNOWN'),
+                source_partition=partition,source_lineage=prov.get('episode_source_lineage',{}).get(str(i)),
+                source_partition_input=prov.get('source_partition_input')))
+    if validation:
+        a,b=records
+        if (a.get('provenance',{}).get('source_partition') or {}).get('split')!='train' or (b.get('provenance',{}).get('source_partition') or {}).get('split')!='val':
+            raise ValueError('Train/Val 역할에 맞는 Source Partition을 선택하세요.')
+        require_compatible(a['coordinates'],b['coordinates'],JOINT_SPACE)
+        infos=[json.loads((Path(x['path'])/'meta/info.json').read_text()) for x in records]
+        cameras=lambda info:{k:{f:v.get(f) for f in ('dtype','shape','names')} for k,v in info['features'].items() if k.startswith('observation.images.')}
+        coords=lambda x:{k:x.get('provenance',{}).get('canonical_coordinates',{}).get(k) for k in ('joint_order','gripper_closed_rad','gripper_open_rad')}
+        contract=lambda x:{k:v for k,v in x['coordinates'].items() if k!='source_dataset'}
+        if a.get('workspace')!=b.get('workspace') or contract(a)!=contract(b) or infos[0]['fps']!=infos[1]['fps'] or cameras(infos[0])!=cameras(infos[1]) or coords(a)!=coords(b):
+            raise ValueError('Train/Val의 Workspace·Robot/관절·카메라·FPS·Gripper 계약이 다릅니다.')
+        if a.get('tasks')!=b.get('tasks'):raise ValueError('Train/Val Task 계약이 다릅니다.')
+    split_episodes(evidence)
+    return True
