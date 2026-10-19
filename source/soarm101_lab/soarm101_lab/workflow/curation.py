@@ -233,8 +233,40 @@ def _scan(row):
     return row
 
 
+def evaluation_inputs(path):
+    """Read a run index, or discover legacy per-episode files without rewriting them."""
+    path=Path(path).resolve()
+    if not path.is_dir() or (path/'manifest.json').is_file():return None
+    marker=path/'evaluation_datasets.json'
+    if marker.is_file():
+        report=json.loads(marker.read_text())
+        if report.get('schema')!='so101.sim-evaluation/1':raise ValueError('Unknown evaluation dataset schema')
+        files=[(path/item['path']).resolve() for item in report['datasets']]
+    else:
+        import h5py
+        files=[]
+        for candidate in sorted([*path.glob('*.hdf5'),*path.glob('*.h5'),*path.glob('result/*.hdf5')]):
+            with h5py.File(candidate,'r') as h:
+                args=_json(h['data'].attrs.get('env_args'),{}) if 'data' in h else {}
+            if args.get('evaluation_schema'):files.append(candidate.resolve())
+        if not files:return None
+    if any(not p.is_relative_to(path) or p.suffix not in ('.hdf5','.h5') for p in files):
+        raise ValueError('Evaluation dataset outside run folder')
+    return files
+
+
 def analyze(path):
     path=Path(path).resolve();canonical=path.is_dir();rows=[]
+    inputs=evaluation_inputs(path) if canonical else None
+    if inputs is not None:
+        if not inputs:raise ValueError('평가에 저장된 완료 episode가 없습니다.')
+        for child in inputs:
+            for row in analyze(child):
+                prefix=child.parent.relative_to(path) if (path/'evaluation_datasets.json').is_file() else child.relative_to(path).with_suffix('')
+                row['name']=str(prefix)+'/'+row['name']
+                row['evaluation_run']=str(path);row['flags']=[];row['flag_details']=[]
+                rows.append(row)
+        return flag_outliers(rows)
     if canonical:
         manifest=json.loads((path/'manifest.json').read_text());prov=json.loads((path/'project_provenance.json').read_text())
         entries=manifest['episodes'];args=prov;scene=prov.get('scene',{});dt=1/float(manifest['control_hz']);w=_workspace(args)
@@ -330,7 +362,7 @@ def analyze(path):
         lineage_status=('Verified Source Partition / exact subtask Source' if kind=='mimic_segments' else
             'Verified Source Partition / exact subtask lineage UNKNOWN' if kind!='source_episode' else 'Verified Source Partition') if partition else 'Not partitioned'
         row.update(split=partition['split'] if partition else None,lineage_status=lineage_status,leakage_status='checked at training' if partition else 'UNKNOWN')
-        if row['frames']<3:raise ValueError('At least three frames required for motion quality metrics')
+        if row['frames']<3 and not args.get('evaluation_schema'):raise ValueError('At least three frames required for motion quality metrics')
         ids=(composition or {}).get('active_object_ids',scene.get('dynamic_objects') if canonical else active_ids)
         geometry_ids=ids or list(telemetry)
         row.update(task_id=task['task_id'] if task else 'UNKNOWN',task_definition=task,pick_object_id=pick,scene_configuration=composition,
@@ -342,6 +374,12 @@ def analyze(path):
             from .tasks import recorded_scene
             recorded_scene({'scene_configuration':composition},w)
             if task and composition['pick_object_id']!=pick:raise ValueError('Episode target conflicts with scene configuration')
+        if not canonical:
+            with h5py.File(path,'r') as h:
+                g=h['data'][name];evaluation=_json(g.attrs.get('evaluation'),{})
+                if evaluation or args.get('evaluation_schema'):
+                    row.update(evaluation=evaluation,evaluation_outcome='success' if row['recorded_success'] else 'failure',
+                        failure_reason=g.attrs.get('failure_reason',''),env_id=evaluation.get('env_id'))
         reader=EpisodeReader(row);row['events']=_events(reader,annotation,signal_keys)
         row['annotation_status']='annotated' if annotation is not None or 'obs/datagen_info/subtask_term_signals/grasp' in signal_keys.values() else 'signals_only' if signal_keys else 'UNAVAILABLE'
         trusted=row['success_source'] in ('simulation_place_condition','simulation_stable_grasp_and_place','simulation_success_term')
@@ -402,7 +440,7 @@ def select_distribution(rows,count):
 def export_subset(source, destination, names, *, partition=None, source_records=None):
     import h5py, os, uuid
     from ..so101_dataset_contract import read_contract, write_contract
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     source=Path(source); destination=Path(destination)
     from .episodes import validate_partition,validate_partition_episode,source_catalog
     if partition:validate_partition(partition)

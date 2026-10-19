@@ -75,8 +75,8 @@ def test_worker_local_pinocchio_data_and_mujoco_frame(tmp_path,count):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
     workspace=scene_inputs()
     config={'identity_sim':True,'robot_model':{'urdf':'assets/SO101/urdf/so101_isaaclab.urdf'}}
-    with MujocoBackend(tmp_path/'parent',workspace,simulation_configuration=config) as parent:
-        workers=[MujocoBackend(tmp_path/'shared',shared_backend=parent) for _ in range(count)]
+    with MujocoBackend(workspace,simulation_configuration=config) as parent:
+        workers=[MujocoBackend(shared_backend=parent) for _ in range(count)]
         try:
             for i,worker in enumerate(workers):
                 seed=worker.home.copy();seed[0]+=.03*i
@@ -130,7 +130,7 @@ def test_mujoco_dls_hold_outside_limits_is_ik_failure_not_planning(tmp_path,monk
     from test_mujoco_backend import scene_inputs
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
     config={'identity_sim':True,'robot_model':{'urdf':'assets/SO101/urdf/so101_isaaclab.urdf'}}
-    with MujocoBackend(tmp_path/'scene',scene_inputs(),simulation_configuration=config) as backend:
+    with MujocoBackend(scene_inputs(),simulation_configuration=config) as backend:
         seed=backend.home.copy();backend.solve_pose(backend.target_pose(seed),seed,solver='pinocchio_dls')
         seed[0]=backend.limits[0,1]+.001
         monkeypatch.setattr(backend.kinematics,'inverse_kinematics',lambda *a,**kw:(seed[:5],False,{'iterations':200,'weighted_error':1.}))

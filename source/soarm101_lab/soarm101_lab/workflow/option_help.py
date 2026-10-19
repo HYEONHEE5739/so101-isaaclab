@@ -14,7 +14,6 @@ FIELDS = {
     'validation_dataset':('문자열',None,'선택: 검증된 val Source Partition에서 생성·변환한 Registry dataset ID. MiniVLA가 별도 MP4/Parquet를 직접 읽습니다.'),
     'identity_sim_for_validation':('true/false',False,'명시적 URDF 원형 검증: Scene 관절 잔차만 제외합니다. Hardware Precision은 유지합니다. 파생 단계는 원본 모델 계약을 상속합니다.'),
     'generation_seed': ('정수', None, '생략하면 실행마다 새 seed로 배치와 궤적 선택을 생성합니다. 결과 .generation.json의 seed를 지정하면 재현할 수 있습니다. Workspace seed와 같은 값은 허용하지 않습니다.'),
-    'output': ('문자열', '', '선택. 비우면 고유 run 폴더에 자동 저장합니다. 직접 지정할 때는 아직 존재하지 않는 경로를 사용하세요.'),
     'device': ('문자열', 'cuda:0', '실행 장치. 예: cuda:0. Isaac 작업에는 현재 NVIDIA GPU 설정을 유지하세요.'),
     'num_successful_demos': ('정수', 10, '만들 성공 데이터 수. 예: 10이면 성공 episode 10개까지 재시도합니다. 실패 시도는 포함하지 않으며 중지 버튼으로 중단할 수 있습니다.'),
     'repo_id': ('문자열', '', '필수. 예: my-account/so101-demo. 변환에서는 로컬 dataset 식별자이며 업로드는 별도 단계입니다.'),
@@ -40,33 +39,32 @@ FIELDS = {
     'max_steps': ('정수', 300, 'episode당 최대 평가 step 수.'),
     'private': ('true/false', True, '업로드 repository 공개 여부. true는 비공개. 기존 repository의 설정과 일치해야 합니다.'),
     'create_repo': ('true/false', False, 'true면 새 Hugging Face repository를 생성합니다. 기존 repo에는 false를 사용하세요.'),
-    'camera_devices': ('객체', {}, 'Camera ID → 실제 장치 경로. 예: {"front": "/dev/cam_side"}. Workspace 카메라 metadata에 맞춰 지정합니다.'),
+    'camera_devices': ('객체', {}, '추가 카메라 연결: Workspace/모델의 카메라 이름 → 실제 USB 장치 경로 또는 인덱스. 예: front → /dev/cam_side. 일반 Side/Wrist는 위 장치 경로만 설정하고 이 표는 비워두세요. 같은 이름을 표에도 입력하면 표의 경로를 우선합니다.'),
     'revision': ('문자열', 'main', '업로드할 Hugging Face branch 이름.'),
     'create_branch': ('true/false', False, '지정한 업로드 branch를 새로 만들지 여부.'),
-    'port': ('문자열', '', '필수. 실제 follower serial 장치 경로. 예: /dev/so101_follower.'),
-    'follower_id': ('문자열', '', '필수. 실제 follower calibration에 사용한 ID.'),
+    'port': ('문자열', '/dev/so101_follower', '실제 Follower serial 장치 경로. 저장된 연결 설정을 기본으로 채웁니다. 다른 로봇이면 직접 수정하세요.'),
+    'follower_id': ('문자열', '', 'Follower 보정 파일을 찾는 ID. 저장된 연결 설정을 기본으로 채웁니다. 다른 로봇이면 해당 로봇의 보정 ID로 수정하세요.'),
     'calibration_dir': ('문자열', None, '선택. follower calibration 폴더. 생략하면 기존 기본 경로를 사용합니다.'),
     'side_device': ('문자열', '/dev/cam_side', '실제 Side 카메라 장치 경로.'),
     'wrist_device': ('문자열', '/dev/cam_wrist', '실제 Wrist 카메라 장치 경로.'),
     'fps': ('정수', 30, '실제 평가 루프 목표 주파수(Hz).'),
-    'enable_motion': ('true/false', False, '실제 모터 동작 허용. 실제 평가를 의도할 때만 true로 변경하세요.'),
 }
 KEYS = {
-    'source': ['identity_sim_for_validation','device', 'renderer', 'output'],
-    'replay': ['device', 'renderer', 'output'],
-    'annotate': ['device', 'renderer', 'output'],
-    'datagen': ['ik_solver', 'ik_failure_policy', 'num_successful_demos', 'num_envs', 'generation_seed', 'max_attempts', 'device', 'renderer', 'output'],
-    'convert': ['repo_id', 'include_failed', 'output'],
-    'train': ['architecture', 'model_config', 'source_groups', 'validation_dataset', 'val_every', 'early_stopping', 'patience', 'legacy_group_split', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'output', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
-    'sim_eval': ['episodes', 'max_steps', 'device', 'renderer', 'output'],
-    'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'camera_devices', 'episodes', 'max_steps', 'fps', 'enable_motion', 'device', 'output', 'calibration_dir'],
-    'hf_dataset': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
-    'hf_policy': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch', 'output'],
+    'source': ['identity_sim_for_validation','device', 'renderer'],
+    'replay': ['device', 'renderer'],
+    'annotate': ['num_envs', 'device', 'renderer'],
+    'datagen': ['ik_solver', 'ik_failure_policy', 'num_successful_demos', 'num_envs', 'generation_seed', 'max_attempts', 'device', 'renderer'],
+    'convert': ['repo_id', 'include_failed'],
+    'train': ['architecture', 'model_config', 'source_groups', 'validation_dataset', 'val_every', 'early_stopping', 'patience', 'legacy_group_split', 'steps', 'batch_size', 'num_workers', 'save_freq', 'device', 'dataset_repo_id', 'base_model', 'rename_map', 'policy_options'],
+    'sim_eval': ['episodes', 'num_envs', 'max_steps', 'device', 'renderer'],
+    'real_eval': ['port', 'follower_id', 'side_device', 'wrist_device', 'camera_devices', 'episodes', 'max_steps', 'fps', 'device', 'calibration_dir'],
+    'hf_dataset': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch'],
+    'hf_policy': ['repo_id', 'private', 'create_repo', 'revision', 'create_branch'],
 }
 
 # Only options consumed by each trainer belong in its execution form.
 TRAIN_KEYS = {
-    'minivla': {'model_config', 'batch_size', 'steps', 'val_every', 'save_freq', 'early_stopping', 'patience', 'legacy_group_split', 'output'},
+    'minivla': {'model_config', 'batch_size', 'steps', 'val_every', 'save_freq', 'early_stopping', 'patience', 'legacy_group_split'},
     'act': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups','validation_dataset','val_every','early_stopping','patience','legacy_group_split'},
     'smolvla': set(KEYS['train']) - {'architecture', 'model_config', 'source_groups','validation_dataset','val_every','early_stopping','patience','legacy_group_split'},
 }
@@ -81,18 +79,13 @@ def help_html(stage):
     rows = []
     for key in KEYS[stage]:
         kind, default, description = FIELDS[key]
-        if key == 'output':
-            example = ('/tmp/my_demo.hdf5' if stage in ('source', 'annotate', 'datagen') else
-                       '/tmp/my_dataset' if stage == 'convert' else
-                       '/tmp/my_training' if stage == 'train' else '/tmp/my_result.json')
-            description += ' 경로 형식 예: ' + example + ' (직접 입력할 때만 사용).'
         value = '생략 가능' if default is None else json.dumps(default, ensure_ascii=False)
         rows.append(f'<p><b>{key}</b> · {kind} · 기본/예시 <code>{escape(value)}</code><br>{escape(description)}</p>')
     owned = 'Task는 위 Task Selector, 실행 모드와 Python은 위 입력란에서 설정합니다.'
     if stage == 'train':
         owned += ' 학습 모델은 위 학습 모델 드롭다운에서 선택합니다. 이어서 학습은 checkpoint를 선택하세요. Resume에서는 총 steps/output 외 학습 설정은 checkpoint에서 복원하며 결과는 새 출력 폴더에 저장합니다. JSON의 architecture보다 드롭다운 선택이 우선합니다.'
     if stage == 'source':
-        owned += ' Leader port, Episodes, Episode Time, Reset Time도 위 전용 입력란에서 수정하세요.'
+        owned += ' Source 저장 이름은 필수이며 sources/<이름>/origin에 저장합니다. Leader port, Episodes, Episode Time, Reset Time도 위 전용 입력란에서 수정하세요.'
     if stage == 'annotate':
         owned += ' 자동/수동 방식은 위 Annotation 방식에서 선택하세요.'
     return '<p>아래 JSON의 <b>값</b>을 수정하세요. 문자열은 큰따옴표, 숫자는 따옴표 없이, 참/거짓은 true/false로 입력합니다. JSON에는 주석을 넣지 않습니다.</p><p>' + owned + '</p>' + ''.join(rows) + '<p>API key/token은 입력하지 마세요. 업로드 인증은 기존 로컬 로그인 설정을 사용합니다.</p>'

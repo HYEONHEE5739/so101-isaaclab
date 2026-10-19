@@ -21,13 +21,31 @@ def scene_inputs():
     return {'profile': p, 'task': default_task(p), 'root': ROOT}
 
 
+def test_finger_collision_parts_leave_visuals_joints_and_inertia_unchanged():
+    from soarm101_lab.simulation.mjcf import robot_xml
+    urdf=ROOT/'assets/SO101/urdf/so101_isaaclab.urdf'
+    original=urdf.read_bytes()
+    refined,_,_=robot_xml(urdf,np.eye(4),'isaac_matched')
+    legacy,_,_=robot_xml(urdf,np.eye(4),'legacy_urdf')
+    for selector in ('.//joint','.//inertial',".//site"):
+        assert [ET.tostring(n) for n in refined.findall(selector)]==[ET.tostring(n) for n in legacy.findall(selector)]
+    def visuals(tree):return {g.get('name'):g.attrib for g in tree.findall('.//geom') if '_visual_' in g.get('name','')}
+    assert visuals(refined)==visuals(legacy)
+    for link in ('gripper','jaw'):
+        geoms=refined.findall(f".//body[@name='robot_{link}']/geom")
+        collisions=[g for g in geoms if g.get('contype')=='2']
+        assert len(collisions)>2 and all('_part_' in g.get('name') for g in collisions)
+        assert all(g.get('group')=='3' and g.get('conaffinity')=='1' for g in collisions)
+    assert urdf.read_bytes()==original
+
+
 def test_identity_sim_uses_original_urdf_without_mutating_workspace(tmp_path):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
     inputs=scene_inputs()
     inputs['profile']['simulation_joint_offsets_rad']={'value':[.04,0,0,0,0,0],
         'provenance':'estimated','evidence':['synthetic fixture']}
     original=copy.deepcopy(inputs)
-    with MujocoBackend(tmp_path/'original_frame',inputs,identity_sim=True) as env:
+    with MujocoBackend(inputs,identity_sim=True) as env:
         q=env.home.copy();q[0]=.4
         env.set_joint_state(q)
         expected=np.linalg.inv(transform(inputs['profile']['workspace']['T_world'])) @ transform(inputs['profile']['robot_base']['T_world']) @ urdf_fk(ROOT/'assets/SO101/urdf/so101_isaaclab.urdf',dict(zip(JOINTS,q)))
@@ -44,7 +62,7 @@ def env(tmp_path):
     pytest.importorskip('mujoco')
     # tests must set MUJOCO_GL before import; renderer isolation is checked in a subprocess.
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-    with MujocoBackend(tmp_path / 'scene', scene_inputs()) as backend:
+    with MujocoBackend(scene_inputs()) as backend:
         yield backend
 
 
@@ -108,7 +126,7 @@ def test_full_workspace_preserves_objects_reset_camera_and_physics_roles(tmp_pat
     w, urdf, source = mjcf.load_inputs(scene_inputs())
     w['root'] = ROOT
     monkeypatch.setattr(mjcf, 'load_inputs', lambda *args: (w, urdf, source))
-    with MujocoBackend(tmp_path / 'full', full_workspace=True) as full:
+    with MujocoBackend(full_workspace=True) as full:
         assert full.model.nq == 6 + 7 * len(w['task']['dynamic'])
         assert full.model.ncam == 3
         for pad in full.metadata['contact_pads']['pads']:
@@ -189,22 +207,44 @@ def test_open_bin_success_height_walls_and_speed(env):
     assert not env.success_details()['height_ok']
 
 
-def test_output_and_transform_guards(tmp_path):
+def test_scene_inputs_and_transform_guards(tmp_path):
     from soarm101_lab.simulation.mjcf import load_inputs
     with pytest.raises(ValueError, match='explicit Workspace'):
         load_inputs()
     with pytest.raises(ValueError, match='explicit Workspace'):
-        build_scene(tmp_path / 'no_input')
-    assert not (tmp_path / 'no_input').exists()
+        build_scene()
     with pytest.raises(ValueError):
         transform(np.zeros((4, 4)))
     with pytest.raises(ValueError):
-        build_scene(tmp_path, width=0)
-    build_scene(tmp_path / 'valid', scene_inputs())
-    with pytest.raises(FileExistsError):
-        build_scene(tmp_path / 'valid', scene_inputs())
-    info = json.loads((tmp_path / 'valid/scene_metadata.json').read_text())
-    assert info['physics_device'] == 'cpu' and len(info['asset_sha256']) == 14
+        build_scene(width=0)
+    xml,assets,workspace,info=build_scene(scene_inputs())
+    repeated=build_scene(scene_inputs())
+    assert repeated[0]==xml and repeated[1]==assets and repeated[3]==info
+    assert ET.fromstring(xml).find('include').get('file')=='so101.xml'
+    assert ET.fromstring(assets['so101.xml']).tag=='mujocoinclude'
+    assert not list(tmp_path.iterdir())
+    assert info['physics_device'] == 'cpu' and len(info['asset_sha256']) == 15
+    assert str(ROOT/'assets/SO101/mujoco/finger_convex_parts.json') in info['asset_sha256']
+
+
+def test_backend_ignores_old_scene_files_and_never_creates_new_ones(tmp_path,monkeypatch):
+    from soarm101_lab.simulation.mujoco_backend import MujocoBackend,configure_rendering
+    import inspect
+    from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment
+    assert 'output_dir' not in inspect.signature(MujocoBackend).parameters
+    assert 'output' not in inspect.signature(PolicyEnvironment).parameters
+    configure_rendering('none')
+    import mujoco
+    monkeypatch.setattr(mujoco.MjModel,'from_xml_path',lambda *args:pytest.fail('Runtime must load XML from memory'))
+    old=tmp_path/'old_scene';old.mkdir()
+    for name in ('scene.xml','so101.xml','scene_metadata.json'):(old/name).write_text('preserve old user file')
+    before={p.name:p.read_bytes() for p in old.iterdir()}
+    monkeypatch.chdir(tmp_path)
+    with MujocoBackend(scene_inputs()) as env:
+        assert env.model.nu==6
+        for _ in range(3):assert np.isfinite(env.step(env.home)['joint_pos']).all()
+    assert before=={p.name:p.read_bytes() for p in old.iterdir()}
+    assert list(tmp_path.iterdir())==[old]
 
 
 def test_workspace_frame_roundtrip_with_rotated_origin(tmp_path, monkeypatch):
@@ -219,7 +259,7 @@ def test_workspace_frame_roundtrip_with_rotated_origin(tmp_path, monkeypatch):
     frame[:3, 3] = [.3, -.1, .2]
     w['profile']['workspace']['T_world'] = frame.tolist()
     monkeypatch.setattr(mjcf, 'load_inputs', lambda _: (w, urdf, info))
-    with MujocoBackend(tmp_path / 'rotated') as env:
+    with MujocoBackend() as env:
         target = np.eye(4)
         target[:3, :3] = Rotation.from_euler('xyz', [.2, -.1, .5]).as_matrix()
         target[:3, 3] = [.03, -.02, .05]
@@ -242,7 +282,7 @@ from soarm101_lab.simulation.mujoco_backend import MujocoBackend
 from soarm101_lab.real2sim.workspaces.package import ROOT
 import json
 p = json.loads((ROOT / 'tests/real2sim/fixtures/scene_profile.json').read_text())
-with MujocoBackend(sys.argv[1], {'profile': p}, render_backend='software-egl') as env:
+with MujocoBackend({'profile': p}, render_backend='software-egl') as env:
     image = env.get_rgb()
     assert image.shape == (240, 320, 3) and image.dtype == np.uint8
     assert image.std() > 1
@@ -261,7 +301,7 @@ with MujocoBackend(sys.argv[1], {'profile': p}, render_backend='software-egl') a
     assert np.linalg.norm(pixel - [x.mean(), y.mean()]) < 4, (pixel, x.mean(), y.mean())
     assert not any(n.split('.')[0] in ('isaaclab','omni','pxr') for n in sys.modules)
 '''
-    result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'rgb')],
+    result = subprocess.run([sys.executable, '-c', code],
                             env={**os.environ, 'PYTHONPATH': str(ROOT / 'source/soarm101_lab')},
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
@@ -278,17 +318,17 @@ from soarm101_lab.simulation.mujoco_backend import MujocoBackend
 from soarm101_lab.real2sim.workspaces.package import ROOT
 import json
 p = json.loads((ROOT / 'tests/real2sim/fixtures/scene_profile.json').read_text())
-with MujocoBackend(sys.argv[1], {'profile': p}) as env:
+with MujocoBackend({'profile': p}) as env:
     env.step(env.home)
     assert not any(n.split('.')[0] in ('isaaclab', 'omni', 'pxr') for n in sys.modules)
     try:
-        MujocoBackend(sys.argv[1] + '_other', {'profile': p}, render_backend='egl')
+        MujocoBackend({'profile': p}, render_backend='egl')
     except RuntimeError:
         pass
     else:
         raise AssertionError('mode change after import was accepted')
 '''
-    result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'worker')],
+    result = subprocess.run([sys.executable, '-c', code],
                             env={**os.environ, 'PYTHONPATH': str(ROOT / 'source/soarm101_lab')},
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
@@ -299,7 +339,7 @@ def test_grasp_lift_and_hold_uses_real_contacts(tmp_path):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend, configure_rendering
     configure_rendering('none')
     w, _, _ = load_inputs(scene_inputs()); w['root'] = ROOT
-    with MujocoBackend(tmp_path / 'grasp', w, full_workspace=True, timestep=1/300, decimation=10) as e:
+    with MujocoBackend(w, full_workspace=True, timestep=1/300, decimation=10) as e:
         q = e.home.copy(); q[5] = .1
         e.set_joint_state(q)
         pads = [e.model.geom(n + '_contact_pad').id for n in ('gripper', 'jaw')]
@@ -322,16 +362,16 @@ def test_grasp_lift_and_hold_uses_real_contacts(tmp_path):
 def test_legacy_physics_remains_replayable_and_cannot_mix_with_new_profile(tmp_path):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend, configure_rendering
     configure_rendering('none')
-    with MujocoBackend(tmp_path / 'legacy', scene_inputs(), physics_profile='legacy_urdf') as old:
+    with MujocoBackend(scene_inputs(), physics_profile='legacy_urdf') as old:
         initial = old.get_initial_state()
         old.step(old.home)
         expected = old.get_state()['joint_pos']
         assert np.max(np.abs(old.model.actuator_forcerange)) == 10
-    with MujocoBackend(tmp_path / 'replay', scene_inputs(), physics_profile='legacy_urdf') as replay:
+    with MujocoBackend(scene_inputs(), physics_profile='legacy_urdf') as replay:
         replay.restore_state(initial)
         replay.step(replay.home)
         np.testing.assert_allclose(replay.get_state()['joint_pos'], expected, atol=1e-12)
-    with MujocoBackend(tmp_path / 'new', scene_inputs()) as new:
+    with MujocoBackend(scene_inputs()) as new:
         with pytest.raises(ValueError, match='Incompatible'):
             new.restore_state(initial)
 
@@ -344,7 +384,7 @@ def test_simulation_offsets_preserve_raw_joint_coordinates(tmp_path):
         'value': offsets.tolist(), 'provenance': 'optimized',
         'evidence': ['Synthetic zero-frame test; not physical calibration']}
     configure_rendering('none')
-    with MujocoBackend(tmp_path/'calibrated', workspace=inputs) as sim:
+    with MujocoBackend(workspace=inputs) as sim:
         q = sim.home.copy()
         sim.set_joint_state(q)
         np.testing.assert_allclose(sim.get_state()['joint_pos'], q, atol=1e-12)
@@ -367,7 +407,7 @@ def test_simulation_offset_contract_rejects_unknown_or_nonfinite():
 def test_shared_model_threaded_state_and_scratch_independence(env,tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-    clones=[MujocoBackend(tmp_path/str(i),render_backend='none',shared_backend=env) for i in range(4)]
+    clones=[MujocoBackend(render_backend='none',shared_backend=env) for i in range(4)]
     try:
         assert len({id(c.model) for c in clones+[env]})==1
         assert len({id(d) for c in clones for d in (c.data,c._fk_data,c._ik_data)})==12

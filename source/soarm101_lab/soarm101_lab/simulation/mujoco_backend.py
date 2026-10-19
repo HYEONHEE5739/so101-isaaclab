@@ -44,7 +44,8 @@ def configure_rendering(backend):
 
 
 class MujocoBackend(SimBackend):
-    def __init__(self, output_dir, workspace=None, *, render_backend='none', width=320, height=240,
+    """Compile a Workspace model in memory and own its physics/rendering state."""
+    def __init__(self, workspace=None, *, render_backend='none', width=320, height=240,
                  timestep=.002, decimation=10, task_definition=None, full_workspace=False,
                  physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None,
                  shared_backend=None):
@@ -60,14 +61,14 @@ class MujocoBackend(SimBackend):
         self.width, self.height = width, height
         if simulation_configuration is not None:identity_sim=simulation_configuration['identity_sim']
         if shared_backend is None:
-            self.scene_path, self.workspace, self.metadata = build_scene(
-                output_dir, workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
+            xml, assets, self.workspace, self.metadata = build_scene(
+                workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
                 reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'))
             if identity_sim:self.metadata['simulation_joint_frame']='urdf'
             if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
-            self.model = mujoco.MjModel.from_xml_path(str(self.scene_path))
+            self.model = mujoco.MjModel.from_xml_string(xml, assets=assets)
         else:
-            self.scene_path=shared_backend.scene_path;self.workspace=copy.deepcopy(shared_backend.workspace)
+            self.workspace=copy.deepcopy(shared_backend.workspace)
             self.metadata=copy.deepcopy(shared_backend.metadata);self.model=shared_backend.model
             self.width,self.height=shared_backend.width,shared_backend.height
             decimation=shared_backend.decimation
@@ -401,7 +402,8 @@ class MujocoBackend(SimBackend):
 
 
 class PolicyEnvironment:
-    def __init__(self, output, workspace, renderer='egl', control_hz=30, width=320, height=240,
+    """Policy observations/actions mapped to a Workspace simulation."""
+    def __init__(self, workspace=None, renderer='egl', control_hz=30, width=320, height=240,
                  closed_rad=None, open_rad=None, task_definition=None, full_workspace=True, viewer=False,
                  physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, simulation_configuration=None,
                  measured_gripper_limits=None):
@@ -409,7 +411,7 @@ class PolicyEnvironment:
             raise ValueError('control_hz must be in [10,200]')
         self.hz = float(control_hz)
         self.coordinates = RobotCoordinates(closed_rad, open_rad, measured_gripper_limits=measured_gripper_limits)
-        self.backend = MujocoBackend(output, workspace, render_backend=renderer, width=width,
+        self.backend = MujocoBackend(workspace=workspace, render_backend=renderer, width=width,
                                      height=height, timestep=1 / (self.hz * 10), decimation=10,
                                      task_definition=task_definition, full_workspace=full_workspace,
                                      physics_profile=physics_profile, identity_sim=identity_sim, active_object_ids=active_object_ids,

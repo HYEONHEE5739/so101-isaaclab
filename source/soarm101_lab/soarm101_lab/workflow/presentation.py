@@ -212,40 +212,80 @@ def current():
 _current = None
 
 
+def failure_label(reason):
+    return {'grasp_failure':'집기 실패','drop_failure':'이동 중 놓침','place_failure':'컵 배치 실패',
+            'timeout':'시간 초과','controller_failure':'제어 실패','simulation_failure':'시뮬레이션 실패',
+            'policy_failure':'정책 출력 오류','interrupted':'중단'}.get(reason,reason or '—')
+
+
 def datagen_status_text(status):
     """One backend-independent summary for preparation, source validation and generation."""
-    phases={'preparing':'환경 준비 중','source_validation':'Source 사전 검증 중','generation':'데이터 생성 중'}
+    phases={'preparing':'환경 준비 중','source_validation':'Source 사전 검증 중','generation':'데이터 생성 중','evaluation':'Sim 평가 중'}
     states={'waiting':'대기','idle':'대기','resetting':'초기화','running':'실행 중','saving':'저장 중',
         'source_validation':'Source 검증','success':'성공','interrupted':'중단','target_already_reached':'목표 도달',
         'ik_failure':'IK 계산 탈락','planning_failure':'계획 실패','simulation_failure':'시뮬레이션 실패',
-        'grasp_failure':'집기 실패','drop_failure':'이동 중 놓침','place_failure':'컵 배치 실패','timeout':'시간 초과','storage_failure':'저장 실패'}
+        'grasp_failure':'집기 실패','drop_failure':'이동 중 놓침','place_failure':'컵 배치 실패','timeout':'시간 초과','storage_failure':'저장 실패',
+        'controller_failure':'제어 실패','policy_failure':'정책 출력 오류'}
     phase=status.get('workflow_phase','generation');title=phases.get(phase,phase)
+    evaluating=phase=='evaluation'
+    if evaluating and status.get('completed_episodes',0)>=status.get('target_episodes',1):title='Sim 평가 완료'
     if status.get('target_successes') and status.get('successes',0)>=status['target_successes']:title='목표 달성'
-    elif status.get('state')=='FINISHED':title='실행 종료'
+    elif status.get('state')=='FINISHED' and not evaluating:title='실행 종료'
+    if evaluating and status.get('state')=='FINISHED' and status.get('completed_episodes',0)<status.get('target_episodes',1):title='Sim 평가 종료'
     lines=[title]
     if status.get('ik_solver'):lines.append('IK: '+status['ik_solver']+' · Policy: '+status.get('ik_failure_policy','strict'))
     if phase=='source_validation':
         lines.append(f"Source 검증 완료 {status.get('source_completed',0)}/{status.get('source_total',0)} · "
             f"현재 {status.get('source_episode') or '준비 중'} · frame {status.get('source_frame',0)}/{status.get('source_frames',0)}")
     rate=status.get('success_rate');rate=f'{rate*100:.1f}%' if rate is not None else '—'
-    lines.append(f"전체 성공 {status.get('successes',0)}/{status.get('target_successes','—')} · 시도 {status.get('attempts',0)} · 실패 {status.get('failures',0)} · 성공률 {rate}")
+    if evaluating:
+        lines.append(f"전체 평가 {status.get('completed_episodes',0)}/{status.get('target_episodes','—')}회 완료 · 성공 {status.get('successes',0)} · 실패 {status.get('failures',0)} · 성공률 {rate}")
+    else:lines.append(f"전체 성공 {status.get('successes',0)}/{status.get('target_successes','—')} · 시도 {status.get('attempts',0)} · 실패 {status.get('failures',0)} · 성공률 {rate}")
     elapsed=status.get('target_completed_seconds')
     completed=elapsed is not None
     if elapsed is None:elapsed=status.get('wall_seconds')
     if elapsed is not None:
         minutes,seconds=divmod(max(0,int(elapsed)),60)
-        label=f"목표 {status['target_successes']}개 저장 완료" if completed else '이번 생성 경과'
-        lines.append(f'{label}: {minutes}분 {seconds:02d}초 (환경 준비 제외·일시정지 포함)')
+        label='이번 평가 경과' if evaluating else f"목표 {status['target_successes']}개 저장 완료" if completed else '이번 생성 경과'
+        lines.append(f'{label}: {minutes}분 {seconds:02d}초 ('+('환경 준비·일시정지 포함)' if evaluating else '환경 준비 제외·일시정지 포함)'))
         if status.get('resumed_successes'):lines.append(f"이어 수집: 기존 {status['resumed_successes']}개 제외, 이번 실행 시간")
     if status.get('latest_env_id') is not None:
         category=states.get(status.get('latest_category'),status.get('episode_outcome',''))
-        lines.append(f"최근 결과: Env {status['latest_env_id']} · 시도 {status['latest_attempt']} · {category} {status.get('outcome_reason','')}")
+        detail=status.get('outcome_reason','')
+        if evaluating and detail.startswith(category):detail=detail[len(category):].lstrip(' ·')
+        lines.append(f"최근 결과: Env {status['latest_env_id']} · {'평가' if evaluating else '시도'} {status['latest_attempt']} · {category} {detail}")
     for index,worker in sorted(status.get('env_status',{}).items(),key=lambda item:int(item[0])):
         lines.append(f"Env {index}: {states.get(worker['state'],worker['state'])} · 시도 {worker['attempts']} · 성공 {worker['successes']} · 실패 {sum(worker.get('failures',{}).values())} · step {worker.get('steps',0)}")
         if worker.get('failures'):
             lines.append('  실패 원인: '+' · '.join(f'{states.get(key,key)} {value}' for key,value in worker['failures'].items()))
     if status.get('failure_breakdown'):
         lines.append('실패 원인: '+' · '.join(f'{states.get(key,key)}: {value}' for key,value in status['failure_breakdown'].items()))
+    return '\n'.join(lines)
+
+
+def annotation_status_text(status,now=None):
+    """Status-only Annotation contract; independent of engine and camera feeds."""
+    now=time.time() if now is None else now
+    job=status.get('annotation_progress',{})
+    phase=job.get('phase','preparing' if status.get('state')!='FINISHED' else 'completed')
+    title=dict(preparing='Annotation 준비 중',running='Annotation 처리 중',paused='Annotation 일시정지',
+               completed='Annotation 완료',stopped='Annotation 중단',failed='Annotation 오류').get(phase,phase)
+    done,total=job.get('completed_episodes',0),job.get('total_episodes',0)
+    lines=[title,f"처리 완료 {done}/{total or '—'} · 저장 성공 {job.get('saved_episodes',0)} · 실패 {job.get('failed_episodes',0)}"]
+    if job.get('pending_save_episodes'):lines[-1]+=f" · 저장 대기 {job['pending_save_episodes']}"
+    start=job.get('started_at',status.get('time',now))
+    elapsed=max(0,(job.get('finished_at') or now)-start)
+    minutes,seconds=divmod(int(elapsed),60)
+    lines.append(f'경과 {minutes}분 {seconds:02d}초 · 환경 준비·일시정지 포함')
+    states=dict(waiting='대기',running='진행 중',saving='저장 중',completed='완료',failed='실패',stopped='중단')
+    for index,worker in sorted(job.get('env_status',{}).items(),key=lambda r:int(r[0])):
+        lines.append(f"Env {index}: {states.get(worker['state'],worker['state'])} · {worker.get('episode') or '할당 없음'} · "
+            f"frame {worker.get('steps',0)}/{worker.get('total_steps',0)} · 저장 {worker.get('successes',0)} · 실패 {worker.get('failures',0)}")
+    if job.get('failure_breakdown'):
+        lines.append('실패 요인: '+' · '.join(f"{('집기 경계 표시 없음' if reason=='manual_boundary_missing' else failure_label(reason))} {count}"
+            for reason,count in job['failure_breakdown'].items()))
+    if job.get('manual'):lines.append('수동 표시 frame: '+(', '.join(str(i+1) for i in job.get('marks',[])) or '없음'))
+    if job.get('error'):lines.append('오류: '+job['error'])
     return '\n'.join(lines)
 
 

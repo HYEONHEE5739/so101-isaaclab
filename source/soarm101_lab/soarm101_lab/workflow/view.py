@@ -2,9 +2,10 @@
 import codecs
 import json
 import re
+from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter, QPixmap
-from PyQt6.QtWidgets import QLabel, QSizePolicy
+from PyQt6.QtWidgets import QLabel, QSizePolicy,QWidget,QVBoxLayout,QProgressBar
 
 
 class CameraView(QLabel):
@@ -13,11 +14,18 @@ class CameraView(QLabel):
         self.setMinimumSize(*minimum)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_signature = None
 
     def show_image(self, path):
+        try:
+            path=Path(path);stat=path.stat()
+        except OSError:return
+        signature=(str(path),stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+        current=self.pixmap()
+        if signature==self._image_signature and current is not None and not current.isNull():return
         pixmap = QPixmap(str(path))
         if not pixmap.isNull():
-            self.setPixmap(pixmap)
+            self.setPixmap(pixmap);self._image_signature=signature
 
     def paintEvent(self, event):
         pix = self.pixmap()
@@ -28,6 +36,33 @@ class CameraView(QLabel):
         size = pix.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
         x, y = (self.width() - size.width()) // 2, (self.height() - size.height()) // 2
         painter.drawPixmap(x, y, size.width(), size.height(), pix)
+
+
+class AnnotationProgress(QWidget):
+    """A job view owning progress/counts/elapsed/manual status, with no cameras."""
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.setObjectName('annotationProgress')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground,True)
+        layout=QVBoxLayout(self)
+        self.bar=QProgressBar();self.bar.setObjectName('annotationProgressBar')
+        self.bar.setFormat('%p% · %v/%m');layout.addWidget(self.bar)
+        self.summary=QLabel();self.summary.setObjectName('annotationProgressText');self.summary.setWordWrap(True)
+        layout.addWidget(self.summary);self._started_at=None
+        self.set_status({})
+
+    def set_status(self,status,outcome=None):
+        from .presentation import annotation_status_text
+        job=dict(status.get('annotation_progress',{}))
+        if outcome and not outcome.get('ok') and job.get('phase')!='stopped':
+            job.update(phase='failed',error=outcome.get('error',''))
+        if not status:self._started_at=None
+        elif self._started_at is None:self._started_at=job.get('started_at',status.get('time'))
+        if self._started_at is not None:job.setdefault('started_at',self._started_at)
+        if status.get('state')=='FINISHED':job.setdefault('finished_at',status.get('time'))
+        total=job.get('total_episodes',0);done=job.get('completed_episodes',0)
+        self.bar.setRange(0,max(1,total));self.bar.setValue(min(done,max(1,total)))
+        self.summary.setText(annotation_status_text({**status,'annotation_progress':job}))
 
 
 class LogTail:

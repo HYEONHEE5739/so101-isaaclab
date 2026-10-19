@@ -1,6 +1,44 @@
 from soarm101_lab.workflow.evaluation import episode_result, log_evaluation
 
 
+def test_real_start_checks_float64_encoder_roundtrip_and_rejects_outside_range():
+    import math
+    import numpy as np
+    import pytest
+    from test_precision_calibration import profile,reference
+    from soarm101_lab.real2sim.precision import FakeCalibrationDevice,PrecisionMapper,fit_joint,validate_joint,native_from_raw
+    from soarm101_lab.so101_joint_mapping import JOINTS
+    from soarm101_lab.workflow.evaluation import real_start_pose
+    spec=FakeCalibrationDevice('follower').motor_spec('elbow_flex')
+    spec['calibration'].update(range_min=964,range_max=3053)
+    refs=[reference('elbow_flex',raw,(raw-2084)*360/4096,split=split)
+          for raw,split in [(2084,'train'),(3000,'train'),(2800,'validation')]]
+    entry=validate_joint(fit_joint(refs,spec,'elbow_flex',[-math.radians(105),math.radians(95)]))
+    mapper=PrecisionMapper(profile(joints={'elbow_flex':entry}))
+    native=dict.fromkeys(JOINTS,0.)
+    for raw in (964,3053):
+        native['elbow_flex']=native_from_raw(raw,spec)
+        state=real_start_pose(native,mapper)
+        assert state.dtype==np.float64
+        roundtrip=mapper.urdf_to_calibrated(dict(zip(JOINTS,state.tolist())))
+        assert roundtrip['elbow_flex']==pytest.approx(native['elbow_flex'],abs=1e-9)
+    native['elbow_flex']=native_from_raw(3115,spec)
+    with pytest.raises(ValueError,match='Follower.*보정 범위') as error:
+        real_start_pose(native,mapper)
+    assert 'elbow_flex' in str(error.value) and '3115' in str(error.value)
+
+
+def test_real_worker_requires_motion_intent_before_loading_or_connecting(monkeypatch):
+    import pytest
+    from soarm101_lab.workflow import evaluation
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Unauthorized request must not prepare any devices/policy')
+    monkeypatch.setattr(evaluation,'load',forbidden)
+    for options in ({},{'enable_motion':False}):
+        with pytest.raises(ValueError,match='Real motion must be explicitly enabled'):
+            evaluation.evaluate({'stage':'real_eval','options':options})
+
+
 def test_real_policy_execution_uses_simple_urdf_path_without_real_devices(tmp_path,monkeypatch):
     import json,time
     import numpy as np

@@ -47,7 +47,7 @@ def test_canonical_video_writer_numeric_loader_curation_and_legacy(tmp_path):
     configure_rendering('none')
     root=Path(__file__).resolve().parents[2]
     profile=json.loads((root/'tests/real2sim/fixtures/scene_profile.json').read_text())
-    env=PolicyEnvironment(tmp_path/'scene',{'profile':profile},renderer='none',control_hz=30)
+    env=PolicyEnvironment({'profile':profile},renderer='none',control_hz=30)
     backend=env.backend
     try:
         backend.get_rgb=lambda camera=None:np.zeros((48,64,3),np.uint8)

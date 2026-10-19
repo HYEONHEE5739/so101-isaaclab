@@ -61,7 +61,7 @@ def main():
     try:
         import numpy as np
         from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-        env = MujocoBackend(output / 'scene', args.workspace, render_backend=args.renderer,
+        env = MujocoBackend(workspace=args.workspace, render_backend=args.renderer,
                             width=args.width, height=args.height)
         report['mujoco_version'] = env.mj.__version__
         report['samples'].append(memory_sample('physics_loaded_renderer_not_created'))

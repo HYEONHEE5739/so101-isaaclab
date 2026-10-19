@@ -100,7 +100,7 @@ def main():
             resume_root=Path(args.resume).parent
             if resume_root.name=='checkpoints':resume_root=resume_root.parent
             provenance=resume_root/'project_provenance.json'
-            from ...workflow.artifacts import fingerprint
+            from ...utils.artifact_identity import fingerprint
             proof=json.loads(provenance.read_text()) if provenance.is_file() else {}
             if not proof.get('dataset_sha256') or fingerprint(Path(args.manifest).parent)!=proof['dataset_sha256']:
                 raise ValueError('Legacy Resume dataset bytes cannot be verified; inference remains supported, do not switch loaders')

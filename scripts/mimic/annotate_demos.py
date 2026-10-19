@@ -48,6 +48,7 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--input_file", type=str, default="./datasets/dataset.hdf5")
 parser.add_argument("--output_file", type=str, default="./datasets/dataset_annotated.hdf5")
 parser.add_argument("--auto", action="store_true", default=False, help="Automatically annotate subtasks.")
+parser.add_argument('--num_envs',type=int,choices=(1,2,4,8),default=1,help='Workspace automatic Annotation slots')
 parser.add_argument("--enable_pinocchio", action="store_true", default=False)
 parser.add_argument("--annotate_subtask_start_signals", action="store_true", default=False)
 parser.add_argument(
@@ -67,7 +68,7 @@ if args_cli.workspace:
     from soarm101_lab.workflow.unified import execute
     result=execute({'backend':'isaac','stage':'annotate','workspace':args_cli.workspace,'input':args_cli.input_file,
         'include':args_cli.include,'output':str(Path(args_cli.output_file).with_suffix('.workflow')),
-        'dataset_output':args_cli.output_file,'options':{'device':args_cli.device,'auto':args_cli.auto,
+        'dataset_output':args_cli.output_file,'options':{'device':args_cli.device,'auto':args_cli.auto,'num_envs':args_cli.num_envs,
             'mode':'operator' if args_cli.headless else 'developer'}})
     print('Common annotated dataset:',result['dataset'])
     raise SystemExit(0)

@@ -121,7 +121,7 @@ def test_mujoco_live_owners_and_physics_without_isaac(exported,tmp_path):
     code = """
 import sys,numpy as np
 from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-e=MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none',full_workspace=True)
+e=MujocoBackend(sys.argv[1],render_backend='none',full_workspace=True)
 for geom,body in [('builder_camera_case_visual_0','robot_gripper'),('builder_cup_print_visual_0','cup_a')]:
  g=e.mj.mj_name2id(e.model,e.mj.mjtObj.mjOBJ_GEOM,geom)
  b=e.mj.mj_name2id(e.model,e.mj.mjtObj.mjOBJ_BODY,body)
@@ -137,7 +137,7 @@ assert not set(sys.modules)&{'isaaclab','omni','pxr'}
 e.close()
 """
     env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')}
-    result=subprocess.run([sys.executable,'-B','-c',code,str(path),str(tmp_path/'runtime')],env=env,capture_output=True,text=True)
+    result=subprocess.run([sys.executable,'-B','-c',code,str(path)],env=env,capture_output=True,text=True)
     assert result.returncode==0,result.stderr
 
 
@@ -201,7 +201,7 @@ def test_metadata_driven_one_camera_fruit_scene(fruit_export,tmp_path):
     code='''
 import sys,numpy as np
 from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-with MujocoBackend(sys.argv[2],sys.argv[1]) as e:
+with MujocoBackend(sys.argv[1]) as e:
  assert e.metadata['primary_camera']=='front'
  assert e.model.ncam==2 # front + inspection overview
  assert e.model.geom('builder_apple_collision_0').type==e.mj.mjtGeom.mjGEOM_SPHERE
@@ -215,7 +215,7 @@ with MujocoBackend(sys.argv[2],sys.argv[1]) as e:
  assert e.is_success(),e.success_details()
  assert not set(sys.modules)&{'isaaclab','pxr','omni'}
 '''
-    result=subprocess.run([sys.executable,'-B','-c',code,str(root),str(tmp_path/'sim')],env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')},capture_output=True,text=True)
+    result=subprocess.run([sys.executable,'-B','-c',code,str(root)],env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')},capture_output=True,text=True)
     assert result.returncode==0,result.stderr
 
 
@@ -372,13 +372,13 @@ def test_review_import_runtime_and_workflow_denial(exported,tmp_path):
     code="""
 import sys,numpy as np
 from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-with MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none') as e:
+with MujocoBackend(sys.argv[1],render_backend='none') as e:
  assert e.model.opt.noslip_iterations == 10
  assert e.model.nu==6 and e.object_indices=={} and e.is_success() is None
  for _ in range(10):e.step(e.home)
  assert np.isfinite(e.data.qpos).all()
 """
-    subprocess.run([sys.executable,'-c',code,str(destination),str(tmp_path/'runtime')],check=True,
+    subprocess.run([sys.executable,'-c',code,str(destination)],check=True,
                    env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')})
 
 
@@ -406,7 +406,7 @@ def test_review_physics_without_invented_tasks(exported, tmp_path):
     code='''
 import sys,numpy as np
 from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-with MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none') as e:
+with MujocoBackend(sys.argv[1],render_backend='none') as e:
  assert len(e.object_indices)==3 and e.is_success() is None
  for name in e.object_indices:
   assert abs(e.model.body_mass[e.model.body(name).id]-.02)<1e-12
@@ -416,7 +416,7 @@ with MujocoBackend(sys.argv[2],sys.argv[1],render_backend='none') as e:
  for name in e.object_indices:
   np.testing.assert_allclose(e.get_object_pose(name),e.workspace['profile']['objects'][name]['T_workspace'],atol=1e-9)
 '''
-    subprocess.run([sys.executable,'-c',code,str(destination),str(tmp_path/'runtime')],check=True,
+    subprocess.run([sys.executable,'-c',code,str(destination)],check=True,
                    env={**os.environ,'PYTHONPATH':str(package.ROOT/'source/soarm101_lab')})
 
 

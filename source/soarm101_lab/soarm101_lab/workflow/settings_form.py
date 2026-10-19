@@ -10,9 +10,11 @@ LABELS = {'val_every':'검증 간격 (step)','early_stopping':'Early Stopping','
           'num_envs': '동시 생성 환경 수', 'max_attempts': '전체 최대 시도 수',
           'save_freq': '체크포인트 저장 간격', 'num_successful_demos': '목표 성공 데이터 수',
           'episodes': 'Task당 평가 에피소드', 'max_steps': '에피소드 최대 step',
-          'output': '저장 경로', 'base_model': 'Pretrained 모델', 'generation_seed': '고정 생성 seed',
+          'base_model': 'Pretrained 모델', 'generation_seed': '고정 생성 seed',
           'device': '실행 장치', 'repo_id': 'Dataset / Hub ID', 'policy_options': '모델 추가 옵션',
-          'rename_map': '카메라 키 매핑'}
+          'rename_map': '카메라 키 매핑', 'port': 'Follower 포트', 'follower_id': 'Follower ID',
+          'side_device': 'Side 카메라 장치', 'wrist_device': 'Wrist 카메라 장치',
+          'camera_devices': '추가 카메라 연결 (이름 → 장치)'}
 
 
 class SettingsForm(QWidget):
@@ -36,6 +38,11 @@ class SettingsForm(QWidget):
             self.invalid = text
             self.textChanged.emit()
             return
+        if self.stage == 'real_eval':
+            # The explicit Real evaluation start action owns this internal flag.
+            values.pop('enable_motion', None)
+        # The required name determines every Workflow output location.
+        values.pop('output', None)
         self.invalid = None
         while self.layout_.count():
             item = self.layout_.takeAt(0)
@@ -56,13 +63,20 @@ class SettingsForm(QWidget):
             self.layout_.addWidget(toggle);self.layout_.addWidget(advanced)
         for key in keys:
             kind, default, description = FIELDS[key]
+            if self.stage=='annotate' and key=='num_envs':
+                description='자동 Annotation 환경 수: 1, 2, 4, 8. 먼저 끝난 환경에 다음 Source를 즉시 배정합니다. 원본 물리 시간축은 유지합니다. 수동 Annotation은 1환경을 사용하세요.'
+            if self.stage=='sim_eval' and key=='num_envs':
+                description='동시 평가 환경 수: 1, 2, 4, 8. Task당 평가 에피소드 수를 이 환경들이 나눠 실행합니다. 성공·실패 모두 저장합니다.'
+            if self.stage=='sim_eval' and key=='episodes':
+                description='선택한 Task마다 모든 환경을 합쳐 완료할 전체 평가 에피소드 수입니다. 성공 수를 목표로 재시도하지 않습니다.'
             if key=='batch_size' and getattr(self,'minivla',False):
                 default=8
                 description='한 번의 Forward/Backward와 optimizer 업데이트에 묶는 샘플 수. 신규 학습 기본 8, Accumulation 1입니다. Resume은 저장된 Batch/Accumulation을 유지합니다. OOM이면 실패하며 자동 축소·재시도하지 않습니다.'
             card = QWidget(); card.setObjectName('settingCard'); card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             box = QVBoxLayout(card)
             row = QHBoxLayout(); box.addLayout(row)
-            enabled = QCheckBox('Batch Size' if key=='batch_size' and getattr(self,'minivla',False) else LABELS.get(key, key))
+            label=('동시 주석 환경 수' if self.stage=='annotate' else '동시 평가 환경 수') if self.stage in ('annotate','sim_eval') and key=='num_envs' else LABELS.get(key,key)
+            enabled = QCheckBox('Batch Size' if key=='batch_size' and getattr(self,'minivla',False) else label)
             enabled.setToolTip(key)
             enabled.setChecked(key in values)
             row.addWidget(enabled, 1)
@@ -96,7 +110,8 @@ class SettingsForm(QWidget):
                 editor.toggled.connect(self.textChanged)
             elif kind == '객체':
                 editor = QTableWidget(0, 2)
-                editor.setHorizontalHeaderLabels(['항목 / 원본 키', '값 / 대상 키'])
+                editor.setHorizontalHeaderLabels(['카메라 이름 (예: front)', '장치 경로 / 인덱스'] if key == 'camera_devices'
+                                                 else ['항목 / 원본 키', '값 / 대상 키'])
                 editor.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
                 editor.setMinimumHeight(115)
                 for name, entry in (value or {}).items():

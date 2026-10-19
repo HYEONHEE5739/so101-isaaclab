@@ -84,11 +84,11 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.workflow.option_help import KEYS, template, help_html
     from soarm101_lab.workflow.operations import STAGES
-    assert set(KEYS) == set(STAGES)
-    for stage in STAGES:
+    assert set(KEYS) == set(STAGES)-{'merge'}  # Merge owns its separate dialog.
+    for stage in KEYS:
         assert isinstance(json.loads(json.dumps(template(stage))), dict)
         assert all(key in help_html(stage) for key in template(stage))
-    assert template('real_eval')['enable_motion'] is False
+    assert 'enable_motion' not in template('real_eval')  # Explicit start owns this internal flag.
     assert 'episode_time_s' not in template('source')
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
@@ -98,7 +98,7 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
     assert '만들 성공 데이터 수' in panel.options_help.toPlainText()
     panel.options.setPlainText('{"num_successful_demos": 3}')
-    assert panel.stage_options()['num_successful_demos'] == 3
+    assert panel.stage_options(require_name=False)['num_successful_demos'] == 3
     panel.reset_options()
     assert json.loads(panel.options.toPlainText())['num_successful_demos'] == 10
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
@@ -107,8 +107,31 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     panel.options.setPlainText('[]')
     import pytest
     with pytest.raises(ValueError, match='JSON 객체'):
-        panel.stage_options()
+        panel.stage_options(require_name=False)
     panel.close()
+
+
+def test_camera_decodes_only_new_frames_and_recovers_after_clear(tmp_path,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QImage
+    from soarm101_lab.workflow import view
+    app=QApplication.instance() or QApplication([])
+    path=tmp_path/'frame.png';image=QImage(12,12,QImage.Format.Format_RGB32);image.fill(0xff0000)
+    assert image.save(str(path));calls=[];original=view.QPixmap
+    def pixmap(path):calls.append(path);return original(path)
+    monkeypatch.setattr(view,'QPixmap',pixmap)
+    camera=view.CameraView()
+    for _ in range(10):camera.show_image(path)
+    assert len(calls)==1 and not camera.pixmap().isNull()
+    # Some filesystems coalesce rapid writes into one timestamp tick.
+    import os
+    old=path.stat();image.fill(0x00ff00);assert image.save(str(path))
+    os.utime(path,ns=(old.st_atime_ns,old.st_mtime_ns+1_000_000_000));camera.show_image(path)
+    assert len(calls)==2
+    assert camera.pixmap().toImage().pixelColor(0,0).green()==255
+    camera.clear();camera.show_image(path)
+    assert len(calls)==3 and not camera.pixmap().isNull()
+    camera.close()
 
 
 def test_conversion_progress_hides_encoder_info_but_keeps_errors():
@@ -131,13 +154,13 @@ def test_training_model_selector_owns_architecture(tmp_path, monkeypatch):
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
     assert not panel.primary.isHidden() and not panel.architecture.isHidden()
     assert 'architecture' not in json.loads(panel.options.toPlainText())
-    assert panel.stage_options()['architecture'] == 'smolvla'
+    assert panel.stage_options(require_name=False)['architecture'] == 'smolvla'
     panel.architecture.setCurrentIndex(panel.architecture.findData('act'))
     panel.options.setPlainText('{"architecture": "smolvla", "steps": 42}')
-    assert panel.stage_options()['architecture'] == 'act'
-    assert panel.stage_options()['steps'] == 42
+    assert panel.stage_options(require_name=False)['architecture'] == 'act'
+    assert panel.stage_options(require_name=False)['steps'] == 42
     panel.reset_options()
-    assert panel.stage_options()['architecture'] == 'act'
+    assert panel.stage_options(require_name=False)['architecture'] == 'act'
     panel.stage.setCurrentIndex(panel.stage.findData('convert'))
     assert panel.architecture.isHidden()
     panel.close()
@@ -189,7 +212,7 @@ def test_minivla_periodic_resume_picker_reads_model_root(tmp_path,monkeypatch,ba
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
     monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(str(selected),''))
     panel.browse_checkpoint()
-    opts=panel.stage_options()
+    opts=panel.stage_options(require_name=False)
     assert opts['resume_checkpoint']==str(selected) and opts['steps']==17 and opts['batch_size']==batch_size
     assert opts['model_config']==str(model/'config.json')
     panel.close()
@@ -241,7 +264,7 @@ def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monke
     registry=Registry(tmp_path/'registry');monkeypatch.setattr(ui,'Registry',lambda:registry)
     panel=ui.WorkflowPanel(lambda *args:None)
     panel.inputs.blockSignals(True);panel.inputs.clear();panel.inputs.addItem('dataset','train_id');panel.inputs.blockSignals(False)
-    monkeypatch.setattr(registry,'get',lambda key:{'type':'dataset','path':str(tmp_path/'dataset')})
+    monkeypatch.setattr(registry,'get',lambda key,**kwargs:{'type':'dataset','path':str(tmp_path/'dataset')})
     chosen=None
     for stamp,source in [('20261017_100000','train_id'),('20261017_110000','train_id'),('20261017_120000','different_id')]:
         run=registry.root/'runs'/(stamp+'_train_cube');run.mkdir(parents=True)
@@ -279,5 +302,5 @@ def test_minivla_batch_size_defaults_and_stage_options(tmp_path,monkeypatch):
     panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
     assert panel.options.editors['batch_size'][1].value()==8
     panel.options.editors['batch_size'][1].setValue(4)
-    assert panel.stage_options()['batch_size']==4 and 'accumulation' not in panel.options.editors
+    assert panel.stage_options(require_name=False)['batch_size']==4 and 'accumulation' not in panel.options.editors
     panel.close()

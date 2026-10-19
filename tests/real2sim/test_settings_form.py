@@ -4,6 +4,17 @@ from soarm101_lab.workflow.settings_form import SettingsForm
 from soarm101_lab.workflow.option_help import template
 
 
+def test_all_output_editors_and_persisted_path_values_are_removed():
+    from soarm101_lab.workflow.option_help import help_html,KEYS
+    app=QApplication.instance() or QApplication([])
+    form=SettingsForm()
+    for stage in KEYS:
+        form.set_stage(stage);form.setPlainText('{"output":"/tmp/old_nested_output"}')
+        assert 'output' not in form.editors and 'output' not in json.loads(form.toPlainText())
+        assert 'output' not in template(stage) and '<b>output</b>' not in help_html(stage)
+    form.close()
+
+
 def test_defaults_override_optional_and_help():
     app=QApplication.instance() or QApplication([])
     form=SettingsForm();form.set_stage('train');form.setPlainText(json.dumps(template('train')))
@@ -40,6 +51,17 @@ def test_datagen_environment_choices_roundtrip():
     enabled,choice,kind=form.editors['num_envs']
     assert [choice.itemData(i) for i in range(choice.count())]==[1,2,4,8]
     assert json.loads(form.toPlainText())['num_envs']==4
+    form.close()
+
+
+def test_annotation_environment_choices_roundtrip():
+    app=QApplication.instance() or QApplication([])
+    form=SettingsForm();form.set_stage('annotate');form.setPlainText('{"num_envs":2}')
+    enabled,choice,_=form.editors['num_envs']
+    assert enabled.text()=='동시 주석 환경 수'
+    assert [choice.itemData(i) for i in range(choice.count())]==[1,2,4,8]
+    choice.setCurrentIndex(choice.findData(8))
+    assert json.loads(form.toPlainText())['num_envs']==8
     form.close()
 
 
@@ -106,3 +128,19 @@ def test_minivla_batch_size_numeric_control_keeps_other_models_default():
     f.minivla=False;f.allowed_keys=TRAIN_KEYS['act'];f.setPlainText('{}')
     assert f.editors['batch_size'][1].value()==8
     f.close()
+
+
+def test_real_evaluation_has_no_motion_checkbox_and_clear_camera_mapping():
+    app=QApplication.instance() or QApplication([])
+    form=SettingsForm();form.set_stage('real_eval')
+    form.setPlainText(json.dumps({**template('real_eval'),'enable_motion':False}))
+    assert 'enable_motion' not in form.editors
+    assert 'enable_motion' not in json.loads(form.toPlainText())
+    check,table,_=form.editors['camera_devices']
+    assert table.horizontalHeaderItem(0).text()=='카메라 이름 (예: front)'
+    assert table.horizontalHeaderItem(1).text()=='장치 경로 / 인덱스'
+    table.insertRow(0)
+    table.setItem(0,0,QTableWidgetItem('front'))
+    table.setItem(0,1,QTableWidgetItem('/dev/cam_front'))
+    assert json.loads(form.toPlainText())['camera_devices']=={'front':'/dev/cam_front'}
+    form.close()

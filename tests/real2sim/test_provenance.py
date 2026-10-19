@@ -173,7 +173,10 @@ def no_network(*a, **k):
     raise AssertionError("UI attempted an HTTP request")
 urllib.request.urlopen = no_network
 from PyQt6.QtWidgets import QApplication, QPushButton
+from soarm101_lab.workflow import ui
+from soarm101_lab.workflow.artifacts import Registry
 from soarm101_lab.real2sim.ui import Window
+ui.Registry = lambda: Registry(Path(sys.argv[2]) / 'workflow_registry')
 app = QApplication([])
 w = Window(sys.argv[2])
 from soarm101_lab.real2sim.profile import load

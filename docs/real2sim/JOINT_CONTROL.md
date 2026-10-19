@@ -53,7 +53,7 @@ Pair 품질에 기록한다. 정상적으로 보이는 것으로 속이지 않�
 Isaac Source/독립 Teleop은 기존 SO101Leader.advance에서 Precision 관측 후 선택 URDF로
 목표를 제한한다. MuJoCo Source는 기존 worker에서 URDF/backend 및 선언된 policy gripper
 범위로 목표를 제한하고 요청/실제 action을 별도로 기록한다.
-실물 Policy는 명시 enable_motion과 dataset frame 검사, strict policy observation/inverse,
+실물 Policy는 UI의 `Real 평가 시작`(내부 enable_motion 지정) 또는 CLI의 명시 opt-in과 dataset frame 검사, strict policy observation/inverse,
 모터 유효성 검사로 실행한다. 삭제된 Teleop Guard는 Policy에도 적용하지 않는다.
 Policy ActionGuard와 RobotCoordinates는 기존 별도 표현/rollout 계약으로 유지한다.
 

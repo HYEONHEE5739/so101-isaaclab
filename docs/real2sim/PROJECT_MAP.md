@@ -2,6 +2,10 @@
 
 "뭘 수정하려면 어디를 봐야 하지?"에 답하기 위한 실전용 지도다.
 
+클래스·함수명과 영향 범위/주의할 계약까지 포함한 전체 수정 안내는
+[WHERE_TO_EDIT](../architecture/WHERE_TO_EDIT.md), 최종 폴더·파일 설명은
+[PROJECT_STRUCTURE](../architecture/PROJECT_STRUCTURE.md)에 있다. 아래는 기존 영역별 빠른 색인이다.
+
 ## Real2Sim / scene
 
 | 바꾸고 싶은 것 | 먼저 볼 곳 |
@@ -35,6 +39,8 @@
 | Isaac Source 기록 | `scripts/teleoperation/record_mimic_dataset.py`, `mdp/so101_mimic_recorders.py` |
 | MuJoCo Source 기록 | `workflow/mujoco.py:source`, `workflow/episodes.py:EpisodeWriter` |
 | 두 엔진 명시 Replay·Annotation / 자동 재생 없는 DataGen 분기 | `workflow/unified.py` |
+| Annotation 최대 속도·동적1/2/4/8환경, 공유 Replay 판정·순서 보존 저장·계측 | `workflow/annotation.py` |
+| Annotation 영상 없는 진행률·저장/실패·환경 상태·경과 시간 | `workflow/annotation.py:run`, `workflow/view.py:AnnotationProgress`, `workflow/presentation.py:annotation_status_text`, `workflow/stages.py` |
 | 공식 Mimic·Pool·RNG·성공 예약 | `workflow/mimic.py`, `workflow/mimic_reference/` |
 | 병렬 생성 실행·중단/재개 | `workflow/datagen.py` |
 | Source 계보와 Train/Val | `workflow/episodes.py` |
@@ -104,7 +110,8 @@ Real2Sim calibration/capture 단계에서는 random reset이 관측 비교를 �
 |---|---|
 | 공통 backend 선택·stage UI | `workflow/ui.py` |
 | 실행 계획·취소·등록 | `workflow/operations.py` |
-| MuJoCo stage request | `workflow/operations.py::mujoco_request/mujoco_plan` |
+| MuJoCo stage request / 계획 | `workflow/worker_request.py::mujoco_request`, `workflow/operations.py::mujoco_plan` |
+| Registry·학습·HDF5 외부 영상 bytes identity | `utils/artifact_identity.py::fingerprint` (기존 `workflow.artifacts` import도 유지) |
 | MuJoCo worker source/train/eval | `workflow/mujoco.py` |
 | 두 엔진 replay/annotation/datagen 진입 | `workflow/unified.py` |
 | Source 기록·partition·과거 학습 호환 | `workflow/episodes.py` |

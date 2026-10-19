@@ -68,7 +68,7 @@ def test_source_uniform_xy_preserves_original_and_recorded_policy(workspace,tmp_
     size=np.array(run['profile']['objects'][run['task']['dynamic'][0]]['dimensions_m'])[:2]
     assert np.any(np.abs(points)>half-size/2-original['task']['reset']['margin_m'])
     simulation=simulation_configuration(run,backend='mujoco',scene_configuration=run['scene_configuration'])
-    with MujocoBackend(tmp_path/'uniform_model',workspace['root'],render_backend='none',task_definition=run['task_definition'],
+    with MujocoBackend(workspace['root'],render_backend='none',task_definition=run['task_definition'],
                        simulation_configuration=simulation) as backend:
         assert backend.randomizer.sample()['sampling']['mode']=='uniform'
         assert backend.metadata['scene_configuration']['reset']==run['task']['reset']
@@ -106,7 +106,7 @@ def test_runtime_filters_without_mutating_workspace(workspace,ids):
     run=configured(w,t,ids,'mujoco');active=run['task']['dynamic']
     assert active==[n for n in w['task']['dynamic'] if n in ids]
     assert w==before
-    with MujocoBackend(w['root'].parent.parent/('runtime_'+str(len(ids))+'_'+ids[0]),w['root'],task_definition=t,active_object_ids=ids,render_backend='none') as e:
+    with MujocoBackend(w['root'],task_definition=t,active_object_ids=ids,render_backend='none') as e:
         for name in w['task']['dynamic']:
             present=name in ids
             assert (e.mj.mj_name2id(e.model,e.mj.mjtObj.mjOBJ_BODY,name)>=0)==present
@@ -168,7 +168,7 @@ def test_new_builder_object_is_real_dynamic_distractor(tmp_path):
     from soarm101_lab.real2sim.workspaces.builder import import_scene
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
     w=package.load(import_scene(export_with_new_object(tmp_path),registry=tmp_path/'workspaces'))
-    with MujocoBackend(tmp_path/'sim',w['root'],render_backend='none',active_object_ids=['cube_red','new_manipulable']) as e:
+    with MujocoBackend(w['root'],render_backend='none',active_object_ids=['cube_red','new_manipulable']) as e:
         assert set(e.object_indices)=={'cube_red','new_manipulable'}
         assert e.model.body('new_manipulable').mass>0
         assert all(t['pick_object_id']!='new_manipulable' for t in catalog(e.workspace))
@@ -202,7 +202,7 @@ def test_ui_filters_objects_and_requires_explicit_task(workspace):
 def record_fixture(path,w,ids,episodes=1):
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment
     from soarm101_lab.workflow.episodes import EpisodeWriter
-    with PolicyEnvironment(path.parent/(path.name+'_scene'),w['root'],'none',full_workspace=True,
+    with PolicyEnvironment(w['root'],'none',full_workspace=True,
                            task_definition=definition(w),active_object_ids=ids) as env:
         env.backend.get_rgb=lambda camera=None:np.zeros((24,32,3),np.uint8)
         writer=EpisodeWriter(path,env,definition(w)['language_instruction'])
@@ -238,7 +238,7 @@ def test_resume_and_curated_mixed_compositions(workspace,tmp_path):
     from soarm101_lab.workflow.artifacts import inspect_artifact
     a=record_fixture(tmp_path/'single',workspace,['cube_red'],2)
     b=record_fixture(tmp_path/'double',workspace,['cube_red','cube_blue'])
-    with PolicyEnvironment(tmp_path/'resume_scene',workspace['root'],'none',task_definition=definition(workspace),active_object_ids=['cube_red','cube_blue']) as env:
+    with PolicyEnvironment(workspace['root'],'none',task_definition=definition(workspace),active_object_ids=['cube_red','cube_blue']) as env:
         resumed=EpisodeWriter(tmp_path/'resume',env,a.instruction)
         with pytest.raises(ValueError,match='active'):resumed.resume(a.root)
     mixed=tmp_path/'mixed';shutil.copytree(a.root,mixed)

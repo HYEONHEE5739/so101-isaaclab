@@ -188,6 +188,7 @@ def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(
     d.set_excluded({d.rows[-1]['name']})
     names=[r['name'] for r in d.rows if r['name'] not in d.excluded]
     if mode=='planned':d.preview_source_split()
+    d.storage_name.setText('분할_1' if mode=='planned' else '선별_1')
     assert not errors and d.export_button.isEnabled()
     assert [b for b in d.findChildren(QPushButton) if '저장' in b.text()]==[d.export_button]
     assert d.export_button.text()==('Train / Val 저장' if mode=='planned' else '데이터 저장')
@@ -196,8 +197,8 @@ def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(
         requests.append(args);return str(dest),''
     monkeypatch.setattr(QFileDialog,'getSaveFileName',choose_destination)
     d.export_button.click()
-    if mode=='planned':dest=Path(d.saved_collection)
-    assert not errors and len(requests)==(0 if mode=='planned' else 1) and dest.exists()
+    dest=Path(d.saved_collection) if mode=='planned' else Path(registry.latest({'source'})['path'])
+    assert not errors and not requests and dest.exists()
     if mode=='planned':
         result=json.loads((dest/'source_split.json').read_text())
         assert result['assignments']==d.split_plan['assignments']

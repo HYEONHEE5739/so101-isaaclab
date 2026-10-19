@@ -28,6 +28,7 @@ class Plot(QWidget):
         super().__init__();self.mode=mode;self.rows=[];self.row=None;self.excluded=set();self.selected=-1
         self.yaw=.7;self.pitch=.55;self.drag=None;self.screen=[];self.zoom=1.0
         self.robot=None;self.frame=0;self.mesh=None;self.payload={};self.sample_frame=0;self.context_rows=[]
+        self.action_lines=[];self.action_row=None;self.setMouseTracking(mode=='actions')
         self.setMinimumSize(240,200)
     def set_view(self, name):
         self.zoom=1.0
@@ -103,7 +104,7 @@ class Plot(QWidget):
             mode='균일 XY' if region['mode']=='uniform' else '네 anchor 주변' if region['mode']=='four_anchors' else region['mode']
             painter.drawText(12,43,f'지지면 {support[0]:.0f}×{support[1]:.0f} · 중심 배치 {size[0]:.0f}×{size[1]:.0f} mm · {mode}')
         painter.drawText(12,self.height()-32,'실선: 중심 배치 · 점선: 지지면 · 보라 네모: 로봇' if regions else '배치 경계 정보 없음 · 기록된 위치만 표시')
-        legend='초록 Train · 파랑 Val · 회색 제외 · 주황 테두리 확인' if self.has_splits() else '초록 포함 · 주황 확인 · 회색 제외 · 흰 테두리 선택'
+        legend='초록 성공 · 빨강 실패 · 회색 제외 · 흰 테두리 선택' if any(r.get('evaluation_outcome') for r in (self.context_rows or self.rows)) else '초록 Train · 파랑 Val · 회색 제외 · 주황 테두리 확인' if self.has_splits() else '초록 포함 · 주황 확인 · 회색 제외 · 흰 테두리 선택'
         painter.drawText(12,self.height()-12,legend)
 
     def has_splits(self):
@@ -111,6 +112,7 @@ class Plot(QWidget):
 
     def point_color(self,row,split_mode):
         if row['name'] in self.excluded:return '#66717d'
+        if row.get('evaluation_outcome'):return '#55d6b0' if row['recorded_success'] else '#ff7777'
         if split_mode:return SPLIT_COLORS.get(row.get('split'),'#b5c5d3')
         return '#efb467' if row['flags'] else '#55d6b0'
 
@@ -177,6 +179,7 @@ class Plot(QWidget):
             painter.drawPolygon(QPolygonF(points[3*i:3*i+3]))
 
     def paintEvent(self,event):
+        self.action_lines=[];self.action_row=None
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(),QColor('#141b23'));painter.setPen(QColor('#b5c5d3'))
         robot_view=any(r.get('placement_region') for r in (self.context_rows or self.rows))
@@ -213,6 +216,7 @@ class Plot(QWidget):
             for j,color in enumerate(colors):
                 painter.setPen(QPen(QColor(color),1))
                 points=[QPointF(35+phase(indices[i])*(self.width()-55),self.height()-35-(v-low)/span*(self.height()-75)) for i,v in enumerate(q[:,j])]
+                self.action_lines.append(np.array([[p.x(),p.y()] for p in points]))
                 for a,b in zip(points,points[1:]):painter.drawLine(a,b)
                 painter.drawText(15+j*65,40,str(j+1))
             painter.setPen(QPen(QColor('#ffffff'),1))
@@ -220,7 +224,38 @@ class Plot(QWidget):
             for label,index in self.row.get('events',{}).items():
                 x=35+phase(index)*(self.width()-55);painter.setPen(QPen(QColor('#efb467'),1,Qt.PenStyle.DashLine));painter.drawLine(QPointF(x,45),QPointF(x,self.height()-35));painter.drawText(QPointF(x,55),label)
             painter.drawText(12,self.height()-10,f"0 … {self.row['duration']:.2f}s / {low:.2f} … {q.max():.2f} rad (1–5 arm, 6 gripper)")
+            self.action_row=self.row
         painter.end()
+
+    def action_tooltip(self,position):
+        if self.row is None or self.action_row is not self.row:return ''
+        from ..so101_joint_mapping import JOINTS
+        cursor=np.array([position.x(),position.y()]);hits=[]
+        for joint,points in enumerate(self.action_lines):
+            if len(points)==1:
+                sample=0;distance=float(np.linalg.norm(cursor-points[0]))
+            else:
+                start=points[:-1];delta=np.diff(points,axis=0)
+                fraction=np.clip(np.sum((cursor-start)*delta,axis=1)/np.maximum(np.sum(delta*delta,axis=1),1e-12),0,1)
+                distances=np.linalg.norm(start+fraction[:,None]*delta-cursor,axis=1)
+                segment=int(np.argmin(distances));distance=float(distances[segment])
+                sample=segment+int(fraction[segment]>.5)
+            if distance<=8:hits.append((distance,joint,sample))
+        if not hits:return ''
+        hits.sort();lines=['관절 목표값 · 가까운 기록']
+        q=np.asarray(self.row['actions']);indices=self.row.get('sample_indices',np.arange(len(q)))
+        times=self.row.get('timestamps')
+        for distance,joint,sample in hits:
+            if distance>hits[0][0]+1:continue
+            frame=int(indices[sample]);value=float(q[sample,joint])
+            elapsed=float(times[frame]-times[0]) if times is not None else frame*self.row.get('dt',self.row['duration']/max(self.row.get('frames',len(q))-1,1))
+            lines.append(f'{joint+1}축 · {JOINTS[joint]}: {np.degrees(value):.2f}° ({value:.4f} rad)\n'
+                         f'  {elapsed:.3f}s · {frame+1} frame')
+        return '\n'.join(lines)
+
+    def leaveEvent(self,event):
+        if self.mode=='actions':QToolTip.hideText()
+        super().leaveEvent(event)
     def wheelEvent(self,event):
         if self.mode!='trajectory':
             event.ignore();return
@@ -236,6 +271,11 @@ class Plot(QWidget):
             if min(d)<225:
                 index=int(np.argmin(d));self.picked.emit(getattr(self,'original_indices',list(range(len(d))))[index])
     def mouseMoveEvent(self,event):
+        if self.mode=='actions':
+            text=self.action_tooltip(event.position())
+            if text:QToolTip.showText(event.globalPosition().toPoint(),text,self)
+            else:QToolTip.hideText()
+            return
         if self.drag is not None and self.mode=='trajectory':
             delta=event.position()-self.drag;self.yaw+=delta.x()*.01;self.pitch+=delta.y()*.01
             self.drag=event.position();self.update()
@@ -244,8 +284,9 @@ class Plot(QWidget):
 
 class DatasetPicker(QFileDialog):
     """One picker accepts either a canonical dataset directory or an HDF5 file."""
-    def __init__(self,parent,directory):
+    def __init__(self,parent,directory,*,allow_evaluation=True):
         super().__init__(parent,'데이터 열기 · HDF5 파일 또는 데이터 폴더',directory)
+        self.allow_evaluation = allow_evaluation
         self.setOption(QFileDialog.Option.DontUseNativeDialog)
         self.setFileMode(QFileDialog.FileMode.AnyFile)
         self.setNameFilter('데이터 (*.hdf5 *.h5)')
@@ -256,7 +297,8 @@ class DatasetPicker(QFileDialog):
         if not selected:return
         path=Path(selected[0])
         if path.is_dir():
-            if (path/'manifest.json').is_file() and (path/'project_provenance.json').is_file():
+            from .curation import evaluation_inputs
+            if (self.allow_evaluation and evaluation_inputs(path) is not None) or ((path/'manifest.json').is_file() and (path/'project_provenance.json').is_file()):
                 QDialog.accept(self)
             else:self.setDirectory(str(path))
         elif path.is_file() and path.suffix.lower() in ('.hdf5','.h5'):QDialog.accept(self)
@@ -344,11 +386,13 @@ class CurationDialog(QDialog):
         self.filter_toggle,self.filter_panel,filter_layout=self.fold(ll,'에피소드 필터')
         help_label=QLabel('현재 연 데이터 안에서 목록을 좁힙니다. 포함 / 제외 결과에는 영향을 주지 않습니다.');help_label.setWordWrap(True);filter_layout.addWidget(help_label)
         self.only_flags=QCheckBox('확인 필요 에피소드만 표시');self.only_flags.toggled.connect(self.refresh_list);filter_layout.addWidget(self.only_flags)
-        self.filters={};form=QFormLayout();filter_layout.addLayout(form)
+        self.filters={};form=QFormLayout();self.filter_form=form;filter_layout.addLayout(form)
         for key,label in [('task_id','작업'),('active_object_count','물체 개수'),('active_object_ids','물체 구성'),('pick_object_id','목표 물체'),
-                          ('scene_configuration','Scene 구성'),('source_group','원본 그룹'),('split','Train / Validation'),('recorded_success','기록된 성공 라벨'),('annotation_status','Annotation 상태')]:
+                          ('scene_configuration','Scene 구성'),('source_group','원본 그룹'),('split','Train / Validation'),('recorded_success','기록된 성공 라벨'),('annotation_status','Annotation 상태'),('failure_reason','평가 실패 유형'),('env_id','평가 환경')]:
             combo=QComboBox();combo.addItem('전체',None);combo.currentIndexChanged.connect(self.refresh_list)
             self.filters[key]=combo;form.addRow(label,combo)
+            if key in ('failure_reason','env_id'):
+                combo.hide();form.labelForField(combo).hide()
         self.list=QListWidget();self.list.setMinimumWidth(260);self.list.setWordWrap(True);ll.addWidget(self.list,1)
         self.exclude=QPushButton('선택 에피소드 제외');self.exclude.clicked.connect(self.toggle);ll.addWidget(self.exclude)
         right=QWidget();rl=QVBoxLayout(right);split.addWidget(right)
@@ -410,12 +454,11 @@ class CurationDialog(QDialog):
         self.assign_split.setToolTip('현재 선택한 에피소드와 같은 원본 그룹을 함께 이동합니다. 복제된 원본이 학습/검증 양쪽에 섞이지 않도록 합니다.')
         self.cancel_split=QPushButton('미리보기 지우기');self.cancel_split.clicked.connect(self.cancel_source_split);assignbar.addWidget(self.cancel_split);assignbar.addStretch()
         self.split_status=QLabel('비율과 랜덤값을 정한 뒤 미리보기를 누르면 분포 그림에 색으로 표시됩니다.');self.split_status.setWordWrap(True);advanced_layout.addWidget(self.split_status)
-        from .artifacts import suggested_name
         self.names_form=QFormLayout();page.addLayout(self.names_form)
-        self.storage_name=QLineEdit(suggested_name('curated'));self.names_form.addRow('저장 이름',self.storage_name)
+        self.storage_name=QLineEdit();self.storage_name.setPlaceholderText('필수 · 예: 선별_1 또는 분할_1');self.names_form.addRow('저장 이름',self.storage_name)
         self.output_preview=QLabel();self.output_preview.setWordWrap(True);self.output_preview.setTextFormat(Qt.TextFormat.PlainText);self.names_form.addRow('예상 저장 위치',self.output_preview)
         self.storage_name.textChanged.connect(self.update_output_preview)
-        footer=QHBoxLayout();layout.addLayout(footer);footer.addWidget(QLabel('원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.'));footer.addStretch()
+        footer=QHBoxLayout();layout.addLayout(footer);self.storage_note=QLabel('원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.');footer.addWidget(self.storage_note);footer.addStretch()
         self.export_button=QPushButton('데이터 저장');self.export_button.setObjectName('primaryAction');self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.save);footer.addWidget(self.export_button)
         self.scatter.picked.connect(self.select);self.list.currentItemChanged.connect(self.from_list)
@@ -566,7 +609,11 @@ class CurationDialog(QDialog):
         if picker.exec()==QDialog.DialogCode.Accepted:self.load_data(picker.selectedFiles()[0])
 
     def open_latest(self):
-        artifact=self.registry.latest({'source','annotated','datagen'},self.workspace)
+        artifact=self.registry.latest({'source','annotated','datagen','evaluation_dataset','sim_eval'},self.workspace)
+        if artifact and artifact['type']=='sim_eval':artifact={**artifact,'path':str(Path(artifact['path']).parent)}
+        if artifact and artifact['type']=='evaluation_dataset':
+            run=next((p for p in Path(artifact['path']).parents if (p/'evaluation_datasets.json').is_file()),None)
+            if run:artifact={**artifact,'path':str(run)}
         if artifact and artifact['type']=='source' and artifact.get('collection',{}).get('partition'):
             origin=self.registry.root/'sources'/artifact['collection']['source']/'origin'
             artifact=next((a for a in reversed(self.registry.all()) if a['type']=='source'
@@ -592,7 +639,8 @@ class CurationDialog(QDialog):
                     control.blockSignals(True);control.setValue(value);control.blockSignals(False)
                 self.val_ratio.setText(f'검증 {100-self.train_ratio.value():g}%')
             known=next((a for a in reversed(self.registry.all()) if a['path']==path and a.get('status')=='SUCCEEDED'),None)
-            if known:self.kind=known['type']
+            if any(r.get('evaluation_outcome') for r in rows):self.kind='evaluation_dataset'
+            elif known:self.kind=known['type']
             elif Path(path).is_dir():
                 manifest=json.loads((Path(path)/'manifest.json').read_text())
                 provenance=json.loads((Path(path)/'project_provenance.json').read_text())
@@ -602,13 +650,15 @@ class CurationDialog(QDialog):
                 with h5py.File(path) as f:
                     g=f['data'][self.rows[0]['name']]
                     self.kind='datagen' if f['data'].attrs.get('generation_provenance') else 'annotated' if 'obs/datagen_info/subtask_term_signals/grasp' in g else 'source'
-            if self.kind not in ('source','annotated','datagen'):raise ValueError('Source / Annotation / Datagen 데이터만 지원합니다.')
+            if self.kind not in ('source','annotated','datagen','evaluation_dataset'):raise ValueError('Source / Annotation / Datagen / 평가 데이터를 선택하세요.')
             self.count.setMaximum(len(self.rows));self.count.setValue(len(self.rows))
             for key,combo in self.filters.items():
+                if key in ('failure_reason','env_id'):
+                    combo.setVisible(self.kind=='evaluation_dataset');self.filter_form.labelForField(combo).setVisible(self.kind=='evaluation_dataset')
                 combo.blockSignals(True);combo.clear();combo.addItem('전체',None)
                 for value in sorted({self.filter_value(r,key) for r in rows}):combo.addItem(value,value)
                 combo.blockSignals(False)
-            self.dataset_label.setText({'source':'Source · 수집 데이터','annotated':'Annotation · 주석 데이터','datagen':'DataGen · 생성 데이터'}[self.kind]+'  /  '+Path(path).name)
+            self.dataset_label.setText({'source':'Source · 수집 데이터','annotated':'Annotation · 주석 데이터','datagen':'DataGen · 생성 데이터','evaluation_dataset':'Sim 평가 · 성공 / 실패 비교 (읽기 전용)'}[self.kind]+'  /  '+Path(path).name)
             self.dataset_label.setToolTip(str(path));self.export_button.setEnabled(True);self.exclude.setEnabled(True)
             self.scatter.context_rows=self.rows;self.scatter.rows=self.rows;self.refresh_list();self.select(0)
         except Exception as exc:self.error(exc)
@@ -622,6 +672,9 @@ class CurationDialog(QDialog):
             visible.append(i)
             state='제외' if r['name'] in self.excluded else '확인 필요' if r['flags'] else '포함'
             text=r['name']+'  ·  '+state+'\n'+str(r.get('pick_object_id') or r['task_id'])+(' · '+r['split'] if r.get('split') else '')
+            if r.get('evaluation_outcome'):
+                from .presentation import failure_label
+                text+='\n'+('성공' if r['recorded_success'] else failure_label(r.get('failure_reason')))+f" · Env {r.get('env_id','—')}"
             if r['flags']:text+='\n확인: '+', '.join(r['flags'])
             item=QListWidgetItem(text);item.setToolTip(r['task_id']+' · '+(r.get('split') or '미분할')+'\n'+(self.review_text(r) or '특이 지표 없음'))
             item.setForeground(QColor(self.scatter.point_color(r,split_mode)))
@@ -637,6 +690,9 @@ class CurationDialog(QDialog):
     @staticmethod
     def filter_value(row,key):
         value=row.get(key)
+        if key=='failure_reason':
+            from .presentation import failure_label
+            return failure_label(value)
         if key=='scene_configuration':value=(value or {}).get('sha256')
         if isinstance(value,(list,tuple)):return ', '.join(value)
         return 'UNKNOWN' if value is None else str(value)
@@ -645,6 +701,12 @@ class CurationDialog(QDialog):
 
     @staticmethod
     def review_text(row):
+        if row.get('evaluation_outcome'):
+            from .presentation import failure_label
+            evaluation=row.get('evaluation',{})
+            result='성공' if row['recorded_success'] else failure_label(row.get('failure_reason'))
+            checks=' · '.join(k+(': 충족' if v else ': 미충족') for k,v in evaluation.get('checks',{}).items())
+            return f"Sim 평가: {result} · Env {row.get('env_id','—')}\n"+checks
         if not row.get('flags'):return ''
         lines=[];explained=set()
         for detail in row.get('flag_details',[]):
@@ -659,20 +721,29 @@ class CurationDialog(QDialog):
         return '확인 필요 · '+'\n'.join(lines)+'\n같은 작업·물체 구성 내 비교입니다. 불량 확정은 아닙니다.'
 
     def update_split_controls(self):
-        locked=any(r.get('source_partition') for r in self.rows);planned=self.split_plan is not None
-        self.storage_name.setVisible(not planned);self.names_form.labelForField(self.storage_name).setVisible(not planned)
+        evaluation=self.kind=='evaluation_dataset'
+        locked=evaluation or any(r.get('source_partition') for r in self.rows);planned=self.split_plan is not None
+        self.advanced_toggle.setVisible(not evaluation)
+        if evaluation:self.advanced_toggle.setChecked(False);self.advanced_panel.hide()
+        self.storage_name.setVisible(not evaluation);self.names_form.labelForField(self.storage_name).setVisible(not evaluation)
+        self.output_preview.setVisible(not evaluation);self.names_form.labelForField(self.output_preview).setVisible(not evaluation)
+        self.export_button.setVisible(not evaluation)
+        self.storage_note.setText('평가 완료 시 성공/실패 데이터가 자동 저장됩니다. 현재 화면은 평가 기록을 검토합니다.' if evaluation else '원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.')
         eligible=sum(r['name'] not in self.excluded for r in self.rows)
         self.plan_split.setEnabled(bool(self.path) and eligible>=2 and not locked)
         for control in (self.assign_split,self.source_assignment):control.setEnabled(planned and not locked)
         for control in (self.train_ratio,self.split_seed):control.setEnabled(bool(self.rows) and not locked)
         self.cancel_split.setVisible(planned);self.choose_button.setEnabled(bool(self.rows));self.count.setEnabled(bool(self.rows))
-        self.restore_button.setEnabled(bool(self.excluded));self.export_button.setEnabled(bool(self.path) and eligible>0)
+        self.restore_button.setEnabled(bool(self.excluded));self.export_button.setEnabled(bool(self.path) and eligible>0 and not evaluation)
         self.export_button.setText('Train / Val 저장' if planned else '데이터 저장')
-        self.export_button.setToolTip('같은 Source 묶음의 다음 split_N 아래 Train / Validation을 저장합니다.' if planned else '현재 포함된 에피소드를 새 데이터셋에 저장합니다. 기록된 분할은 유지합니다.')
+        self.export_button.setToolTip('같은 Source 묶음의 입력한 이름 아래 Train / Validation을 저장합니다.' if planned else '현재 포함된 에피소드를 입력한 이름으로 저장합니다. 기록된 분할은 유지합니다.')
         if planned:
             counts={s:sum(r.get('split')==s and r['name'] not in self.excluded for r in self.rows) for s in ('train','val')}
             self.split_status.setText(f"저장 전 · Train {counts['train']}개 / Val {counts['val']}개")
             self.split_status.setToolTip('같은 원본과 복제본은 함께 배정됩니다. 원본 그룹이 학습/검증 양쪽에 섞이지 않는지 확인한 계획입니다.')
+        elif evaluation:
+            self.split_status.setText('평가 기록 · 성공/실패 분포와 궤적 비교 · Train/Val 분할 대상이 아닙니다.')
+            self.split_status.setToolTip('에피소드 필터에서 성공 라벨·실패 유형·환경을 선택하세요.')
         elif locked:
             counts={s:sum(r.get('split')==s and r['name'] not in self.excluded for r in self.rows) for s in ('train','val')}
             pools={s:{key for r in self.rows if r.get('source_partition') and r['source_partition']['split']==s for key in r['source_partition']['source_ids']} for s in ('train','val')}
@@ -685,12 +756,15 @@ class CurationDialog(QDialog):
         self.update_output_preview()
 
     def curation_destination(self):
-        if self.split_plan is not None and self.path:return self.registry.next_split(self.path)
         from .artifacts import validate_storage_name
+        if not self.storage_name.text():raise ValueError('저장 이름을 입력하세요.')
         name=validate_storage_name(self.storage_name.text())
         split=self.split_plan is not None
-        root=self.registry.root/'curation'/('splits' if split else 'filtered')
-        return root/(name if split or (self.path and Path(self.path).is_dir()) else name+'.hdf5')
+        if self.path and (self.kind=='source' or split):
+            if name=='origin':raise ValueError('origin은 원본 폴더 이름입니다. 다른 저장 이름을 입력하세요.')
+            folder=self.registry.source_collection(self.path)/name
+            return folder if split or Path(self.path).is_dir() else folder/'dataset.hdf5'
+        return self.registry.root/'curation'/'filtered'/(name if self.path and Path(self.path).is_dir() else name+'.hdf5')
 
     def update_output_preview(self):
         try:self.output_preview.setText(str(self.curation_destination()))
@@ -820,13 +894,16 @@ class CurationDialog(QDialog):
 
     def save_source_split(self):
         if not self.split_plan:return self.error('Source 분할을 먼저 확인하세요.')
+        try:
+            dest=self.curation_destination()
+            if dest.exists():raise ValueError('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
+        except ValueError as exc:return self.error(exc)
         from .episodes import export_source_splits
         source,kind=self.path,self.kind;names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         assignments={n:self.split_plan['assignments'][n] for n in names}
         ratio,seed=self.train_ratio.value()/100,self.split_seed.value()
         def work():
             parent=self.registry.ensure_source_origin(source,kind)
-            dest=self.registry.next_split(source)
             result=export_source_splits(parent['path'],dest,ratio,seed,assignments,names,nested=True)
             for split,output in result['outputs'].items():
                 self.registry.register(kind,output,parents=[parent['id']],display_name=split)
@@ -842,22 +919,31 @@ class CurationDialog(QDialog):
         if not self.path:return
         if self.split_plan is not None:return self.save_source_split()
         canonical=Path(self.path).is_dir()
-        try:proposed=self.curation_destination();proposed.parent.mkdir(parents=True,exist_ok=True)
+        try:proposed=self.curation_destination()
         except ValueError as exc:return self.error(exc)
-        dest,_=QFileDialog.getSaveFileName(self,'새 데이터셋 저장',str(proposed),'폴더 이름 (*)' if canonical else 'HDF5 (*.hdf5)')
-        if not dest:return
-        if not canonical and not Path(dest).suffix:dest+='.hdf5'
-        if not canonical and Path(dest).suffix.lower() not in ('.h5','.hdf5'):return self.error('HDF5 파일 확장자를 사용하세요.')
+        source_subset=self.kind=='source'
+        if source_subset:dest=str(proposed)
+        else:
+            proposed.parent.mkdir(parents=True,exist_ok=True)
+            dest,_=QFileDialog.getSaveFileName(self,'새 데이터셋 저장',str(proposed),'폴더 이름 (*)' if canonical else 'HDF5 (*.hdf5)')
+            if not dest:return
+            if not canonical and not Path(dest).suffix:dest+='.hdf5'
+            if not canonical and Path(dest).suffix.lower() not in ('.h5','.hdf5'):return self.error('HDF5 파일 확장자를 사용하세요.')
         from .artifacts import validate_storage_name
-        try:name=validate_storage_name(Path(dest).name if canonical else Path(dest).stem)
+        try:name=validate_storage_name(self.storage_name.text() if source_subset else Path(dest).name if canonical else Path(dest).stem)
         except ValueError as exc:return self.error(exc)
-        if Path(dest).exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
+        boundary=Path(dest) if canonical or not source_subset else Path(dest).parent
+        if boundary.exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
         names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         source,kind=self.path,self.kind
         self.info.setText('새 데이터 저장·검증·등록 중… 원본은 유지됩니다.')
         def work():
-            output=export_subset(source,dest,names)
-            parent=next((a for a in self.registry.all() if a['path']==source),None)
+            parent=self.registry.ensure_source_origin(source,kind) if source_subset else next((a for a in self.registry.all() if a['path']==source),None)
+            if source_subset and not canonical:boundary.mkdir(parents=True,exist_ok=False)
+            output=export_subset(parent['path'] if source_subset else source,dest,names)
             self.registry.register(kind,output,parents=[parent['id']] if parent else [],display_name=name)
             return output
-        self.run_job(work,lambda output:self.info.setText(f'저장·등록 완료: {output} · {len(names)} episodes'))
+        def done(output):
+            if source_subset:self.saved_collection=str(boundary)
+            self.info.setText(f'저장·등록 완료: {output} · {len(names)} episodes')
+        self.run_job(work,done)

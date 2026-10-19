@@ -1,3 +1,357 @@
+# 2026-10-19 Workflow UI 지연 원인 계측·목록 읽기 교체
+
+- 실제 Registry31개/136MiB. 기존 단계 전환2.35–4.86초, refresh2.07–2.21초. cProfile29.53초 중
+  Registry.all25회/대용량 JSON decode22.63초. 실제 사용자 Registry/UI를 임시 복사한 동일 runner로 측정.
+- Registry.get/all의 metadata_only=True가 display용 필요한 scene/task/partition만 compact JSON으로 캐시한다.
+  inode/size/mtime_ns/ctime_ns가 달라지면 갱신하고 삭제/추가도 감지. 반환은 독립 dict라 UI 수정이 cache에 남지 않는다.
+  기본 get/all/verify와 실제 저장 데이터는 그대로. 중복 register는 가벼운 목록을 찾고 반환 시 full record를 다시 읽는다.
+- Workflow UI/Window Scene 목록의 full 읽기를 대체했다. readiness와 execute는 기존 background worker 안에서
+  full get 후 기존 서비스로 전달. MiniVLA 후보의 전체 계약 검사를 기존 readiness executor로 이동하고 generation 검사.
+  거절한 Val은 None으로 되돌리며 다른 Val로 조용히 대체하지 않는다. 중복 refresh_training_choices 호출 삭제.
+  화면용 Workspace 재사용만 하고 실행 전 load/hash 검증은 유지. CameraView/Workflow preview는 같은 frame decode를 반복하지 않는다.
+- 최종 같은 runner 단계 전환0.062–0.136초/refresh0.068–0.075초, 최초 초기화2.08→1.00초. cold 목록 읽기는 남는다.
+  일반 readiness는 이 시간 측정에서 fixture. 별도 actual Train100/Val30 native preflight는 READY, heartbeat49회/
+  max gap0.160초. worker/장치0, 원 Registry/UI fingerprint 보존, 실제 학습/장시간/실물 검증 아님.
+- UI206PASS, 공통/Source Partition/Resume/Runtime90PASS. 이후 중복 등록·Val 자동 대체 거부 보강5PASS(중복 합산 금지).
+  초기 Workspace load 횟수/mock get signature/기존 merge·enable_motion schema fixture 기대와 이미지 timestamp tick을
+  고친 로그는 최종과 구분. 의존성 설치/변경 없음. 실제 실행 중인 사용자 GUI/프로세스는 건드리지 않았으므로 재실행 필요.
+- 새 production 파일·Manager·Wrapper 없음. 실제 수정은 workflow/{artifacts,ui,view}.py, real2sim/ui.py의 목록 caller,
+  기존 테스트3개와 문서. 이전 미커밋·모델·데이터·Workspace 보존, Commit/Push 없음.
+  보고서 outputs/workflow_validation/ui_responsiveness/REPORT.md, before/after JSON·profile, interactions.json, 최종 로그.
+
+# 2026-10-19 Workflow 데이터 선택 단일화·모든 새 결과 이름별 평면 저장
+
+- 사용자 요청대로 Workflow의 입력 폴더 열기/묶음 버튼과 browse/browse_collection/select_collection/
+  browse_workspace 본문을 삭제했다. data_select 버튼 → browse_data/select_data 한 경로로 교체.
+  Registry.input_directory는 매번 Source=environments, Replay·Annotation=sources, DataGen=annotations,
+  Convert=datagen, Train·Dataset upload=datasets, Eval·Policy upload=models에서 시작한다.
+- Source는 manifest/READY와 실제 v<version> 폴더를 확인한 후 그 버전만 선택. Annotation Source family를
+  고르면 origin/선별/분할 이름/train,val 표시, origin 기본. origin의 실제 파일명이 다른 경우도 폴더명으로 표시.
+  폴더 안 호환 입력1개는 자동 선택, 여러 개는 dropdown. 단계별 input_folders/input_selections는 독립·저장/복원.
+  MiniVLA는 같은 버튼으로 별도 Val 폴더를 고르되 실제 계약 검사 후 Train/범위를 유지하고 Val만 연결한다.
+- output_location에서 앞 입력 이름·모델 종류·stage·merged 그룹 생성 분기와 policy_architecture/
+  input_storage_name helper를 삭제. 신규 source=name/origin 유지, 이후는 store/<필수 저장 이름>/로 직접 저장.
+  Source Curation의 origin/이름별 선별/Train·Val과 실제 partition·계보/예약/덮어쓰기 거부는 유지.
+  모든 UI output editor/schema/help/옛 값 전달 제거. CLI/API 명시 output 및 ACT/Smol Resume 기존 위치 계약은 유지.
+  기존 자료 이동/metadata rewrite 없음. 모델 내부 checkpoints/policy, 영상·보고서 형식은 유지.
+- Live Real/Sim의 Scene 선택/Builder Import는 실제 사용되므로 Window.browse_scene로 본문을 이동해 보존.
+  browse_directory는 이 Live Import와 Curation/Profile에서 사용되어 유지. 새 Wrapper/Manager/launcher 없음.
+  Convert와 Real 평가의 입력을 상단 Sim backend 때문에 숨기던 filter를 정리했고 기존 실행 좌표/Task gate는 유지.
+- 회귀 최종 UI/저장/Source version/Live183PASS, 계약115PASS(영상 reader1개는 native process 별도1PASS),
+  선택 부분30PASS·경로/이름 factory6PASS(겹침 합산 금지). 초기183 이전 origin/source_demo 표시 assertion을
+  폴더명으로 고쳤고, actual capture에서 드러난 Convert engine filter도 교정. 처음 native codec검사는 Qt GLib
+  symbol 충돌이라 의존성 변경 없이 별도 native process로 통과했다. 초기 로그 모두 보존.
+- 실제 Green Annotation17을 읽어 MuJoCo/Isaac 각2환경 목표1개 생성(414/362frame) 후 LeRobot 변환/등록.
+  datagen/내가_정한_생성본, datasets/내가_정한_변환본에 저장. 실제 Source origin/14·6 목록, Train100/Val30
+  별도 선택의 metadata 계약, 모델 선택 등9화면 캡처. 임시 Registry/검증 출력만 쓰고 원본/사용자 Registry 보존.
+  capture의 일반 readiness는 fixture이며 선택 시 Train/Val 실제 검사와 native worker 실행은 별도 확인했다.
+- 보고서 outputs/workflow_validation/workflow_data_selection/REPORT.md, final_audit.json/display_audit.json/
+  native_*/result.json. 코드198개AST·11stage×2backend 경로 검사. 기존 GUI/장치 미조작·새 학습/Hub/실물 없음.
+  Commit/Push 없음, 기존 미커밋 변경 보존. GUI를 완전히 다시 열어 반영한다.
+
+# 2026-10-19 미사용 출력 인수 삭제·공통 필수 이름·Annotation flat 저장
+
+- 사용자 후속 요청3개 완료. MujocoBackend.output_dir/PolicyEnvironment.output은 본문에서 읽지 않고,
+  production 호출7곳도 이미 전달하지 않았다. 두 인수와 호환 설명을 삭제하고 테스트30개 호출의 옛
+  위치 인수/child process의 불필요한 출력 경로를 제거했다. **구형 인수를 받아 버리는 wrapper/kwargs 없음.**
+  두 클래스 자체는 실제 physics·좌표 변환에 사용하므로 유지. 학습 policy.output_dir/Writer 출력은 실제 사용하므로 유지.
+- UI의 source_name을 storage_name으로 교체, 모든10개 Workflow 화면 같은 첫 위치에 `저장 이름 (필수)`.
+  빈 이름은 경고 후 worker0, stage_options 마지막에 넣어 Train filter에서도 유지. 단계별 storage_names로
+  분리하고 실행 중 잠금. 새 이름은 기존 output_location/예약/Registry 계약으로 전달. CLI의 자동 이름 API 유지.
+- Annotation 새 기본은 annotations/annotation_<선택 Source 이름>/dataset.hdf5, videos/report도 같은 폴더.
+  기존 Source/origin/split/train/val 중첩 생성 분기 삭제. train/val처럼 일반 이름은 Source·분할 이름 포함,
+  길이 제한 시 안정 hash suffix. Source 입력 변경은 자동 이름만 갱신하고 직접 입력한 이름은 보존.
+  기존 데이터/Registry/계보·분할/중복 이름 거부/ACT·Smol Resume 출력 계약은 유지. 기존 폴더 이동 없음.
+- 실제 Operations→worker→저장/Registry: 양 엔진1환경 Green Source432frame·HDF5/MP42개를 평평한 기본
+  경로에 저장/읽기 확인. JPG0/Scene파일0. Mu hash·compiled23배열·이전30step trace 정확 일치.
+  원본 Source/사용자 Registry/UI 설정 보존. 실제 기존63개 등의 artifact count는 과거 이력이며 현재 inventory는 audit 참고.
+- 최종 core147PASS, native IK27PASS, native 구성32PASS(legacy provenance warning1), USD/UI182PASS,
+  마지막 이름/Preview/학습 UI 부분84PASS. 겹치는 suite는 합산하지 않는다. 198개Python AST/실제 호출7+
+  테스트30개 검사. 10개 화면의 필수 이름 row 동일 y/편집/Options 전달·worker0 capture 확인.
+  초기 combined suite의Pinocchio import segfault, USD와 MuJoCo 혼합 실행 guard 실패12개는 보존했고
+  의존성 변경 없이 native/GUI를 분리해 통과. capture의 임시 artifacts 폴더 누락도 고친 최종 로그와 구분.
+- 보고서 outputs/workflow_validation/storage_names_cleanup/REPORT.md, final_audit.json/native_*/result.json.
+  Annotation 진행 화면/성능 보고서는 annotation_job_view/REPORT.md이고 최신 필수 이름 UI로 재캡처했다.
+  새 GPU 학습/실물/실제 Hub 업로드/사람의 주석·Developer 창·반복 성능은 미검증. 사용자 GUI 미조작,
+  Commit/Push 없음. 기존 미커밋 작업 보존. GUI 재실행 후 새 코드가 반영된다.
+
+# 2026-10-19 Annotation 진행 상태 화면·미리보기 경로 제거
+
+- 사용자 요청: Annotation만 realtime Sim 영상 UI를 없애고 양 엔진 같은 진행률/완료·저장·실패/환경별 frame/
+  경과 시간으로 교체. 기존 view.py의 AnnotationProgress와 presentation.annotation_status_text를 사용한다.
+  기존 UI/worker 진입·판정/수동기능/결과 저장은 유지. 새 production 파일·Manager·launcher·옵션 flag 없음.
+- annotation.run의 preview 큐/preview 콜백/last_images 접근/JPEG publish를 삭제. snapshot 상태 provider를
+  기존 Presentation에 연결하고 Writer.commit 후 저장 성공을 증가한다. 먼저 끝난 episode가 순서 저장을
+  기다리면 완료/저장 대기를 분리한다. 전체 시간은 환경 준비/일시정지 포함·종료 시 고정. 오류/실패 유형도 표시.
+- stages에서 Preview와 SIM 실행 단계를 구분해 Annotation feeds=(). UI는 표시되는 feed만 읽고 Annotation의
+  카메라/task signal/영상 상태 문구를 갱신하지 않는다. Isaac Annotation은 Overview sensor/env binding/실카메라
+  시작 호출 제거. manual Developer의 native 창 pause 렌더만 유지. CameraView/Presentation.publish/attach 본문 동일.
+- 실제 Green4개1,524frame/seed1047/2환경 before-after: Mu9.41→9.07초, Isaac77.15→61.15초(엔진 준비 제외).
+  전체 wall은13.42→13.22/95.73→79.51초. 각1회 순차 표본이며 부하 변동/일반 속도 우위를 주장하지 않는다.
+  양 엔진37배열×4개/주석/계보/성공 정확 일치. Mu RGB24표본 정확 일치, Isaac raster session 차이는 허용하되
+  영상 frame/FPS/PTS/SHA 계약 검사. 두 Isaac 실행770tick·6160substep·dt1/240·decimation8 동일.
+- Before JPG Mu2/Isaac3→After0개, status.frames={}·Isaac Overview 없음/SideWrist 유지. 실제 수동1환경도 양 엔진
+  각432frame에서 IPC pause→mark→resume과 mark frame 저장·MP4를 확인. 사람의 키보드/Developer 창 검증은 아님.
+- 최종 core107PASS, USD/UI70PASS. 합성1/2/4/8·실패·저장 대기·controls·elapsed 고정과 다른 Stage Preview를
+  확인했다. 실제 상태를 임시 Registry에 넣은5개 UI capture·원본 Source/사용자 Registry/UI 설정 보존 확인.
+  보고서 outputs/workflow_validation/annotation_job_view/REPORT.md, audit.json/BENCHMARK/display_audit.
+  실제8환경/여러 seed·반복 성능·하드웨어·새 학습 미검증. 사용자 GUI/장치 미조작, Commit/Push 없음.
+  기존 미커밋 작업 보존. 이전 preview 구현 snapshot은 검증 폴더 before_*.txt에만 있고 production 경로 없음.
+
+# 2026-10-19 Annotation 실행 교체·동적 슬롯·속도 비교
+
+- 사용자 원칙: 기존 구현을 교체하고 Wrapper/Manager/호환 엔진을 누적하지 않는다. Annotation 직렬 본문을 삭제하고
+  annotation.py의 replay_episode 한 상태 머신을 Replay/Annotation이 공유한다. run은 Source 동적 할당/순서 저장/계측만
+  소유한다. 새 Manager/Adapter/launcher 없음. lazy 순환 import 없음. request_realtime 단순 wrapper 삭제.
+- 자동1/2/4/8, 기본1. MuJoCo 공유 model/독립 MjData worker, Isaac vector tick. 빈 슬롯은 즉시 다음 Source로 재배정.
+  post-step 관측을 모든 슬롯에서 끝낸 후 restore해 다른 슬롯의 접촉 관측 경계를 보존. 대기 목표 고정. 완료 numeric/영상은
+  Source 순서로 Writer.commit. caller 소유 primary는 닫지 않고 worker GL은 자신의 thread에서 정리한다.
+- 기존 UI/worker 진입 유지, 실행 설정의 num_envs 카드 추가. 수동 mark/skip은 기존 Env0의1환경만 명시 허용.
+  Annotation은 realtime 값을 무시하고 sleep pacing 없음, pause/step 유지. Replay realtime/평가 playback 유지.
+  PhysicsControl/Adapters/Buffer/Writer 재사용. DataGen/Evaluation/Training 수치·알고리즘·설정은 수정하지 않았다.
+- 실제 Green Source4개1,524frame/seed1047 양 엔진 before1/after1·2·4 측정. Mu 처리12.11→12.47/9.04/9.51초,
+  Isaac91.94→90.81/62.94/49.96초. 단일 표본·엔진 준비 제외. 전체 wall/처리량/실패 로그는 REPORT/BENCHMARK.
+  Mu 각37배열×4episode와 주석 정확 일치·RGB72표본 일치. Isaac1 numeric148개/주석 정확 일치.
+  **Isaac2/4는 명령/clock/성공4·grasp 경계가 같지만 측정 q 최대0.01151rad, place 경계−1~+3frame 차이**.
+  멀티의 모든 Annotation 결과가 완전 동일하다는 요구까지 충족했다고 주장하지 않는다. 첫 EE 유도 Mimic actions의
+  작은 차이와 RTX RGB session 차이도 audit에 기록. 차이를 숨기는 clipping/주석 보정/판정 완화 없음.
+- 상세 Isaac4 probe: physics_step_s11.998초(3456substeps=432×8), render19.279초, native control-step minus render
+  20.897초(관측 manager 포함). encoding/background 합계는 wall과 겹침. 입력 MP4 RGB decode/reencode0회,
+  실제 관측 출력만 카메라별1회 인코딩. Common Source 기준이며 Legacy 내부 RGB Import는 별도 기존 경로다.
+- regression_final132PASS, 최종 Annotation/공통68PASS, GUI26/Presentation16PASS(중복 합산 금지).
+  8환경/controls는CPU fixture, native는1/2/4. 원본 Source hash 보존·Registry/모델 쓰기 없음. 실물/새 학습/native8 미검증.
+  이전 구형 실행은 outputs/workflow_validation/annotation_throughput/before_unified.txt 검증 snapshot에만 있음.
+  보고서 같은 폴더 REPORT.md, audit.json. 새 GUI 설정은 GUI 재실행 후 반영. 사용자 GUI/하드웨어는 건드리지 않음.
+  Commit/Push 없음. 기존 미커밋 작업 보존. 초기 PyQt/USD 누락·synthetic Buffer events·무작위 이름 fixture 실패는
+  최종 로그와 구분했다. 계측용 sim.step/render는 실행 후 원래 메서드로 복원한다.
+
+# 2026-10-19 Workflow MuJoCo Scene 파일 저장 코드 삭제
+
+- 사용자 요청: Source뿐 아니라 모든 단계 결과에 생성되는 scene/XML/별도 metadata 파일을 없앤다.
+  mjcf.write_xml/출력 mkdir·파일 쓰기 분기를 삭제. build_scene은 XML 문자열/include bytes와 메모리 metadata 반환.
+  MujocoBackend는 MjModel.from_xml_string(xml,assets)로 로드. 임시 XML 디렉터리도 생성하지 않는다.
+- 기존 backend/PolicyEnvironment의 output 인수는 외부 호출 호환용으로만 수용하며 파일을 쓰지 않는다.
+  Workflow _environment/Datagen/Evaluation과 check_env의 scene 경로 전달을 제거했다. Runtime도 MuJoCo용
+  임시 scene 폴더를 만들지 않는다. Isaac Runtime의 세션 USD 자원·immutable Workspace 원본은 그대로다.
+- 같은 ET UTF-8 직렬화를 사용해 기존 model_sha256을 보존. 실제 Workspace의 변경 전 hash·compiled23배열·
+  seed1047의30step 물리 trace와 정확 일치. joint/actuator/collision/자산·수치·성공 조건 변경 없음.
+- core103PASS/1skip, Runtime14PASS. 실제 Source fakeLeader1×3frame, 기존 Source의 Replay/Annotation 각1개,
+  실제2환경 DataGen 목표1개, hold fixture의2환경 Sim평가2×3step 저장을 확인. 모든 결과 Scene 파일0개.
+  원본 Source/Annotation/ACT hash·Registry byte 보존, 임시 검증 payload 제거. 기존 사용자 scene 폴더는 삭제하지 않음.
+- 보고서 outputs/workflow_validation/mujoco_memory_scene/REPORT.md. 새 학습/실물/실제 정책 품질 검증·Commit/Push 없음.
+  기존 미커밋 작업 보존. 초기 runner의 Annotation 입력 종류·직접 평가 request.renderer 누락을 고친 최종
+  runtime_verified.log/runtime_result.json을 완료 근거로 사용한다. 앞선 Source 보고서의 scene 유지 설명은 과거 상태다.
+
+# 2026-10-19 Source 필수 이름·이름별 Curation 저장·PNG 코드 제거
+
+- GUI Source 이름은 필수. 빈 이름으로 시작하면 QMessageBox 오류·worker0. 준비 검사는 이름을 입력하기
+  전에도 다른 설정을 확인하되 시작할 때 필수 검사한다. Source의 output editor/schema key/복원 값/전달 제거.
+  입력 이름→기존 output_location→sources/<이름>/origin. CLI/직접 API output 계약·다른 Stage 옵션은 유지.
+- Curation 저장 이름은 선별·분할 모두 노출/직접 입력. Source 선별은 sources/<묶음>/<이름>/dataset.hdf5,
+  분할은 같은 <이름>/{train,val}. 과거 canonical 선별은 <이름>/manifest.json+episode들. 자동 next_split 삭제.
+  collection_at/source_collection이 이름 variant를 인식해 Annotation/묶음 선택을 유지한다. 기존 split_N도 읽는다.
+  관리 밖 Source는 첫 저장 때 기존 ensure_source_origin으로 복사, 관리된 파생 Source는 현재 입력을 사용한다.
+  origin/빈 이름/경로 탈출/기존 결과 덮어쓰기를 거부한다. Annotation/DataGen 일반 선별 경로는 유지했다.
+- MuJoCo execute.publish의 첫 프레임 PNG4종 저장 코드 삭제. 실제 MP4·UI presentation JPG·Snapshot은 유지.
+  scene/ XML은 MjModel.from_xml_path 실행 입력이며 metadata는 씬/hash 증거라 유지. 학습 reader는 XML을 안 읽는다.
+- GUI/USD154PASS. 실제 Common/Canonical Source20 각각17선별/14·6분할, Common629배열/34영상과 legacy
+  episode 파일 보존. 별도 가상 Leader/실제 MuJoCo Source1×3frame, PNG0/MP42/Scene 컴파일/preview 확인.
+  실제 장치/사람 시연/Isaac 수집/학습 없음. 원본/Registry 보존·임시 payload 제거. 기존 자료 이동/삭제 없음.
+- 보고서 outputs/workflow_validation/source_named_storage/REPORT.md. GUI 재시작 필요. Commit/Push 없음.
+  검증 runner의 dict 배열 비교·timestamp key 가정 실패는 고쳐 최종 runtime_final.log/result.json으로 확인했다.
+
+# 2026-10-19 미분할 색상별 LeRobot 병합 수정
+
+- 사용자 화면의 Source Partition evidence/hash 오류는 새 색상별50개 변환본의 partition=None을 무조건
+  validate_partition으로 넘긴 버그다. 미분할끼리는 원래 Source/Mimic segment 계보를 검사해 그대로 병합한다.
+  Train/Val 배정을 만들지 않으며 분할 상태 혼합·깨진 증거·중복/Source identity 충돌은 거부한다.
+- simulation_model의 Task/scene 선택 차이도 로봇 물리 모델 변경과 분리했다. 원래 hash/Scene의 비Task 설정·
+  관절/그리퍼/충돌/카메라 계약은 검사한다. 다Task 공통 모델의 scene_configuration=None, hash 재계산;
+  episode Scene과 merge_inputs.coordinates에 원래 Task/좌표 계약을 보존한다. MiniVLA 분할 정책은 그대로다.
+- 실제 사용자3×50개를 임시 Registry/worker로 병합:150개/60,942frame의 state/action/time/frame 정확 일치,
+  두 카메라 RGB18표본 정확 일치·3Task·계보·MiniVLA index 확인. 원본 hash/Registry byte 보존 후 임시 출력 제거.
+  실제 UI에서도 같은3개 선택→미분할150개 요약/버튼 활성화 확인. 병합24+Source계약6, GUI8개 통과.
+- 초기 native suite의 GUI6개는 PyQt 경로 누락으로 실패해 기존 GUI 경로를 명령에만 넣어 별도6개 통과했다.
+  보고서 outputs/workflow_validation/lerobot_merge_unpartitioned/REPORT.md. GUI 재시작 필요. Commit/Push 없음.
+
+# 2026-10-19 Green DataGen 실패 / Source·DataGen Resume 입력 격리
+
+- 사용자 실패2개: runs/20261019_020923...와021014...의 resume_data가 파란 Source의 origin/dataset.videos였다.
+  영상 보관 폴더를 dataset directory로 읽어 manifest.json이 없어서 실패. 초록 Annotation17은 정상 입력이었다.
+  Source/DataGen이 공유하던 resume_data 위젯 값이 단계 이동 때 넘어간 UI 버그를 수정했다.
+- WorkflowPanel.resume_inputs가 Source/Datagen 값을 각각 보관/복원한다. DataGen은 기존 DataGen 결과(선택)
+  라벨과 새 생성이면 비우는 안내, clear 버튼을 사용한다. 기존 기본 Annotation 입력과 이어 생성 입력은 별개다.
+- 기존 data_resume.py에 inspect_resume_input을 추가해 Source/Annotation/영상 폴더의 잘못된 DataGen Resume를
+  차단한다. unified_plan은 엔진/Workspace/Task/Annotation SHA/총 목표를 검사. unified.execute도 출력/엔진
+  생성 전 경로·종류를 검사한다. 기존 정식 _resume의 seed/IK/정책/모델 검사·공식 Mimic·물리는 무변경.
+- 동일 사용자 Green Annotation17/SciPy Best Effort/4환경으로 임시 목표1개를 실제 생성·검증했다. 성공1 저장,
+  네 환경373/384/373/400step. 유효한 그 결과의 이어 생성 계획도 READY. 원본 SHA·기존 Registry byte 보존,
+  검증 payload/임시 Registry는 제거했다. 원 사용자 목표50개 실행/하드웨어/Commit/Push 없음.
+- core/UI/Resume111PASS, 안내 문구 최종 UI/Resume 부분 suite는 별도 로그. 원래 실패 로그/출력은 보존.
+  보고서 outputs/workflow_validation/datagen_resume_isolation/REPORT.md, diagnosis/runtime_result.json.
+  현재 GUI에서 급히 새 생성하려면 이어 생성 입력을 비우면 된다. 단계별 격리 코드는 GUI 재시작 후 적용된다.
+
+# 2026-10-19 Source 이어 수집 선택 / 직접 저장 이름
+
+- MuJoCo의 새 common Source는 HDF5인데 browse_resume_data만 폴더 전용이었다. 기존 Curation DatasetPicker를
+  재사용해 양 엔진 모두 HDF5/과거 canonical 폴더를 고르게 했다. Curation의 평가 입력은 기본 지원을 유지하고
+  Resume picker만 allow_evaluation=false. 취소/잘못된 입력은 기존 선택을 보존하며 클릭 예외는 guard로 표시.
+- Source 화면 상단 source_name은 선택 사항. UI→storage_name→기존 output_location/worker→Registry 표시 이름.
+  sources/<입력 이름>/origin 아래 기존 dataset.hdf5(Mu)/source.hdf5(Isaac) 형식 유지. 다른 단계에는 전달하지 않는다.
+  생략 시 선택 Task가 자동 이름에 반영된다. 기존 Source 자동 이름은 Task+수집 시각으로 읽기 전용 표시하며
+  실제 폴더/기존 Registry JSON을 rename/rewrite하지 않았다.
+- 총 목표 Episodes는 기존 개수 포함. 선택 시 목표<=기존이면 기존+1. MuJoCo plan에도 기존 resume.validate를
+  연결해 총 목표/Task/Scene/partition 오류를 장치 연결 전에 차단. MuJoCo 총 목표·Isaac 추가 개수 전달 유지.
+  legacy canonical Source의 partition 잠금 확인도 top-level/provenance 모두 읽는다.
+- 실제 Source20의 기존 EpisodeWriter.resume로 임시 복사:740배열·영상40 SHA 일치, 원본/Registry 보존 후 임시 삭제.
+  Qt UI·양 엔진 준비 계획·기존 Source fake Leader/Resume 검사와 캡처는 별도 프로세스/임시 Registry.
+  새 시연/실제 장치 연결·학습·Commit/Push 없음. 기존 사용자 GUI/worker는 종료하지 않았다.
+  보고서 outputs/workflow_validation/source_resume_naming/REPORT.md. GUI를 다시 열면 새 입력/선택창이 반영된다.
+
+# 2026-10-19 변환된 LeRobot 데이터셋 병합
+
+- 기존 LeRobot 변환 화면에 병합 버튼/체크 선택 창. 같은 역할의 검증된 v3 변환본2개 이상을 새 이름으로 저장.
+  UI 실행/취소/로그는 기존 Operations.run과 workflow.py worker, Registry parents는 선택한 모든 입력이다.
+  새 launcher·의존성·자동 Hub 업로드 없음. 기본 datasets/merged/<이름>, 이력은 기존 runs.
+- workflow/lerobot_merge.py는 설치된 LeRobot aggregate_datasets(roots=local)를 사용한다. 좌표/모델/영상/FPS/
+  Workspace/엔진·중복·Source 배정/group 누수를 검사하고 원본을 보존한다. 실패 시 private staging만 제거.
+- 다른 Source 집합의 top-level partition은 inventory를 합치고 episode_source_partitions/input 증거는 원래대로
+  보존한다. episodes.partition_evidence를 validation 준비 검사와 MiniVLA index가 공유하며 기존 변환본은 fallback.
+  Train과 Val은 별도 병합. 예전 unknown/미분할 변환본은 임의 계보를 붙이지 않고 거부한다.
+- 실제 Train100 중 두 episode의 임시 subset 병합에서738frame state/action/시각 및12RGB 표본이 정확 일치.
+  원래 Val30과 Train/Val preflight·MiniVLA CPU reader·원본 dataset hash·Registry/UI byte 보존을 확인했다.
+  검증 payload는 임시 폴더에서 제거. 새 GPU학습·정책실행·실물·Hub·Commit/Push 없음.
+- 상세 보고서 outputs/workflow_validation/lerobot_merge/REPORT.md, runtime_result.json과 관련 로그.
+  실행 중 사용자 GUI/Source worker는 건드리지 않았다. 새 버튼은 GUI를 다시 열면 반영된다.
+
+# 2026-10-18 사용자 지정 학습 계보만 보존 / 나머지 결과 삭제
+
+- 사용자 명시 요청: Source20→14/6→Annotation→DataGen100/30→LeRobot100/30, ACT와 MiniVLA, ACT100회 Sim 평가만 보존.
+  추가 범위 질문에 “Workflow와 검증용 테스트 결과 모두 정리”로 답해 outputs/workflow_validation 전체도 삭제했다.
+  **아래 과거 이력에 적힌 workflow_validation 보고서/스크립트는 이제 존재하지 않는다.** 새 정리 기록은
+  outputs/cleanup/20261018_training_lineage/REPORT.md, plan.json, runtime_validation.json, final_state.json이다.
+- 이전 평가/Replay/실패 실행/.incomplete/캐시와 테스트 결과 약9.63GiB를 영구 삭제했다. 삭제 자료 사본 없음.
+  Registry71→16(보존 record byte/ID/부모/SHA 동일), runs26→10. 보존한 실행 이력·모델/데이터가 사용하는 호환 링크는 유지.
+  ACT100회는 성공61/실패39이며 success/failure HDF5·MP4·report 모두 보존했다. ACT 전체 Checkpoint와 Mini best18k/last20k 보존.
+- 보존1714파일과 소스/자산/실사용 Workspace/보정/캡처 등 보호1563파일의 SHA/링크가 전후 동일했다.
+  Registry16개 verify, Source20/14/6, 생성·변환100/30, Curation 평가100개 읽기, Mini Train100/Val30 CPU 로딩과 RGB,
+  best/last Resume 계약을 삭제 경로 분리 후 다시 확인했다. 실행 중 worker 없음(사용자 GUI만 유지).
+- 기능 코드·UI 설정·기존 데이터 내용 변경 없음. 새 학습/정책 실행/모터 연결/Commit/Push 없음.
+  GUI를 다시 열면 정리된 Registry 목록이 반영된다. 남아 있는 runs는 보존된 계보의 실행 이력/필수 경로다.
+
+# 2026-10-18 Curation 관절 목표 그래프 hover
+
+- 기존 curation_ui.Plot의 actions 모드에만 mouse tracking과 QToolTip을 추가했다. 곡선 근처에서 축 번호/이름,
+  degree와 원래 rad, 기록 시각/1-based frame을 커서 옆에 표시한다. 겹친 곡선은 함께 표시, 빈 곳/leave 시 숨김.
+- paint에서 이미 생성한 곡선 좌표로 hit test하고 가까운 실제 표시 표본을 사용한다. sample_indices/전체 timestamps를
+  따라 정확한 기록 시간을 표시하며 각도를 보간해 새 값으로 만들지 않는다. 기존 그래프 모양/타임라인/저장/물리 변경 없음.
+- 실제 완료 ACT 평가 HDF5의6축 Qt mouse event·tooltip 표시/화면을 확인. sparse timestamp/샘플 index·단일 표본도 확인.
+  Curation 회귀34PASS. 원본 HDF5와 Registry/UI byte 보존은 outputs/workflow_validation/curation_joint_hover/result.json.
+  보고서 같은 폴더 REPORT.md. 기존 미커밋 작업 보존, Commit/Push 없음. 실행 중 GUI는 완전히 다시 열어야 새 코드가 반영된다.
+
+# 2026-10-18 MuJoCo 손가락 collision 교정 / Real 평가 시작 자세 검사
+
+- 사용자 지시에 따라 보이는 STL·물체 형상·관절/모터값은 유지하고 gripper/jaw collision만 오프라인 convex 조각으로 교체했다.
+  `simulation.mjcf.robot_xml`이 정적 `assets/SO101/mujoco/finger_convex_parts.json`을 읽고 원본 STL SHA를 검사한다.
+  Source/DataGen/Sim 평가의 기본 공통 compiler에 적용. explicit legacy_urdf는 이전 hull을 유지한다. Isaac collision은 변경하지 않았다.
+- CoACD는 검증 폴더에 내려받아 분리 실행했고 conda에 설치하지 않았다. worker 의존성 추가 없음.
+  원본 3개 collision mesh당96조각(총288) 상한에 도달했으므로 전체 표면의0.75mm 오차 보장은 아니다.
+  기록1496frame의 새 접촉44표본 최대 간격0.000339mm, 새 ACT4 평가1660frame의91표본 최대0.000125mm.
+  compiled 관절/구동기/질량11필드·visual46개·cube collision 동일. 실제 물리5초 진행 후 양쪽 접촉/15mm 이상 상승 확인.
+- 기존 ACT4 고정seed1047 평가4회는 성공1/집기 실패3. 성공·실패 HDF5/영상과 격리 Registry 등록을 확인했다.
+  collision 교정과 정책 성공률은 구분하며 모든 집기/튕김 해결이나 성공률 개선을 주장하지 않는다.
+- 사용자 Real 실패 로그는 활성화 전 elbow raw3115가 보정상한3053 밖이어서 차단된 경우다. 범위를 완화하지 않았다.
+  evaluation.real_start_pose에서 measured hold의 encoder 왕복을 float64로 검사해 float32 경계 오판을 피하고
+  hardware_preflight.json에 측정값/결과를 남긴다. approved profile 오프라인 raw3053 통과/3115 거부 재현.
+  실제 Follower를 범위 안에 두어야 실행 가능하다. 장치 연결/모터 활성화/실물 정책 실행은 하지 않았다.
+- 회귀88PASS/1skip(별도 fake worker5PASS 포함), USD 보정2PASS. 기존 Registry/UI byte 보존은 final_audit.json 참조.
+  보고서 outputs/workflow_validation/gripper_contact_fix/REPORT.md. 기존 미커밋 작업 보존, Commit/Push 없음.
+
+# 2026-10-18 이전 Isaac Annotation 삭제
+
+- 사용자 명시 요청으로 예전 annotated_clean.hdf5(Isaac4×600frame, 904.4MiB)와 contract sidecar,
+  직접 호환 symlink2개, Registry84ba9689... 및 빈 묶음 폴더를 삭제했다. 파생 Artifact/열린 file handle 없음.
+- 다른 Registry/UI 설정 byte 보존. 최신 Source/Train·Val Annotation/DataGen/모델은 삭제하지 않았다.
+  삭제 데이터 사본을 만들지 않았다. 기록 outputs/workflow_validation/legacy_isaac_annotation_removal/result.json.
+  코드 수정·Commit/Push 없음. 아래 보존 설명은 삭제 이전 시점의 이력이다.
+
+# 2026-10-18 단계별 직접 입력 저장 구조 / 모델 종류 분리
+
+- 사용자 요청으로 output_location의 최초 Source 계보 재사용을 제거. Source origin/split_N/train·val 및
+  Annotation의 직접 Source 묶음은 유지. DataGen/<Annotation 실행>, datasets/<DataGen 실행>,
+  models/{act,smolvla,minivla}/<학습 실행>, evaluations/<종류>/<학습 실행>/<평가 실행>을 사용한다.
+  source_partition은 데이터의 의미적 분할이며 모델 저장 폴더의 분할이 아니다. 계보는 Registry/config에 유지.
+- 실제10경로·666파일을 rename, Registry9개 path/collection만 갱신(ID/부모/등록 SHA와 파일 byte 보존).
+  옛 config/Checkpoint 절대 경로는 호환 symlink로 유지. 이전 Source 이름 폴더에 남은 것은 링크이며 실제 모델은 종류별 폴더다.
+  UI 입력 폴더는 새 단계/모델 종류에 연결. 기존 artifacts.py만 확장, UI 화면/학습/물리/장치는 변경하지 않음.
+- 904.4MiB annotated_clean.hdf5는 이전 Isaac Annotation4×600frame의 내장 Side/Wrist RGB다.
+  49b6...는 옛 Source Run ID이며 최신 MuJoCo Source20과 다르다. 삭제/변환하지 않았다.
+- 회귀113PASS, 실제 Train100/Val30 CPU 로딩과 MiniVLA best/last Resume 통과. 실제 ACT UI READY 및 종류별 선택 확인.
+  기존 Sim report1의 Workspace metadata 불일치와 ACT50k의 scheduler_state.json 누락은 이전 record/경로에서도 재현.
+  파일/계약을 임의로 고치거나 완전한 ACT Resume 성공으로 보고하지 않는다. 이동 전부터 없던52개 Registry 경로도 유지.
+- 보고서 outputs/workflow_validation/artifact_input_layout/REPORT.md. 검증용 이동 runner는 기존 byte/rollback 코드를 재사용.
+  장치/새 학습/정책 실행/Commit/Push 없음. GUI 재시작 필요. 앞선 미커밋 작업 보존.
+
+# 2026-10-18 Real 평가 설정 간소화
+
+- 사용자 요청으로 모터 사용 체크/옵션 schema를 제거. UI Real 평가 시작 요청은 stage_options에서
+  enable_motion=true를 내부 지정한다. readiness는 읽기 전용이며 실제 연결/활성화는 명시 시작 worker에서만 한다.
+  CLI/직접 worker opt-in과 기존 장치 충돌·좌표/보정·finite/freshness/모터 범위 검사를 유지했다.
+- Real 평가 설정은 현재 Window 연결 입력 또는 ui_settings.json의 follower port/ID/보정 폴더와
+  Side/Wrist를 기본으로 채운다. 다른 값은 직접 입력 가능하며 단계 이동 중 사용자의 수정값을 유지한다.
+- camera_devices는 추가 관측 이름→USB 장치 연결. 일반 Side/Wrist는 기존 장치 입력 사용.
+  전용 한글 label/표 헤더/설명으로 수정, 임의 카메라 이름의 기존 매핑 지원 보존.
+- UI50+별도 Window1, fake worker4/보정2 PASS. 기존 ACT metadata UI READY, 장치/worker 호출0,
+  원 Registry/연결 설정 보존. 상세 outputs/workflow_validation/real_eval_controls/REPORT.md.
+  실물 연결·정책 구동·Commit/Push 없음. 기존 미커밋 병렬 Sim 평가/구조 정리 보존.
+
+# 2026-10-18 병렬 Sim 평가 / 실패 집계 / 성공·실패 데이터 검토
+
+- UI Sim 평가에 num_envs1/2/4/8. episodes는 Task당 전체 횟수이며 성공 목표 재시도가 아니다.
+  양 엔진 Workspace worker가 evaluation.evaluate_sim을 공유한다. MuJoCo 공유 model/독립 data thread step,
+  Isaac vector action. 공식 ACT/SmolVLA batch queue, MiniVLA는 model 공유/환경별 chunk·guard.
+  한 묶음 완료 후 함께 reset하고 먼저 완료된 환경/마지막 미사용 슬롯은 고정 목표를 유지한다.
+- EvaluationProgress를 기존 영상 위 상태 영역에 연결. 전체 완료·성공/실패·유형·환경별 수·실행 시간을 표시.
+  기존 grasp/drop/place 진단과 timeout/기하 조건을 보존한다. collision/물성/모델/학습·실물은 변경하지 않았다.
+- evaluations의 기존 묶음/분할/실행 경로 아래 success/failure/dataset.hdf5+MP4 및 evaluation_datasets.json.
+  Operations가 sim_eval과 하위 evaluation_dataset을 등록하며 Replay 입력 이름은 성공_/실패_로 구분한다.
+  Curation에서 실행 폴더를 골라 두 분포·영상·EE/물체 경로를 비교한다. 과거 에피소드별 평가 폴더도 읽기만 한다.
+  평가 검토는 읽기 전용. 실패 Playback은 명시 Replay에서만 실행 완료와 task 성공을 구분하며 Source gate는 엄격 유지.
+- 실제 ACT/MuJoCo4 5회 성공3/배치 실패2. 실제 양 엔진4 각5회(6/8-step smoke)·마지막부분묶음·pause/step/resume·등록 확인.
+  실패5개 native 초기 state Replay의 joint 오차0/object 최대1.47e-8m. 원래 ACT Registry hash 확인.
+  core121/1skip, 후속 Replay67/1skip, USD/UI139, 마지막UI9 PASS(중복 합산 안 함).
+- 보고서 outputs/workflow_validation/parallel_sim_eval/REPORT.md. 초기 실패·최종 증거/화면 보존.
+  앞선 미커밋 구조 정리는 보존했다. Commit/Push 없음. 기존 열려 있는 GUI는 재시작해야 새 옵션이 보인다.
+  새 SmolVLA/MiniVLA GPU rollout·8환경·장시간·실물·정책 품질 우위는 미검증. 새 production launcher/package 없음.
+
+# 2026-10-18 MuJoCo 그리퍼 접촉 진단 — production 물리 수정 없음
+
+- 사용자 Source/DataGen/ACT Sim 평가의 scene.xml/so101.xml은 각각 byte 동일. 평가만 collision이 다른 경우가 아니다.
+- 실제 평가 완료42개/18,081 frame의 measured q와 world object pose를 독립 process에서 복원.
+  그리퍼 STL의 convex hull 접촉점이 원래 메시 표면에서 최대14.3846mm 떨어짐을 확인했다.
+  시각/충돌 mesh 자체는 같고 변환 차이1e-12 미만, margin/gap은0. 실패 Episode6/16에도 같은 현상.
+- 원인은 오목한 손가락의 빈 공간을 덮는 공통 convex hull 근사다. 모든 튕김의 인과나 실제 접촉력은 미측정.
+  형상/마찰/힘/정책/UI/사용자 worker는 변경하지 않았다. 교정 완료로 해석하지 않는다.
+- 상세: outputs/workflow_validation/mujoco_contact_gap/REPORT.md, audit.json, 일반/청록 hull 비교 PNG.
+
+# 2026-10-18 전체 코드 구조 감사 / 동작 보존 리팩터링
+
+- 기준 HEAD `7d02d9cf029c27aac3b2c03767e85961bfb650cb`, commit/push 없음. 사용자 미추적 로그2개 보존.
+- 전체 감사/구조/실제 흐름/수정 위치/전후/검증은 `docs/architecture/`의7문서. README와 기존 Architecture/Map/Testing에서 연결.
+- 기존 `operations.mujoco_request/MUJOCO_STAGES` 구현은 `workflow/worker_request.py`로, `artifacts.fingerprint`는 `utils/artifact_identity.py`로 이동.
+  옛 import 경로는 같은 객체 re-export. worker 상수는 Workspace package/MiniVLA config에서 직접 import. 모든 production hash-only caller는 새 소유자 사용.
+- production 수정10파일은 import/추출 외 AST 동일. UI/Runtime/Calibration/physics/Mimic/model/config/scripts/assets는 무변경.
+  원래 폴더는 유지하고 실제 공유 규칙2개만 기존 package 안에 소유권을 부여. 새 실행 계층/launcher/dependency 없음.
+- 전후 Native407/IK27/Workspace32/Learning50PASS(2skip). USD166PASS·기존FAIL1·skip1, 한 카메라1PASS 별도.
+  기존FAIL은 `test_modes_same_source_environment`의 서로 다른 자동 UUID 출력 경로 비교. 고치거나 assertion 약화하지 않음.
+  신규 interface18PASS, 사용자 Registry를 tmp로 격리한 Snapshot/자식 UI2PASS. 다른 UI fixture의 validator mock 위치만 갱신.
+- 고정 Registry 복사본·1500x1000·offscreen16화면 픽셀/widget tree 동일. readiness debounce는 캡처에서 동결, 실제 readiness/선택/잠금은 기존 Qt tests.
+  CLI help3개 동일. 전체 증거/초기 실패 로그는 `outputs/workflow_validation/codebase_architecture/`.
+- 첫 자산 baseline은 차이0. 최종 비교 때 기존3256개 동일, UI설정2개 변경/새 ACT Run7파일은 별도 사용자 UI177361→worker178370→trainer178401에서 확인.
+  Run `20261018_010654_train_cube_red_to_cup_a_f53ec143`을 중단/수정하지 않았고 이번 자동 검증으로 학습하지 않음.
+- 고위험 Runtime 수명/좌표·보정/Workspace task·Source partition/DataGen 동시성 이동은 추가 검증 필요로 보류.
+  실제 모터/카메라/새 GPU학습/IsaacKit/Hub 검증 안 함. 전체 cycles 제거/성능 향상 주장 없음.
+
 # SO-101 / Real2Sim 개발 인수인계
 
 ## 최신 — 최상위 datasets 경로 제거 후 검증 (2026-10-18)

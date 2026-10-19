@@ -111,7 +111,7 @@ def test_mujoco_model_residual_applied_once_without_target_adjustment(bound_work
     from soarm101_lab.workflow.tasks import configured
     w,mappings=bound_workspace;w=configured(w,active_object_ids=active,backend='mujoco')
     c=precision.simulation_configuration(w,mappings=mappings,hardware_role='leader',backend='mujoco')
-    env=MujocoBackend(tmp_path/'runtime',w,render_backend='none',active_object_ids=active,simulation_configuration=c)
+    env=MujocoBackend(w,render_backend='none',active_object_ids=active,simulation_configuration=c)
     try:
         q=env.home.copy();q[:5]=[.1,-.3,.4,.2,-.1];env.data.qpos[env.q_indices]=q;env.mj.mj_forward(env.model,env.data)
         expected=RobotPreview(w['root']/c['robot_model']['urdf']).transforms(q)['tool0']

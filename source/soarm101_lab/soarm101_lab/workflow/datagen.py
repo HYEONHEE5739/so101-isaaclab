@@ -34,7 +34,7 @@ def _lineage(reader,generator):
 
 
 def _output_args(reader,backend,opts):
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     args=copy.deepcopy(reader.args);args.update(backend=backend,generation_method='isaaclab_mimic/1.0.15',
         source_dataset=str(reader.path),source_backend=reader.backend,
         generation_provenance={'algorithm':'Isaac Lab Mimic 1.0.15 portable reference',
@@ -139,7 +139,7 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
     if bridge:bridge.bind_generation(scheduler)
     metrics={};model_ids=[];data_ids=[];state_lock=threading.Lock();previews=queue.Queue(maxsize=1)
     def worker(index):
-        backend=MujocoBackend(output/'scene',render_backend=parent.backend.render_backend,shared_backend=parent.backend)
+        backend=MujocoBackend(render_backend=parent.backend.render_backend,shared_backend=parent.backend)
         adapter=MujocoAdapter(backend,reader.hz,output,_seed(seed,index),scheduler.stop)
         adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
         adapter.control=scheduler.control;adapter.worker_index=index

@@ -173,6 +173,15 @@ class VideoEpisode:
         for writer in self.writers.values():writer.abort()
         if self.folder.exists():shutil.rmtree(self.folder)
 
+    def relocate(self,parent):
+        """Move finalized, private video staging into its selected output bundle."""
+        if not self.finalized or self.folder.is_symlink():
+            raise ValueError('Only finalized private video staging can be relocated')
+        parent=Path(parent).resolve();parent.mkdir(parents=True,exist_ok=True)
+        destination=parent/self.folder.name
+        if destination!=self.folder.resolve():
+            self.folder.rename(destination);self.folder=destination
+
 
 def hdf5_cameras(group):
     """External specs coexist with legacy internal cameras; never duplicate a camera silently."""

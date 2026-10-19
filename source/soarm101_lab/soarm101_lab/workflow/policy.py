@@ -49,6 +49,21 @@ def observation(q, side, wrist, task, device, *, images=None):
     return out
 
 
+def batch_actions(policy, pre, post, states, images, task, device):
+    """Keep the official policy's queue batched, with one column per environment."""
+    import torch
+    rows=[observation(q,None,None,task,device,images=rgb) for q,rgb in zip(states,images)]
+    batch={key:torch.stack([r[key] for r in rows]) for key in rows[0] if key!='task'}
+    batch['task']=[task]*len(rows)
+    with torch.inference_mode():
+        actions=post(policy.select_action(pre(batch)))
+    actions=torch.as_tensor(actions).detach().cpu().numpy()
+    import numpy as np
+    if actions.shape!=(len(rows),6) or not np.isfinite(actions).all():
+        raise ValueError('Policy must output finite [num_envs,6] model-radian actions')
+    return actions
+
+
 
 def resume_checkpoint(path, artifact, options):
     """Resolve a full LeRobot checkpoint without modifying its saved state."""
@@ -237,10 +252,27 @@ class MiniVLAJointPolicy:
     def reset(self):
         self.remaining = []
         self.guard.reset()
+        self._batch_slots = []
 
     def select_action(self, batch):
         import numpy as np
         import torch
+        if batch['observation.state'].ndim==2:
+            # MiniVLA's existing predict() is single-observation. Share its model,
+            # while each slot owns its action chunk and guard (no weight copies).
+            import copy
+            count=len(batch['observation.state'])
+            if len(self._batch_slots)!=count:
+                self._batch_slots=[]
+                for _ in range(count):
+                    slot=copy.copy(self);slot.guard=copy.deepcopy(self.guard);slot.reset()
+                    self._batch_slots.append(slot)
+            actions=[];metrics=[]
+            for i,slot in enumerate(self._batch_slots):
+                row={k:(v[i] if isinstance(v,torch.Tensor) or isinstance(v,list) else v) for k,v in batch.items()}
+                actions.append(slot.select_action(row));metrics.append(slot.last_inference_metrics)
+            self.last_inference_metrics={'per_env':metrics}
+            return torch.stack(actions)
         q = batch['observation.state'].detach().cpu().numpy().reshape(6)
         self.last_inference_metrics = None
         if not self.remaining:

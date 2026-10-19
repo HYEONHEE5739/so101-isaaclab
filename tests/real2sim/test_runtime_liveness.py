@@ -169,7 +169,7 @@ assert not any(n.split('.')[0] in ('isaaclab','omni','pxr') for n in sys.modules
             assert bus.status()['state'] == 'PREVIEW'
             assert not bus.status()['real_connected']
             assert not (tmp_path / 'generated').exists()
-            assert list(bus.root.glob('scene_mujoco_*/scene.xml'))
+            assert not list(bus.root.glob('scene_mujoco_*'))
             bus.send('disconnect')
             assert process.wait(timeout=15) == 0, log.read_text()
             assert bus.status()['state'] == 'CLOSED'

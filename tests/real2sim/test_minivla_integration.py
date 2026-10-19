@@ -81,7 +81,7 @@ def env(tmp_path):
     configure_rendering('none')
     pytest.importorskip('mujoco')
     profile = json.loads((ROOT / 'tests/real2sim/fixtures/scene_profile.json').read_text())
-    backend = PolicyEnvironment(tmp_path / 'scene', {'profile': profile}, renderer='none', control_hz=30)
+    backend = PolicyEnvironment({'profile': profile}, renderer='none', control_hz=30)
     backend.backend.get_rgb = lambda camera=None: np.zeros((240, 320, 3), np.uint8)
     yield backend
     backend.close()
@@ -386,7 +386,7 @@ def test_front_camera_dataset_and_policy_contract(tmp_path,monkeypatch):
     from soarm101_lab.workflow import mujoco as worker
     from soarm101_lab.learning.minivla.data import load_manifest,episode_arrays
     export=fruit_export.__wrapped__(tmp_path);workspace=import_scene(export,registry=tmp_path/'workspaces')
-    env=PolicyEnvironment(tmp_path/'front_scene',workspace,'none',control_hz=30)
+    env=PolicyEnvironment(workspace,'none',control_hz=30)
     env.backend.get_rgb=lambda camera=None:np.zeros((240,320,3),np.uint8)
     writer=EpisodeWriter(tmp_path/'front_dataset',env,'Place the apple in the basket.')
     writer.begin()

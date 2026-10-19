@@ -1,6 +1,7 @@
 """Single presentation contract shared by UI and runtime diagnostics."""
 SIM_STAGES = {'source', 'replay', 'annotate', 'datagen', 'sim_eval'}
-INSPECTION_STAGES = {'annotate', 'datagen', 'sim_eval'}
+PREVIEW_STAGES = {'source', 'replay', 'datagen', 'sim_eval'}
+INSPECTION_STAGES = {'datagen', 'sim_eval'}
 
 
 def controls(stage, manual=False):
@@ -12,6 +13,6 @@ def controls(stage, manual=False):
 
 
 def feeds(stage):
-    if stage in SIM_STAGES:
+    if stage in PREVIEW_STAGES:
         return ('sim_overview', 'sim_side', 'sim_wrist') if stage in INSPECTION_STAGES else ('sim_side', 'sim_wrist')
     return ('real_side', 'real_wrist') if stage == 'real_eval' else ()

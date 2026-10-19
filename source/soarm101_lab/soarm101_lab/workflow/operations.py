@@ -13,6 +13,7 @@ import signal
 import re
 from datetime import datetime
 from .artifacts import Registry, inspect_artifact, output_location, resumes_in_place, validate_storage_name
+from .worker_request import MUJOCO_STAGES, mujoco_request
 from ..learning.minivla.config import MODEL_ROOT
 from ..real2sim.storage import atomic
 from ..real2sim.launcher import worker_environment
@@ -23,10 +24,11 @@ from ..so101_dataset_contract import JOINT_SPACE, MIMIC_SPACE
 
 STAGES = {
     'source': ({'workspace'}, 'source'),
-    'replay': ({'source', 'annotated', 'datagen'}, 'replay'),
+    'replay': ({'source', 'annotated', 'datagen', 'evaluation_dataset'}, 'replay'),
     'annotate': ({'source'}, 'annotated'),
     'datagen': ({'annotated'}, 'datagen'),
     'convert': ({'datagen', 'source', 'annotated'}, 'dataset'),
+    'merge': ({'dataset'}, 'dataset'),
     'train': ({'dataset'}, 'policy'),
     'hf_dataset': ({'dataset'}, 'hf_dataset'),
     'hf_policy': ({'policy'}, 'hf_policy'),
@@ -112,6 +114,9 @@ class Operations:
         else:
             self.registry.verify(artifact)
         opts = dict(options)
+        if stage=='sim_eval':
+            from .evaluation import validate_evaluation_options
+            validate_evaluation_options(opts)
         output,boundary=output_location(stage,artifact,opts,self.registry.root)
         immutable=artifact['path'] if stage=='source' else workspace
         if immutable and (Path(immutable).expanduser()/'manifest.json').is_file() and output.is_relative_to(Path(immutable).expanduser().resolve()):
@@ -122,6 +127,17 @@ class Operations:
         opts['output']=str(output)
         opts['artifact_root']=str(boundary)
         if not continuing and not options.get('output'):opts.setdefault('storage_name',boundary.stem if boundary.suffix else boundary.name)
+        if stage=='merge':
+            from .lerobot_merge import validate_inputs
+            identifiers=opts.get('merge_datasets')
+            if not isinstance(identifiers,list) or not identifiers or identifiers[0]!=artifact['id']:
+                raise ValueError('merge_datasets에 첫 입력을 포함한 데이터셋 ID 목록을 지정하세요.')
+            records=[self.registry.get(identifier) for identifier in identifiers]
+            for record in records:
+                if dry:inspect_artifact('dataset',record['path'])
+                else:self.registry.verify(record)
+            validate_inputs(records)
+            opts['merge_artifacts']=records
         if stage=='train' and opts.get('architecture')=='minivla':
             from ..learning.minivla.config import training_config
             config_path=opts.get('model_config') or str(MODEL_ROOT/'configs/default.json')
@@ -140,14 +156,16 @@ class Operations:
             if validation['type']!='dataset':raise ValueError('Validation input must be a converted dataset artifact')
             if dry:inspect_artifact(validation['type'],validation['path'])
             else:self.registry.verify(validation)
-            from .episodes import split_episodes
+            from .episodes import split_episodes, partition_evidence
             evidence=[]
             for role,record in (('train',artifact),('val',validation)):
                 provenance=record.get('provenance',{});partition=provenance.get('source_partition')
                 if not partition or partition.get('split')!=role:raise ValueError('Select verified train and val Source Partition datasets')
-                evidence.append({'id':role,'group_id':provenance.get('source_groups',{}).get('0','UNKNOWN'),
-                    'source_partition':partition,'source_lineage':provenance.get('episode_source_lineage',{}).get('0'),
-                    'source_partition_input':provenance.get('source_partition_input')})
+                for index in range(record['format']['total_episodes']):
+                    part,proof=partition_evidence(provenance,index)
+                    evidence.append({'id':f'{role}_{index}','group_id':provenance.get('source_groups',{}).get(str(index),'UNKNOWN'),
+                        'source_partition':part,'source_lineage':provenance.get('episode_source_lineage',{}).get(str(index)),
+                        'source_partition_input':proof})
             split_episodes(evidence)
             opts['validation_artifact']=validation
         if stage=='train' and opts.get('architecture')=='minivla' and isinstance(artifact.get('format'),dict) and not opts.get('resume_checkpoint'):
@@ -332,7 +350,7 @@ class Operations:
             env = worker_environment(ROOT)
             self.session = run_dir / 'presentation'
             self.session.mkdir()
-            atomic(self.session / 'config.json', {'stage': stage, 'mode': plan['options']['mode'], 'tasks': plan['options'].get('tasks', []),
+            atomic(self.session / 'config.json', {'stage': stage, 'mode': plan['options']['mode'], 'tasks': plan['options'].get('tasks', []),'started_at':state['created_at'],
                    'real_cameras': {} if stage == 'real_eval' else plan['options'].get('real_cameras', {})})
             from .stages import SIM_STAGES
             if stage in SIM_STAGES and plan['options'].get('backend', 'isaac') == 'isaac' and sys.platform.startswith('linux'):
@@ -429,7 +447,7 @@ class Operations:
                     atomic(report_path, report)
                 target = Path(result['path'])
             else:
-                parents=[artifact['id']]
+                parents=plan['options'].get('merge_datasets',[artifact['id']]) if stage=='merge' else [artifact['id']]
                 if plan['options'].get('validation_artifact'):parents.append(plan['options']['validation_artifact']['id'])
                 display_name=plan['options'].get('storage_name')
                 if continuing and not display_name:
@@ -439,6 +457,16 @@ class Operations:
                         except ValueError:continue
                         break
                 result = self.registry.register(plan['type'], target, parents=parents, extra=completed_state,display_name=display_name)
+            if stage=='sim_eval':
+                details=json.loads(target.read_text())
+                for item in details.get('datasets',[]):
+                    data_path=(target.parent/item['path']).resolve()
+                    if not data_path.is_relative_to(target.parent.resolve()):raise ValueError('Evaluation dataset outside output')
+                    portable=lambda value:''.join(c if c.isalnum() or c in '_-' else '_' for c in value)
+                    name=portable(result['display_name']).encode('utf-8')[:135].decode('utf-8','ignore')[:60]
+                    label='성공' if item['outcome']=='success' else '실패'
+                    self.registry.register('evaluation_dataset',data_path,parents=[result['id']],
+                        display_name=label+'_'+name+'_'+portable(data_path.parent.parent.name)[:10])
             state.update(status='STOPPED' if resumable_stop else 'SUCCEEDED', artifact=result['id'])
             notify('완료: ' + str(target))
             return result
@@ -450,46 +478,6 @@ class Operations:
             if reservation:reservation.unlink(missing_ok=True)
             atomic(run_dir / 'state.json', state)
 
-
-MUJOCO_STAGES = dict(environment='Environment', source='Source', replay='Replay',
-              prepare='Prepare', convert='Convert', import_='Import', annotate='Annotation',
-              datagen='Datagen', train='Train', rollout='Evaluation')
-MUJOCO_STAGES['import'] = MUJOCO_STAGES.pop('import_')
-
-def mujoco_request(stage, python, workspace, input_path, config, checkpoint, renderer, options):
-    if stage not in MUJOCO_STAGES:
-        raise ValueError('Unsupported workflow worker stage')
-    if not isinstance(options, dict):
-        raise ValueError('Options must be a JSON object')
-    if not Path(python).is_file():
-        raise ValueError('Worker Python executable missing')
-    if renderer not in ('egl', 'software-egl', 'osmesa', 'none'):
-        raise ValueError('Unknown renderer')
-    if renderer == 'none' and stage in ('source', 'rollout'):
-        raise ValueError('This stage requires RGB rendering')
-    if stage in ('environment', 'source', 'replay', 'rollout', 'import'):
-        load(workspace)
-    if stage in ('prepare', 'convert', 'annotate', 'datagen', 'train', 'replay'):
-        if not (Path(input_path) / 'manifest.json').is_file():
-            raise ValueError('Input must be a canonical MiniVLA dataset directory')
-    if stage == 'import' and not Path(input_path).is_file():
-        raise ValueError('HDF5 import requires an explicit recipe JSON')
-    if stage == 'train':
-        data = json.loads(Path(config).read_text())
-        available = json.loads((Path(input_path)/'manifest.json').read_text()).get('cameras',['side'])
-        preset = Path(config).resolve().parent == (MODEL_ROOT/'configs').resolve()
-        if not preset and data.get('cameras') != available:
-            raise ValueError('Model config camera contract differs from dataset: '+str(available))
-    if stage == 'source' and (int(options.get('episodes', 1)) < 1 or float(options.get('episode_time_s', 20)) <= 0 or float(options.get('reset_time_s', 5)) < 0):
-        raise ValueError('Invalid source count/timing')
-    if stage == 'source' and not options.get('port'):
-        raise ValueError('Leader port required; no automatic hardware discovery')
-    if stage == 'convert' and not options.get('repo_id'):
-        raise ValueError('Dataset repo_id required')
-    if stage == 'rollout' and not Path(checkpoint).exists():
-        raise ValueError('A trained policy checkpoint is required')
-    return {'stage': stage, 'workspace': workspace, 'input': input_path, 'config': config,
-            'checkpoint': checkpoint, 'renderer': renderer, 'options': options}
 
 
 def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
@@ -543,6 +531,14 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
     if not definitions or (stage in ('source', 'annotate', 'datagen') and len(definitions) != 1):
         raise ValueError('Source/Annotation/Datagen require one task')
     opts.update(tasks=definitions, task_definition=definitions[0], instruction=definitions[0]['language_instruction'])
+    if stage=='source' and opts.get('resume_data'):
+        from .data_resume import validate as validate_resume
+        count=validate_resume('source',opts['resume_data'],metadata(w),definitions,
+                              scene_configuration=opts.get('scene_configuration'),workspace_definition=w)
+        target=int(opts.get('episodes',1))
+        if target<=count:
+            raise ValueError(f'총 목표 Episodes는 기존 {count}개보다 커야 합니다. {count+1} 이상을 입력하세요.')
+        opts.update(resume_completed=count,resume_target=target)
     renderer = opts.get('renderer', 'egl')
     config = opts.get('model_config', str(MODEL_ROOT / 'configs/default.json'))
     if stage == 'sim_eval' and artifact.get('format') == 'so101.minivla-policy/1':
@@ -591,8 +587,21 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
     if opts['mode'] not in ('operator','developer'):raise ValueError('Unknown execution mode')
     opts.setdefault('num_envs',1);opts.setdefault('max_attempts',10000)
     if type(opts['num_envs']) is not int or opts['num_envs'] not in (1,2,4,8):raise ValueError('Number of environments must be 1,2,4 or 8')
+    if stage=='annotate' and not opts.get('auto',True) and opts['num_envs']!=1:
+        raise ValueError('Manual Annotation requires one environment')
     if type(opts['max_attempts']) is not int or opts['max_attempts']<1:raise ValueError('Positive max_attempts required')
-    if stage=='datagen':opts['num_successful_demos']=successful_demo_target(opts)
+    if stage=='datagen':
+        opts['num_successful_demos']=successful_demo_target(opts)
+        if opts.get('resume_data'):
+            from .data_resume import inspect_resume_input
+            previous=inspect_resume_input('datagen',opts['resume_data'])
+            if previous.get('backend')!=opts['backend'] or previous.get('workspace')!=artifact.get('workspace') or previous.get('tasks')!=definitions:
+                raise ValueError('DataGen 이어 생성 데이터의 엔진/Workspace/Task가 현재 입력과 다릅니다.')
+            proof=previous['env_args'].get('generation_provenance',{})
+            if not artifact.get('sha256') or proof.get('source_sha256')!=artifact['sha256']:
+                raise ValueError('DataGen 이어 생성은 이전 결과를 만든 동일 Annotation 입력을 선택해야 합니다.')
+            if opts['num_successful_demos']<=previous['episode_count']:
+                raise ValueError(f"총 목표 성공 수는 기존 {previous['episode_count']}개보다 커야 합니다.")
     if dry:return {'stage':stage}
     run_dir=Path(run_dir);output=output_location(stage,artifact,opts,run_dir.parent.parent)[0]
     request={'backend':opts['backend'],'stage':stage,'workspace':str(w['root']),'input':artifact['path'],
@@ -605,6 +614,9 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
 
 def execute_request(request):
     """Worker dispatch; GUI planning does not load engines or policy libraries."""
+    if request.get('stage')=='merge':
+        from .lerobot_merge import merge
+        return merge(request['options']['merge_artifacts'],request['output'],request['options'].get('repo_id','local/so101_merged'))
     if request.get('stage') in ('replay','annotate','datagen'):
         from .unified import execute
         return execute(request)

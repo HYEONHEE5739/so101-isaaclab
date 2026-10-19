@@ -42,7 +42,7 @@ def load_manifest(path):
         else:e['_path'] = str(path.parent / e['path'])
     if m.get('storage'):
         if m['storage'].get('format')!='lerobot':raise ValueError('Unknown episode storage format')
-        from ...workflow.artifacts import fingerprint
+        from ...utils.artifact_identity import fingerprint
         for storage in lerobot_storages(m):
             if fingerprint(storage['root'])!=storage['sha256']:raise ValueError('LeRobot dataset bytes changed')
     if any(e.get('source_partition') for e in m['episodes']):

@@ -218,8 +218,9 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
             offset=CameraCfg.OffsetCfg(pos=pos,rot=rot,convention='ros')))
     # Inspection-only camera: same scene/runtime, outside policy observation space.
     from ...workflow.presentation import current
+    from ...workflow.stages import INSPECTION_STAGES
     presentation = current()
-    if presentation and presentation.config['stage'] in ('annotate', 'datagen', 'sim_eval'):
+    if presentation and presentation.config['stage'] in INSPECTION_STAGES:
         from ...workflow.presentation import framing
         overview_pos, overview_rot = framing(w)
         scene.camera_overview = CameraCfg(prim_path='{ENV_REGEX_NS}/Camera_Overview', width=800, height=600,

@@ -300,10 +300,6 @@ class Runtime:
             camera.start()
 
     def build_environment(self, p):
-        # Engine files are session-local runtime resources, not reconstruction exports.
-        output = TemporaryDirectory(prefix=f'scene_{self.backend}_', dir=self.bus.root)
-        self.scene_outputs.append(output)
-        asset_dir = Path(output.name)
         if self.backend == 'mujoco':
             from ..simulation.mujoco_backend import MujocoBackend
             from .workspaces.package import ROOT, load as load_workspace
@@ -316,7 +312,7 @@ class Runtime:
             w, h = next(iter(p['cameras'].values()))['resolution']
             if any(c['resolution'] != [w,h] for c in p['cameras'].values()):
                 raise ValueError('Real/Sim MuJoCo currently requires equal side/wrist resolutions')
-            self.env = MujocoBackend(asset_dir, inputs, render_backend=self.args.renderer,
+            self.env = MujocoBackend(workspace=inputs, render_backend=self.args.renderer,
                                      width=w, height=h, timestep=1/300, decimation=10,
                                      full_workspace=True, task_definition=getattr(self, 'task_definition', None),
                                      simulation_configuration=getattr(self,'simulation_configuration',None))
@@ -327,6 +323,10 @@ class Runtime:
             self.robot_hash = self.env.metadata['model_sha256']
             self.profile = p
             return
+        # Isaac's generated USD is a session resource, outside Workflow results.
+        output = TemporaryDirectory(prefix=f'scene_{self.backend}_', dir=self.bus.root)
+        self.scene_outputs.append(output)
+        asset_dir = Path(output.name)
         from isaaclab.envs import ManagerBasedEnv
         from soarm101_lab.tasks.manager_based.soarm101_lab import SO101TeleopEnvCfg
 

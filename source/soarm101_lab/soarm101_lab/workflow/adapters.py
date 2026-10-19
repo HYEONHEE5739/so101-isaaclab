@@ -30,13 +30,13 @@ class EpisodeBuffer:
 
     def begin(self):self.abort();self.initial=self.adapter.initial_state()
 
-    def append(self,joints,target,observation=None):
+    def append(self,joints,target,observation=None,images=None):
         from ..utils.async_video_writer import VideoEpisode
         a=self.adapter
         if self.video is None:self.video=VideoEpisode(self.output,a.hz,18)
         t=time.perf_counter();state=a.state() if observation is None else observation
         self.metrics['observation_s']+=time.perf_counter()-t
-        t=time.perf_counter();images=a.images();self.metrics['render_s']+=time.perf_counter()-t
+        t=time.perf_counter();images=a.images() if images is None else images;self.metrics['render_s']+=time.perf_counter()-t
         a.last_images=images
         t=time.perf_counter();self.video.append({k+'_cam':v for k,v in images.items()})
         self.metrics['video_enqueue_s']+=time.perf_counter()-t
@@ -89,10 +89,10 @@ class _RecorderProtocol:
 
 
 class SimulationAdapter:
-    def __init__(self,workspace,hz,output,seed,stop):
+    def __init__(self,workspace,hz,output,seed,stop,require_standard_cameras=True):
         self.workspace=workspace;self.hz=hz;self.device='cpu';self.num_envs=1;self.seed=seed;self.stop=stop
         self.camera_names=workspace['task'].get('observation_cameras',['side','wrist'])
-        if self.camera_names!=['side','wrist']:raise ValueError('Common collection requires Side and Wrist')
+        if require_standard_cameras and self.camera_names!=['side','wrist']:raise ValueError('Common collection requires Side and Wrist')
         self.cfg=configuration(workspace['task']['pick'],workspace['task']['place'],seed)
         self.base_world=np.asarray(workspace['profile']['robot_base']['T_world'])
         self.buffer=EpisodeBuffer(self,output);self.recorder_manager=_RecorderProtocol(self)
@@ -208,8 +208,8 @@ class SimulationAdapter:
 
 
 class MujocoAdapter(SimulationAdapter):
-    def __init__(self,backend,hz,output,seed,stop):
-        super().__init__(backend.workspace,hz,output,seed,stop);self.backend=backend
+    def __init__(self,backend,hz,output,seed,stop,require_standard_cameras=True):
+        super().__init__(backend.workspace,hz,output,seed,stop,require_standard_cameras);self.backend=backend
         self.base_workspace=np.linalg.inv(backend.world_from_workspace)@self.base_world
         self.previous=backend.home.copy();self.rng=np.random.default_rng(seed)
 
@@ -274,9 +274,10 @@ class MujocoAdapter(SimulationAdapter):
 
 class IsaacAdapter(SimulationAdapter):
     """One independent episode slot in an Isaac vector scene, stepped by its coordinator."""
-    def __init__(self,native,index,output,seed,stop):
-        super().__init__(native.cfg.workflow_workspace,1/native.step_dt,output,seed,stop)
+    def __init__(self,native,index,output,seed,stop,contact_views=None,require_standard_cameras=True):
+        super().__init__(native.cfg.workflow_workspace,1/native.step_dt,output,seed,stop,require_standard_cameras)
         self.native=native;self.index=index
+        self.contact_views=contact_views
         from ..utils.so101_kinematics import SO101Kinematics
         self.kinematics=SO101Kinematics(str(self.workspace['root']/native.cfg.simulation_configuration['robot_model']['urdf']),
             target_frame_name='tool0',joint_names=list(JOINTS[:5]))
@@ -326,6 +327,9 @@ class IsaacAdapter(SimulationAdapter):
     def images(self):
         return {n:self.native.scene['camera_'+n+'view'].data.output['rgb'][self.index,...,:3].cpu().numpy().copy() for n in self.camera_names}
     def contacts(self):
+        if self.contact_views is not None:
+            return [bool(torch.linalg.vector_norm(v.get_contact_force_matrix(self.native.physics_dt))>.01)
+                    for v in self.contact_views]
         return [bool(torch.linalg.vector_norm(self.native.scene[n].data.force_matrix_w[self.index,0,0])>1e-4)
                 for n in ('grasp_fixed_contact','grasp_moving_contact')]
     def place_success(self):

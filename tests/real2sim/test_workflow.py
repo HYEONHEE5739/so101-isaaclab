@@ -193,7 +193,7 @@ def test_workflow_panel_shared_backend_and_no_autorun(tmp_path, monkeypatch):
     assert not calls
     assert panel.service.registry is registry
     assert panel.status.text().startswith('NOT_READY')
-    assert panel.stage_options()['architecture'] == 'smolvla'
+    assert panel.stage_options(require_name=False)['architecture'] == 'smolvla'
     panel.close()
 
 

@@ -239,7 +239,7 @@ def validate_partition_episode(partition,lineage,input_evidence=None):
 def source_catalog(source,allow_unknown=False):
     """Read original identities; exported/reindexed subsets keep the recorded identities."""
     import hashlib
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     from .curation import _group_id
     source=Path(source).resolve()
     if source.is_dir():
@@ -556,6 +556,13 @@ def training_coordinates(artifact, workspace=None):
     return RobotCoordinates(endpoints.get('gripper_closed_rad'),endpoints.get('gripper_open_rad'),measured_gripper_limits=limits)
 
 
+def partition_evidence(provenance, episode_index):
+    """Converted merges retain the original partition/proof of every episode."""
+    key = str(episode_index)
+    return (provenance.get('episode_source_partitions', {}).get(key, provenance.get('source_partition')),
+            provenance.get('episode_source_partition_inputs', {}).get(key, provenance.get('source_partition_input')))
+
+
 def validate_training_inputs(artifact, options):
     """Metadata-only preflight shared by readiness and worker; never invent lineage."""
     from ..representation import require_compatible
@@ -584,9 +591,10 @@ def validate_training_inputs(artifact, options):
             if feature.get('shape')!=[6] or feature.get('names')!=list(JOINTS):
                 raise ValueError('관측·action의 6축 관절 순서가 맞지 않습니다: '+key)
         for i in range(info['total_episodes']):
+            episode_partition, input_proof = partition_evidence(prov, i)
             evidence.append(dict(id=f'{source}_{i}',group_id=groups.get(str(i),'UNKNOWN'),
-                source_partition=partition,source_lineage=prov.get('episode_source_lineage',{}).get(str(i)),
-                source_partition_input=prov.get('source_partition_input')))
+                source_partition=episode_partition,source_lineage=prov.get('episode_source_lineage',{}).get(str(i)),
+                source_partition_input=input_proof))
     if validation:
         a,b=records
         if (a.get('provenance',{}).get('source_partition') or {}).get('split')!='train' or (b.get('provenance',{}).get('source_partition') or {}).get('split')!='val':

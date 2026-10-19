@@ -5,9 +5,26 @@ from pathlib import Path
 from .artifacts import inspect_artifact
 
 
+def inspect_resume_input(stage, path):
+    """Validate a continuation input before a worker or simulator is started."""
+    p=Path(path).expanduser().resolve()
+    if not p.exists():raise ValueError('이어 수집할 데이터가 없습니다: '+str(p))
+    if p.is_dir() and not ((p/'manifest.json').is_file() and (p/'project_provenance.json').is_file()):
+        raise ValueError('이어 수집에는 dataset.hdf5 파일 또는 기존 데이터셋 폴더를 선택하세요. .videos 폴더는 영상 보관용입니다. 새로 생성할 때는 기존 완료 데이터를 비우세요.')
+    item=inspect_artifact(stage,p)
+    if stage=='source' and (item.get('source_partition') or item.get('provenance',{}).get('source_partition')):
+        raise ValueError('Source Partition is locked: Train/Val에는 이어 수집할 수 없습니다. origin의 원본 데이터를 선택하세요.')
+    if stage=='datagen':
+        from .dataset import SCHEMA
+        args=item.get('env_args',{})
+        if item.get('format')!=SCHEMA or not args.get('generation_method') or 'generation_seed' not in args:
+            raise ValueError('DataGen 이어 생성에는 이전 DataGen 결과의 dataset.hdf5를 선택하세요. Source/Annotation 입력은 이어 생성 결과가 아닙니다. 새 생성은 기존 완료 데이터를 비우세요.')
+    return item
+
+
 def validate(stage, path, workspace, tasks, source=None, scene_configuration=None, workspace_definition=None):
-    item = inspect_artifact(stage, path)
-    if stage=='source' and item.get('source_partition'):
+    item = inspect_artifact(stage,path)
+    if stage=='source' and (item.get('source_partition') or item.get('provenance',{}).get('source_partition')):
         raise ValueError('Source Partition is locked; collect new demonstrations in the original unpartitioned Source dataset')
     if item.get('workspace') != workspace or item.get('tasks') != tasks:
         raise ValueError('Resume dataset의 workspace/task가 현재 선택과 다릅니다.')

@@ -20,8 +20,8 @@ def session(tmp_path, monkeypatch, stage='replay'):
 
 def test_modes_same_source_environment(published, tmp_path):
     r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
-    operator = op.plan('source', a, '', {'port': 'test', 'mode': 'operator'}, run_dir=tmp_path)
-    developer = op.plan('source', a, '', {'port': 'test', 'mode': 'developer'}, run_dir=tmp_path)
+    operator = op.plan('source', a, '', {'port': 'test', 'mode': 'operator','storage_name':'mode_check'}, run_dir=tmp_path)
+    developer = op.plan('source', a, '', {'port': 'test', 'mode': 'developer','storage_name':'mode_check'}, run_dir=tmp_path)
     assert '--headless' in operator['argv']
     assert [v for v in operator['argv'] if v != '--headless'] == developer['argv']
     assert operator['workspace'] == developer['workspace']
@@ -117,7 +117,9 @@ def test_stage_specific_ui(tmp_path, monkeypatch):
     assert not panel.controls['save'].isHidden()
     assert panel.controls['mark'].isHidden()
     panel.stage.setCurrentIndex(panel.stage.findData('annotate'))
-    assert not panel.feeds['sim_overview'].isHidden()
+    assert panel.images.isHidden() and panel.visible_feeds==()
+    assert not panel.annotation_progress.isHidden()
+    assert panel.task_state.isHidden()
     assert panel.episode_time.isHidden()
     assert panel.controls['mark'].isHidden()
     panel.annotation_mode.setCurrentIndex(1)
@@ -126,8 +128,35 @@ def test_stage_specific_ui(tmp_path, monkeypatch):
     for stage in ('convert', 'train'):
         panel.stage.setCurrentIndex(panel.stage.findData(stage))
         assert panel.images.isHidden()
+        assert panel.annotation_progress.isHidden()
         assert all(button.isHidden() for button in panel.controls.values())
     panel.close()
+
+
+def test_annotation_job_view_never_reads_preview_files(tmp_path,monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import ui
+    app=QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    panel=ui.WorkflowPanel(lambda *a:None)
+    panel.stage.setCurrentIndex(panel.stage.findData('annotate'))
+    root=session(tmp_path,monkeypatch,'annotate');now=module.time.time()
+    progress=dict(phase='running',total_episodes=10,completed_episodes=6,saved_episodes=4,failed_episodes=2,
+                  started_at=now-65,env_status={'0':dict(state='running',episode='demo_7',steps=20,total_steps=400,successes=4,failures=2)},
+                  failure_breakdown={'grasp_failure':2})
+    atomic(root/'status.json',dict(state='RUNNING',time=now,frames={'sim_side':now},annotation_progress=progress))
+    def no_images(*a):raise AssertionError('Annotation must not load a QPixmap')
+    monkeypatch.setattr(ui,'QPixmap',no_images)
+    panel.service.session=root;panel.busy=True;panel.active_stage='annotate';panel.active_manual=True
+    panel.poll_preview()
+    assert panel.annotation_progress.bar.value()==6 and panel.annotation_progress.bar.maximum()==10
+    text=panel.annotation_progress.summary.text()
+    assert '저장 성공 4' in text and '실패 2' in text and '1분 05초' in text and 'frame 20/400' in text
+    assert panel.controls['mark'].isEnabled() and panel.controls['skip'].isEnabled()
+    for stage in ('source','replay','datagen','sim_eval','real_eval'):
+        panel.stage.setCurrentIndex(panel.stage.findData(stage))
+        assert panel.visible_feeds and panel.annotation_progress.isHidden()
+    panel.busy=False;panel.close()
 
 
 def test_generation_progress_uses_completed_attempts():

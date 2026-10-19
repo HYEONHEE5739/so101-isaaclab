@@ -9,16 +9,17 @@ import shutil
 import re
 from datetime import datetime
 from ..real2sim.storage import atomic
+from ..utils.artifact_identity import fingerprint
 from ..real2sim.workspaces.package import ROOT, load, metadata
 from ..real2sim.workspaces.demo import coordinate_contract
 from ..so101_dataset_contract import read_contract
 from ..representation import describe
 
-TYPES = {'workspace', 'source', 'replay', 'annotated', 'datagen', 'dataset', 'policy', 'sim_eval', 'real_eval', 'hf_dataset', 'hf_policy'}
+TYPES = {'workspace', 'source', 'replay', 'annotated', 'datagen', 'dataset', 'policy', 'sim_eval', 'evaluation_dataset', 'real_eval', 'hf_dataset', 'hf_policy'}
 DEFAULTS = {'profile': 'outputs/real2sim', 'workspace': 'outputs/real2sim/environments'}
 
 OUTPUT_FOLDERS = {'source':'sources','annotate':'annotations','datagen':'datagen',
-                  'convert':'datasets','train':'models','sim_eval':'evaluations','real_eval':'evaluations',
+                  'convert':'datasets','merge':'datasets','train':'models','sim_eval':'evaluations','real_eval':'evaluations',
                   'replay':'evaluations','hf_dataset':'evaluations','hf_policy':'evaluations'}
 
 
@@ -32,6 +33,23 @@ def validate_storage_name(value):
 
 
 def suggested_name(stage, artifact=None):
+    if stage=='annotate' and artifact:
+        name=artifact_name(artifact)
+        if name in ('origin','train','val'):
+            path=Path(artifact['path'])
+            if path.suffix.lower() in ('.hdf5','.h5') or path.name=='dataset':path=path.parent
+            name=path.parent.name if name=='origin' and path.name=='origin' else '_'.join(path.parts[-3:])
+        partition=(artifact.get('source_partition') or artifact.get('provenance',{}).get('source_partition') or {}).get('split')
+        if partition and name!=partition and not name.endswith('_'+partition):name+='_'+partition
+        name=re.sub(r'[^\w-]','_',name,flags=re.UNICODE).strip('_')
+        # The prefix is part of the same portable leaf, including long legacy names.
+        name='annotation_'+(name or artifact.get('id','input'))
+        if len(name)>100 or len(name.encode('utf-8'))>200:
+            suffix='_'+hashlib.sha256(name.encode()).hexdigest()[:8]
+            name=name[:91]
+            while len((name+suffix).encode('utf-8'))>200:name=name[:-1]
+            name+=suffix
+        return validate_storage_name(name)
     tasks=(artifact or {}).get('tasks',[])
     task=tasks[0].get('task_id','') if len(tasks)==1 else ''
     task=''.join(c for c in task if c.isalnum() or c in '_-')[:35]
@@ -41,17 +59,28 @@ def suggested_name(stage, artifact=None):
 def artifact_name(artifact):
     """Legacy fallback is computed at read time; stored paths and hashes stay untouched."""
     path=Path(artifact['path'])
-    if artifact.get('display_name'):return artifact['display_name']
-    if path.name in ('dataset.hdf5','source.hdf5','policy','pretrained_model','dataset','report.json'):
-        return path.parent.name
-    return path.stem if path.is_file() else path.name
+    name=artifact.get('display_name')
+    if not name:
+        if path.name in ('dataset.hdf5','source.hdf5','policy','pretrained_model','dataset','report.json'):
+            name=path.parent.parent.name if artifact.get('type')=='source' and path.parent.name=='origin' else path.parent.name
+        else:name=path.stem if path.is_file() else path.name
+    if artifact.get('type')=='source':
+        generated=re.fullmatch(r'source_(?:.+_)?(\d{8})_(\d{6})_[0-9a-f]{4}',name)
+        legacy=re.fullmatch(r'(\d{8})_(\d{6})_source_.+_[0-9a-f]{8}',name)
+        stamp=generated or legacy
+        tasks=artifact.get('tasks',[])
+        if stamp and tasks:
+            task=tasks[0]['task_id'] if len(tasks)==1 else f'multi_{len(tasks)}_tasks'
+            return f'{task}_{stamp[1]}_{stamp[2]}'
+    return name
 
 
 def artifact_description(artifact):
     partition=artifact.get('source_partition') or artifact.get('provenance',{}).get('source_partition') or {}
     info=artifact.get('format');info=info if isinstance(info,dict) else {}
     count=artifact.get('episode_count',info.get('total_episodes'))
-    fields=[f"[{artifact['type']}] {artifact_name(artifact)}"]
+    kind='평가 기록' if artifact['type']=='evaluation_dataset' else artifact['type']
+    fields=[f"[{kind}] {artifact_name(artifact)}"]
     if partition:fields.append(f"{partition['split']} Source {len(partition['source_ids'])}")
     if count is not None:fields.append(f'Episodes {count}')
     if isinstance(artifact.get('format'),dict) and artifact['type']=='dataset':fields.append('LeRobot')
@@ -63,12 +92,13 @@ def artifact_description(artifact):
 
 
 def collection_at(path, root):
-    """Storage grouping only; Source Partition remains the authority for train/val."""
+    """Source grouping is owned by Sources and their direct Annotations only."""
     try:parts=Path(path).resolve().relative_to(Path(root).resolve()).parts
     except ValueError:return None
-    if len(parts)<3 or parts[0] not in set(OUTPUT_FOLDERS.values()):return None
+    if len(parts)<3 or parts[0] not in ('sources','annotations'):return None
     bucket,family,variant=parts[:3]
-    if variant!='origin' and not re.fullmatch(r'split_[1-9][0-9]*',variant):return None
+    try:validate_storage_name(variant)
+    except ValueError:return None
     validate_storage_name(family)
     partition=parts[3] if len(parts)>3 and parts[3] in ('train','val') else None
     return {'source':family,'variant':variant,**({'partition':partition} if partition else {})}
@@ -96,15 +126,11 @@ def output_location(stage, artifact, options, root):
         if supplied and supplied!=output.name:
             raise ValueError('ACT/SmolVLA Resume은 기존 출력 위치를 사용합니다. 새 이름으로 저장하려면 같은 이름의 output 경로도 명시하세요.')
         return output,output
-    leaf=supplied or suggested_name(stage,artifact)
-    folder=Path(root).resolve()/OUTPUT_FOLDERS[stage]
-    collection=artifact.get('collection') or collection_at(artifact.get('path',root),root)
-    if stage!='source' and collection:
-        folder=folder/validate_storage_name(collection['source'])/validate_storage_name(collection['variant'])
-        if stage!='train' and collection.get('partition'):
-            if collection['partition'] not in ('train','val'):raise ValueError('Unknown storage partition')
-            folder=folder/collection['partition']
-    folder=folder/leaf
+    naming_input={**artifact,'tasks':options.get('tasks') or artifact.get('tasks',[])} if stage=='source' else artifact
+    leaf=supplied or suggested_name(stage,naming_input)
+    if stage=='train' and options.get('architecture','smolvla') not in ('act','smolvla','minivla'):
+        raise ValueError('Unknown policy architecture')
+    folder=Path(root).resolve()/OUTPUT_FOLDERS[stage]/leaf
     target=folder/'origin' if stage=='source' else folder
     output=target/('source.hdf5' if stage=='source' else 'result.json') if file_output else target
     return output,folder
@@ -116,28 +142,6 @@ def resumes_in_place(stage,options,output):
     return Path(output).resolve()==resume_output(options['resume_checkpoint'],options.get('architecture','smolvla')).resolve()
 
 
-def fingerprint(path):
-    p = Path(path).expanduser().resolve()
-    files = [p] if p.is_file() else sorted(f for f in p.rglob('*') if f.is_file() and '.cache' not in f.parts)
-    if p.is_file() and p.suffix in ('.hdf5','.h5'):
-        import h5py
-        from ..utils.async_video_writer import external_video_path
-        with h5py.File(p,'r') as h:
-            videos=[]
-            if 'data' in h:
-                for name,g in h['data'].items():
-                    if name.startswith('demo_'):
-                        videos.extend(external_video_path(p,spec) for spec in json.loads(g.attrs.get('external_videos','{}')).values())
-        files += sorted(set(videos))
-    if not files:
-        raise ValueError('Empty artifact')
-    digest = hashlib.sha256()
-    for f in files:
-        digest.update(str(f.relative_to(p) if p.is_dir() else f.name if f==p else f.relative_to(p.parent)).encode())
-        with f.open('rb') as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b''):
-                digest.update(block)
-    return digest.hexdigest()
 
 
 def inspect_artifact(kind, path):
@@ -152,14 +156,14 @@ def inspect_artifact(kind, path):
     coordinates = None
     if kind == 'workspace':
         w = load(p); result['workspace'] = metadata(w); coordinates = coordinate_contract(w)
-    elif kind in ('source', 'annotated', 'datagen'):
+    elif kind in ('source', 'annotated', 'datagen', 'evaluation_dataset'):
         import h5py
         with h5py.File(p, 'r') as h:
             args = json.loads(h['data'].attrs.get('env_args', '{}'))
             episodes = [g for n, g in h['data'].items() if n.startswith('demo_')]
             if not episodes or any('actions' not in g or not len(g['actions']) for g in episodes):
                 raise ValueError('No nonempty demonstration episodes')
-            if kind in ('source', 'datagen'):
+            if kind in ('source', 'datagen', 'evaluation_dataset'):
                 for g in episodes:
                     state_key = 'obs/policy/joint_pos' if 'obs/policy/joint_pos' in g else 'obs/joint_pos'
                     if 'joint_targets' not in g or state_key not in g:
@@ -217,6 +221,9 @@ def inspect_artifact(kind, path):
             raise ValueError('Replay verification failed')
         if kind.startswith('hf_') and not result['report'].get('commit'):
             raise ValueError('Remote publication not verified')
+        if kind=='sim_eval':
+            result.update(workspace=result['report'].get('workspace'),backend=result['report'].get('backend'),
+                          episode_count=len(result['report'].get('episodes',[])))
     if coordinates:
         result['coordinates'] = coordinates
         result['representation'] = describe(coordinates)
@@ -241,6 +248,7 @@ def episode_input_kind(path):
             annotated = bool(episodes) and all('obs/datagen_info/subtask_term_signals/grasp' in g for g in episodes)
     if generated or args.get('source_dataset') or args.get('generation_method'):
         return 'datagen'
+    if args.get('evaluation_schema'):return 'evaluation_dataset'
     return 'annotated' if annotated else 'source'
 
 
@@ -303,18 +311,14 @@ class Registry:
     def __init__(self, root=None):
         self.root = Path(root or ROOT / 'outputs/workflow')
         self.root.mkdir(parents=True, exist_ok=True)
+        self._metadata_cache = {}
 
-    def collection_directory(self, stage, artifact=None):
-        """Start the group picker above individual runs, in the stage's input store."""
-        artifact=artifact or {}
-        inputs={'replay':'sources','annotate':'sources','datagen':'annotations','convert':'datagen',
+    def input_directory(self, stage):
+        """Each stage opens its own input store, independent of earlier selections."""
+        inputs={'replay':'sources','annotate':'sources','datagen':'annotations','convert':'datagen','merge':'datasets',
                 'train':'datasets','sim_eval':'models','real_eval':'models','hf_dataset':'datasets','hf_policy':'models'}
         if stage=='source':return ROOT/DEFAULTS['workspace']
-        directory=self.root/inputs[stage]
-        collection=artifact.get('collection') or collection_at(artifact.get('path',self.root),self.root)
-        if collection and Path(artifact.get('path',self.root)).resolve().is_relative_to(directory.resolve()):
-            directory=directory/validate_storage_name(collection['source'])/validate_storage_name(collection['variant'])
-        return directory
+        return self.root/inputs[stage]
 
     def register(self, kind, path, parents=(), extra=None, display_name=None):
         if display_name is not None:validate_storage_name(display_name)
@@ -328,12 +332,12 @@ class Registry:
         resolved = str(Path(path).resolve())
         content_hash = fingerprint(path)
         if not extra:
-            for existing in reversed(self.all()):
+            for existing in reversed(self.all(metadata_only=True)):
                 if (existing['type'] == kind and existing['path'] == resolved and
                         existing.get('sha256') == content_hash and existing.get('status') == 'SUCCEEDED'
                         and (not parents or existing.get('parents') == list(parents))
                         and (display_name is None or existing.get('display_name')==display_name)):
-                    return existing
+                    return self.get(existing['id'])
         artifact = {**details, 'id': uuid.uuid4().hex, 'type': kind, 'path': resolved,
                     'created_at': time.time(), 'status': 'SUCCEEDED', 'parents': list(parents),
                     'sha256': content_hash, 'execution': extra or {}}
@@ -355,11 +359,40 @@ class Registry:
                             'superseded_reason': 'policy updated by resumed training'})
         return artifact
 
-    def get(self, identifier):
-        return json.loads((self.root / 'artifacts' / (identifier + '.json')).read_text())
+    def get(self, identifier, *, metadata_only=False):
+        """Read a full record; metadata_only is an independent display projection."""
+        path=self.root/'artifacts'/(identifier+'.json')
+        if not metadata_only:return json.loads(path.read_text())
+        stat=path.stat();signature=(stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+        cached=self._metadata_cache.get(identifier)
+        if cached is None or cached[0]!=signature:
+            record=json.loads(path.read_text())
+            # UI lists need identity, tasks and scene composition, not per-episode
+            # lineage/physics reports. Full reads and verify() stay uncached.
+            record.pop('report',None);record.pop('execution',None)
+            args_keys=('workspace_path','task_definitions','grasp_object','place_bin','scene_configuration')
+            for key in ('env_args','provenance'):
+                if key not in record:continue
+                value=record[key]
+                if key=='env_args':record[key]={k:value[k] for k in args_keys if k in value}
+                else:
+                    record[key]={k:value[k] for k in ('workspace_path','task_definitions','scene_configuration','source_partition') if k in value}
+                    if 'scene' in value:
+                        record[key]['scene']={k:v for k,v in value['scene'].items() if k in ('scene_configuration','dynamic_objects','task_definition','backend')}
+                    if 'source_env_args' in value:
+                        record[key]['source_env_args']={k:v for k,v in value['source_env_args'].items() if k in args_keys}
+            # Compact JSON gives each caller an independent dictionary without
+            # repeatedly decoding the much larger saved report/provenance.
+            self._metadata_cache[identifier]=(signature,json.dumps(record,ensure_ascii=False,separators=(',',':')))
+        return json.loads(self._metadata_cache[identifier][1])
 
-    def all(self):
-        return sorted((json.loads(p.read_text()) for p in (self.root / 'artifacts').glob('*.json')), key=lambda a: a['created_at'])
+    def all(self, *, metadata_only=False):
+        """List records, detecting external writes/deletes in the display cache."""
+        paths=list((self.root/'artifacts').glob('*.json'))
+        if metadata_only:
+            identifiers={p.stem for p in paths}
+            for identifier in set(self._metadata_cache)-identifiers:del self._metadata_cache[identifier]
+        return sorted((self.get(p.stem,metadata_only=metadata_only) for p in paths),key=lambda a:a['created_at'])
 
     def summary(self):
         """Explain records and dependencies without hashing or changing stored data."""
@@ -398,22 +431,17 @@ class Registry:
     def source_collection(self, source):
         source=Path(source).resolve()
         collection=collection_at(source,self.root)
-        if collection and collection['variant']=='origin' and source.is_relative_to((self.root/'sources').resolve()):
+        if collection and source.is_relative_to((self.root/'sources').resolve()):
             return self.root/'sources'/collection['source']
         label=source.parent.name if source.name in ('dataset.hdf5','source.hdf5','dataset') else source.stem
         label=''.join(c if c.isalnum() or c in '_-' else '_' for c in label)[:40] or 'source'
         return self.root/'sources'/(label+'_'+hashlib.sha256(str(source).encode()).hexdigest()[:8])
 
-    def next_split(self, source):
-        family=self.source_collection(source)
-        used=[int(p.name[6:]) for p in family.glob('split_*') if re.fullmatch(r'split_[1-9][0-9]*',p.name)]
-        return family/f'split_{max(used,default=0)+1}'
-
-    def discover_collection(self, folder, allowed):
+    def discover_collection(self, folder, allowed, *, metadata_only=False):
         """Explicit folder import; inspect dataset roots and prune their internal files."""
         folder=Path(folder).expanduser().resolve()
-        if not folder.is_dir():raise ValueError('데이터 묶음 폴더를 선택하세요.')
-        known=[a for a in self.all() if a.get('status')=='SUCCEEDED' and Path(a['path']).exists()
+        if not folder.is_dir():raise ValueError('데이터 폴더를 선택하세요.')
+        known=[a for a in self.all(metadata_only=metadata_only) if a.get('status')=='SUCCEEDED' and Path(a['path']).exists()
                and a['type'] in allowed and Path(a['path']).is_relative_to(folder)]
         paths={a['path'] for a in known};found=list(known)
         def add(kind,path):
@@ -448,13 +476,13 @@ class Registry:
         return found
 
     def ensure_source_origin(self, source, kind='source'):
-        """Copy older inputs on explicit curation save; never move or rewrite them."""
+        """Keep managed Source inputs; copy external originals on explicit save."""
         source=Path(source).resolve();family=self.source_collection(source);origin=family/'origin'
         parent=next((a for a in reversed(self.all()) if a['path']==str(source) and a['type']==kind
                      and a.get('status')=='SUCCEEDED'),None)
         parent=parent or self.register(kind,source)
         self.verify(parent)
-        if source.is_relative_to(origin.resolve()):return parent
+        if collection_at(source,self.root) and source.is_relative_to((self.root/'sources').resolve()):return parent
         if origin.exists():
             existing=next((a for a in reversed(self.all()) if Path(a['path']).is_relative_to(origin.resolve())
                            and a.get('execution',{}).get('origin_source_id')==parent['id']),None)

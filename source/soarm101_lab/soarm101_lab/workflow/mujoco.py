@@ -10,9 +10,10 @@ import numpy as np
 
 from ..simulation.mujoco_backend import PolicyEnvironment
 from .episodes import grasp_tracker, subtask_signals, validate_training_inputs, training_coordinates
-from .operations import mujoco_request, MODEL_ROOT, ROOT
+from .worker_request import mujoco_request
+from ..learning.minivla.config import MODEL_ROOT
 from ..real2sim.storage import atomic
-from ..real2sim.workspaces.package import load, metadata
+from ..real2sim.workspaces.package import ROOT, load, metadata
 from ..simulation.mjcf import RGB_WIDTH, RGB_HEIGHT
 
 
@@ -48,7 +49,7 @@ def _environment(request, output, coordinates=None, hz=None):
     if options.get('resume_data'):
         previous_scene = _provenance(options['resume_data'])['scene']
         physics_profile = previous_scene.get('physics_profile', 'legacy_urdf')
-    return PolicyEnvironment(output / 'scene', request['workspace'], request['renderer'],
+    return PolicyEnvironment(workspace=request['workspace'], renderer=request['renderer'],
                               control_hz=hz or options.get('control_hz', 30),
                               width=options.get('width', RGB_WIDTH), height=options.get('height', RGB_HEIGHT),
                               closed_rad=coords.get('gripper_closed_rad', options.get('gripper_closed_rad')),
@@ -253,7 +254,7 @@ def source(request, output, publish, bridge):
 def train(request, output):
     from ..learning.minivla.config import MiniVLAConfig
     from ..learning.minivla.data import Episodes
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     dataset = Path(request['input'])
     provenance = _provenance(dataset)
     if request['options'].get('architecture', 'minivla') != 'minivla':
@@ -320,7 +321,7 @@ def train(request, output):
 
 def _lerobot_index(artifact,options,prefix=''):
     from ..so101_joint_mapping import RobotCoordinates
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     root=Path(artifact['path'])
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     info = json.loads((root / 'meta/info.json').read_text())
@@ -365,14 +366,16 @@ def _lerobot_index(artifact,options,prefix=''):
         if review.get('validation_only') or provenance.get('source_env_args',{}).get('validation_only'):
             raise ValueError('Synthetic smoke data cannot be trained')
         scene_configuration=provenance.get('episode_scene_configurations',{}).get(str(index),provenance.get('scene_configuration'))
+        from .episodes import partition_evidence
+        episode_partition, input_proof = partition_evidence(provenance, index)
         manifest['episodes'].append({'id': name,'dataset_episode_index':index,'from_index':start,'to_index':end,'frames':end-start,
             'split': 'train', 'instruction': instruction,
             'group_id': source_groups.get(str(index),'UNKNOWN'),
             'task_definition':source_tasks.get(str(index)) or (scene_configuration or {}).get('task_definition'),
             'scene_configuration':scene_configuration,'recorded_review':review,
             'source_lineage':provenance.get('episode_source_lineage',{}).get(str(index)),
-            **({'source_partition':partition,
-                'source_partition_input':provenance.get('source_partition_input')} if partition else {})})
+            **({'source_partition':episode_partition,
+                'source_partition_input':input_proof} if episode_partition else {})})
     return manifest,coords
 
 
@@ -381,7 +384,7 @@ def train_from_lerobot(artifact, options, output):
     """Publish small index/statistics only; Episodes reads original Parquet/MP4 lazily."""
     from .episodes import split_episodes
     from ..learning.minivla.data import fit_statistics
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     root = Path(artifact['path'])
     if options.get('resume_checkpoint'):
         from .policy import resume_output
@@ -621,10 +624,6 @@ def execute(request):
 
     def publish(frame, details):
         images = frame if isinstance(frame, dict) else {'sim_' + request.get('primary_camera','side'): frame} if frame is not None else {}
-        if images and not (output / 'rgb.png').exists():
-            from PIL import Image
-            Image.fromarray(images.get('sim_' + request.get('primary_camera', 'side'), next(iter(images.values())))).save(output / 'rgb.png')
-            for name, rgb in images.items(): Image.fromarray(rgb).save(output / (name + '.png'))
         if bridge:
             progress = dict(details)
             bridge.steps = int(progress.pop('steps', progress.pop('step', bridge.steps)))
@@ -663,17 +662,11 @@ def execute(request):
         elif stage == 'train':
             result = train(request, output)
         elif stage == 'rollout':
-            definitions = request['options'].get('tasks', [])
-            if len(definitions) <= 1:
-                result = rollout(request, output, publish, bridge)
-            else:
-                reports = []
-                for definition in definitions:
-                    folder = output / definition['task_id']; folder.mkdir()
-                    opts = {**request['options'], 'task_definition': definition, 'instruction': definition['language_instruction']}
-                    if bridge: bridge.details['task_id'] = definition['task_id']
-                    reports.append({'task_definition': definition, **rollout({**request, 'options': opts}, folder, publish, bridge)})
-                result = {'passed': all(r['passed'] for r in reports), 'tasks': reports, 'task_definitions': definitions}
+            from .evaluation import evaluate_sim
+            from .tasks import configured
+            w=load(request['workspace'])
+            definitions=request['options'].get('tasks') or [configured(w,request['options'].get('task_definition'))['task_definition']]
+            result=evaluate_sim(request,request['checkpoint'],w,definitions,bridge,publish)
 
         else:
             raise ValueError(stage)

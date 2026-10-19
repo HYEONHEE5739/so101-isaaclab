@@ -6,8 +6,6 @@ from pathlib import Path
 import threading
 import time
 
-import numpy as np
-
 from .dataset import EpisodeDataset,DatasetWriter,migrate,SCHEMA
 from ..real2sim.storage import atomic
 
@@ -36,102 +34,45 @@ def _native_isaac(request,reader):
     return native
 
 
-def replay(adapter,reader,output,bridge=None,writer=None):
-    """Replay actual recorded model targets; schema compatibility never sets physical success."""
-    rows=[];output=Path(output)
+def replay(adapter,reader,output,bridge=None,writer=None,*,evaluation_playback=False,num_envs=1,input_validated=False):
+    """Recorded targets and common acceptance; Annotation owns parallel execution."""
+    from .annotation import replay_episode,run
+    if writer:
+        return run(adapter,reader,Path(output),bridge,writer,num_envs,input_validated=input_validated)
     from .dataset import validate_episode
-    from .episodes import source_catalog
-    source_records=source_catalog(reader.path,allow_unknown=True)[0] if writer else {}
-    # A vector scene steps idle robots too. Keep their hold targets fixed rather
-    # than feeding each gravity-displaced measurement back as the next target.
-    isaac_actions=None
+    rows=[];output=Path(output)
+    actions=None
     if not hasattr(adapter,'backend'):
-        isaac_actions=adapter.native.scene['robot'].data.joint_pos[:,adapter.ids].clone()
+        actions=adapter.native.scene['robot'].data.joint_pos[:,adapter.ids].clone()
     for name in reader.names:
-        boundary=getattr(adapter,'interrupt_boundary',None)
-        if boundary:boundary()
         values,attrs,videos=reader.episode(name)
+        validate_episode(values,attrs,videos,reader.hz,video_root=reader.path.parent)
         validating=bridge is not None and bridge.details.get('workflow_phase')=='source_validation'
         if validating:bridge.source_progress(len(rows),len(reader.names),name,0,len(values['actions']))
-        if not attrs.get('source_lineage') and name in source_records:
-            attrs['source_lineage']=json.dumps(source_records[name])
-        validate_episode(values,attrs,videos,reader.hz,video_root=reader.path.parent)
-        adapter.restore(values,attrs);joint_errors=[];object_errors=[];reason='';category=''
-        marks=[];skipped=[];position=[0]
-        adapter.annotation_marks=marks;adapter.annotation_position=position;adapter.annotation_skipped=skipped
-        if bridge and writer:
-            bridge.callbacks['mark']=lambda:marks.append(position[0])
-            bridge.callbacks['skip']=lambda:skipped.append(True)
-        first=adapter.state();expected=values['initial_state']['articulation']['robot']['joint_position'][0]
-        from .robot_preview import pose_matrix
-        if not np.allclose(adapter.base_world,pose_matrix(values['initial_state']['articulation']['robot']['root_pose'][0]),atol=1e-5):
-            raise ValueError('Initial fixed robot base differs from recorded frame')
-        if not np.allclose(first['joint_pos'],expected,atol=1e-5):raise ValueError('Initial joint restoration differs')
-        for obj in adapter.workspace['task']['dynamic']:
-            expected_obj=values['obs']['datagen_info']['object_pose'][obj][0]
-            if not np.allclose(first['object_poses'][obj],expected_obj,atol=1e-5):raise ValueError('Initial object transform differs: '+obj)
+        episode=replay_episode(adapter,reader,name,values,attrs,bridge,evaluation_playback=evaluation_playback)
         try:
-            for i,command in enumerate(values['joint_targets']):
-                if boundary:boundary()
-                position[0]=i
-                if validating:bridge.source_progress(len(rows),len(reader.names),name,i+1,len(values['actions']))
-                if bridge:bridge.before_step()
-                while getattr(adapter,'annotation_paused',False) and not skipped:
-                    if boundary:boundary()
-                    adapter.native.sim.render();time.sleep(.01)
-                if skipped:reason='User skipped annotation episode';break
-                before=adapter.state();joint_errors.append(float(np.linalg.norm(before['joint_pos']-values['obs']['policy']['joint_pos'][i])))
-                for obj in adapter.workspace['task']['dynamic']:
-                    object_errors.append(float(np.linalg.norm(before['object_poses'][obj][:3,3]-values['obs']['datagen_info']['object_pose'][obj][i,:3,3])))
-                if writer:adapter.buffer.append(command,values['obs']['datagen_info']['target_eef_pose']['tool0'][i],before)
-                if hasattr(adapter,'backend'):adapter.backend.step(command)
-                else:
-                    import torch
-                    isaac_actions[adapter.index]=torch.as_tensor(command,device=adapter.native.device,dtype=isaac_actions.dtype)
-                    adapter.native.step(isaac_actions)
-                adapter.update_grasp()
-                if bridge:
-                    bridge.steps=i+1;bridge.details.update(episode=name,episode_index=reader.names.index(name)+1,
-                        episode_total=len(reader.names),task_signals={'grasp':adapter.tracker.completed,'place':adapter.place_success()});bridge.status()
-                if request_realtime(adapter):time.sleep(1/reader.hz)
-            passed=adapter.check_success() and not skipped;category='success' if passed else adapter.failure_category()
-            if not passed and not reason:
-                reason='Stable grasp was not observed' if category=='grasp_failure' else 'Stable grasp observed; final placement condition not met'
-        except (ValueError,RuntimeError) as exc:passed=False;reason=str(exc);category='simulation_failure'
-        row={'episode':name,'physical_replay_passed':bool(passed),'category':category,'reason':reason,
-            **({'annotation_accepted':False} if writer else {}),
-            'grasp_confirmed':adapter.tracker.completed,'place_confirmed':bool(adapter.place_success()),
-            'steps':adapter.step_index,'joint_l2_max_rad':max(joint_errors,default=0.),
-            'object_position_error_max_m':max(object_errors,default=0.),'source_backend':reader.backend,
-            'execution_backend':'mujoco' if hasattr(adapter,'backend') else 'isaac'}
-        if writer and passed:
-            exported_attrs={**attrs,'success':True,'success_source':'simulation_stable_grasp_and_place',
-                'simulation_backend':row['execution_backend'],
-                'annotation_method':'cross_backend_stable_contact_replay','source_group':attrs.get('source_group','UNKNOWN'),
-                'physical_replay':json.dumps(row)}
-            prepared=adapter.buffer.finish(exported_attrs)
-            if not getattr(adapter,'annotation_auto',True):
-                if len(marks)!=1 or not 0<marks[0]<len(values['actions'])-1:
-                    row.update(physical_replay_passed=True,annotation_accepted=False,reason='Mark one grasp boundary before placement')
-                    rows.append(row);adapter.buffer.abort();continue
-                signal=(np.arange(len(values['actions']))>=marks[0]).astype(np.uint8)[:,None]
-                prepared[0]['obs']['events']['grasp']=signal
-                prepared[0]['obs']['datagen_info']['subtask_term_signals']['grasp']=signal
-                annotation=json.loads(prepared[1]['annotation']);annotation.update(grasp=marks[0],method='manual_grasp_and_measured_place')
-                prepared[1]['annotation']=json.dumps(annotation)
-            row['exported_episode']=writer.commit(*prepared,video_staging=adapter.buffer.video);row['annotation_accepted']=True
-        rows.append(row);print('[REPLAY] '+json.dumps(row),flush=True);adapter.buffer.abort()
+            command=next(episode)
+            while True:
+                if command is None:
+                    command=next(episode);continue
+                try:
+                    if hasattr(adapter,'backend'):adapter.backend.step(command)
+                    else:
+                        import torch
+                        actions[adapter.index]=torch.as_tensor(command,device=adapter.native.device,dtype=actions.dtype)
+                        adapter.native.step(actions)
+                except (ValueError,RuntimeError) as exc:command=episode.throw(exc)
+                else:command=next(episode)
+        except StopIteration as completed:row,_=completed.value
+        finally:episode.close();adapter.buffer.abort()
+        rows.append(row);print('[REPLAY] '+json.dumps(row),flush=True)
         if validating:bridge.source_progress(len(rows),len(reader.names),name,len(values['actions']),len(values['actions']))
         atomic(output/'replay_progress.json',rows)
     physical=sum(r['physical_replay_passed'] for r in rows)
-    accepted=sum(r.get('annotation_accepted',False) for r in rows) if writer else physical
     result={'passed':bool(rows) and physical==len(rows),'episodes':rows,
-        'accepted':accepted,'rejected':len(rows)-accepted,'physical_accepted':physical,
+        'accepted':physical,'rejected':len(rows)-physical,'physical_accepted':physical,
         'schema_compatible':True,'hardware_tested':False}
     atomic(output/'cross_replay.json',result);return result
-
-
-def request_realtime(adapter):return getattr(adapter,'realtime',False)
 
 
 def replay_cache_identity(reader,request,adapter):
@@ -187,7 +128,7 @@ def cached_replay(reader,request,adapter,output,bridge=None):
                     atomic(output/'cross_replay.json',result);return result
         except (OSError,ValueError,KeyError,TypeError,AttributeError):
             cache_path=None
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     before=fingerprint(reader.path)
     proof=replay(adapter,reader,output,bridge)
     if fingerprint(reader.path)!=before:raise ValueError('Source changed during physical replay; proof cannot be cached')
@@ -199,9 +140,16 @@ def cached_replay(reader,request,adapter,output,bridge=None):
 
 
 def execute(request):
+    if request['stage']=='annotate':
+        count=request['options'].get('num_envs',1)
+        if type(count) is not int or count not in (1,2,4,8):raise ValueError('Annotation num_envs must be 1,2,4 or 8')
+        if not request['options'].get('auto',True) and count!=1:raise ValueError('Manual Annotation requires one environment')
     if request['stage']=='datagen':
         from ..simulation.ik import validate_solver,validate_failure_policy
         request={**request,'options':{**request['options'],'ik_solver':validate_solver(request['options'].get('ik_solver','scipy_ls')),'ik_failure_policy':validate_failure_policy(request['options'].get('ik_failure_policy','strict'))}}
+        if request['options'].get('resume_data'):
+            from .data_resume import inspect_resume_input
+            inspect_resume_input('datagen',request['options']['resume_data'])
     output=Path(request['output']).resolve()
     if output.exists():raise FileExistsError('Choose a new workflow output directory')
     output.mkdir(parents=True,exist_ok=False);original=Path(request['input']).resolve();reader=EpisodeDataset(original)
@@ -220,11 +168,13 @@ def execute(request):
         if len(matches)!=1:raise ValueError('Selected episode missing or ambiguous: '+selected)
         reader.names=matches
     from .dataset import validate_dataset
+    validation_started=time.perf_counter()
     validate_dataset(reader,require_annotations=request['stage']=='datagen')
+    input_validation_s=time.perf_counter()-validation_started
     from ..real2sim.workspaces.package import load,metadata
     if reader.args['workspace']!=metadata(load(request['workspace'])):raise ValueError('Input Workspace identity differs')
     opts=copy.deepcopy(request['options']);backend=request['backend'];stage=request['stage']
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     opts['source_pool_sha256']=fingerprint(original)
     from ..real2sim.workspaces.reset import datagen_seed
     if opts.get('generation_seed') is None:
@@ -251,7 +201,14 @@ def execute(request):
             from .adapters import IsaacAdapter
             adapter=IsaacAdapter(native,0,output,opts['generation_seed'],threading.Event())
             from .presentation import attach
-            bridge=attach(native)
+            if stage=='annotate':
+                from .presentation import current
+                bridge=current()
+                if bridge:
+                    # Manual controls can keep the developer window responsive
+                    # while paused. Annotation sends status only, never images.
+                    bridge.idle_render=native.sim.render if not opts.get('auto',True) and opts.get('mode')=='developer' else None
+            else:bridge=attach(native)
         elif backend=='mujoco':
             boundary=deferred_interrupt()
             from .mujoco import _environment
@@ -275,9 +232,11 @@ def execute(request):
             if stage=='annotate':
                 args=copy.deepcopy(reader.args);args.update(backend=backend,source_backend=reader.backend,annotated_from=str(original))
                 writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
-            proof=replay(adapter,reader,output,bridge,writer)
+            proof=replay(adapter,reader,output,bridge,writer,evaluation_playback=stage=='replay',
+                         **({'num_envs':opts['num_envs'],'input_validated':True} if stage=='annotate' else {}))
             if writer:
                 writer.close();result={**proof,'passed':writer.count>0,'dataset':str(writer.path)}
+                result['annotation_profile']['input_validation_s']=input_validation_s
             elif stage=='replay':result=proof
         if stage=='datagen':
             from .datagen import run_isaac,run_mujoco

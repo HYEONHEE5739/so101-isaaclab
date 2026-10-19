@@ -1,4 +1,4 @@
-"""URDF/STL -> run-local MJCF. No USD conversion, no edits to published packages."""
+"""URDF/STL -> in-memory MJCF. No generated scene files or workspace edits."""
 import copy
 import hashlib
 import json
@@ -75,9 +75,9 @@ def load_inputs(workspace=None):
     raise ValueError('Select an explicit Workspace or scene profile; no bootstrap scene is created')
 
 
-def write_xml(path, node):
+def xml_bytes(node):
     ET.indent(node)
-    ET.ElementTree(node).write(path, encoding='utf-8', xml_declaration=True)
+    return ET.tostring(node, encoding='utf-8', xml_declaration=True)
 
 
 def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=None):
@@ -97,6 +97,14 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
     assets = ET.SubElement(result, 'asset')
     meshes = {}
     source_hashes = {str(urdf): hashlib.sha256(urdf.read_bytes()).hexdigest()}
+    convex_path=ROOT/'assets/SO101/mujoco/finger_convex_parts.json'
+    convex_parts={}
+    if physics_profile=='isaac_matched':
+        exported=json.loads(convex_path.read_text())
+        if exported.get('schema')!='so101.finger-convex-parts/1':
+            raise ValueError('Unknown SO101 finger collision export')
+        convex_parts={(entry['link'],entry['collision_index']):entry for entry in exported['meshes']}
+        source_hashes[str(convex_path)]=hashlib.sha256(convex_path.read_bytes()).hexdigest()
     materials = {m.get('name'): m.find('color').get('rgba') for m in root.findall('material')}
     world = ET.SubElement(result, 'worldbody')
 
@@ -142,6 +150,18 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
                     source_hashes[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
                 attributes = {'name': f'{name}_{kind}_{index}', 'type': 'mesh', 'mesh': meshes[key],
                               **pose_attrs(origin(geom.find('origin')))}
+                if kind=='collision' and name in ('gripper','jaw') and physics_profile=='isaac_matched':
+                    entry=convex_parts.get((name,index))
+                    if not entry or entry['source_sha256']!=source_hashes[str(path)]:
+                        raise ValueError('Finger collision STL changed; regenerate offline convex export: '+str(path))
+                    if not entry['parts']:raise ValueError('Empty finger collision export')
+                    for part_index,part in enumerate(entry['parts']):
+                        part_name=f'{name}_collision_{index}_part_{part_index}'
+                        ET.SubElement(assets,'mesh',name=part_name,vertex=numbers(part['vertices']),
+                                      face=' '.join(str(int(v)) for row in part['faces'] for v in row),scale=scale)
+                        ET.SubElement(body,'geom',**{**attributes,'name':part_name,'mesh':part_name,
+                                                   'contype':'2','conaffinity':'1','group':'3','rgba':'0 0 0 0'})
+                    continue
                 if kind == 'visual':
                     material = geom.find('material')
                     attributes.update(contype='0', conaffinity='0', group='2',
@@ -169,7 +189,7 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
     return result, limits, source_hashes
 
 
-def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002, decimation=10,
+def build_scene(workspace=None, width=320, height=240, timestep=.002, decimation=10,
                 task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, reset=None):
     if (type(width) is not int or type(height) is not int or width < 1 or height < 1
             or type(decimation) is not int or decimation < 1
@@ -177,7 +197,6 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
         raise ValueError('Invalid resolution, timestep or decimation')
     if physics_profile not in ('isaac_matched', 'legacy_urdf'):
         raise ValueError('Unknown MuJoCo physics profile')
-    output_dir = Path(output_dir).resolve()
     w, urdf, source = load_inputs(workspace)
     if identity_sim:
         w = copy.deepcopy(w)
@@ -291,14 +310,7 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
             extended.update(apply_builder_visuals(scene, robot, w))
             hashes.update({str(w['root']/k): v for k, v in w['manifest']['files'].items() if k.startswith('builder/')})
         extended['cameras'][primary_camera] = {**copy.deepcopy(camera), 'resolution': [width, height], 'K': k.tolist()}
-    # Refuse writing into the immutable input package, including subdirectories.
-    if workspace and not isinstance(workspace, dict) and output_dir.is_relative_to(w['root']):
-        raise ValueError('MJCF output must be outside the published workspace')
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if any((output_dir / n).exists() for n in ('scene.xml', 'so101.xml', 'scene_metadata.json')):
-        raise FileExistsError('Choose a new scene output directory')
-    write_xml(output_dir / 'so101.xml', robot)
-    write_xml(output_dir / 'scene.xml', scene)
+    scene_data, robot_data = xml_bytes(scene), xml_bytes(robot)
     reduced = copy.deepcopy(w)
     reduced['task']['dynamic'] = list(task['dynamic']) if full_workspace else [pick]
     info = {
@@ -318,7 +330,8 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
         'approximations': {
             'actuator': ('configured kp/kv and force limit 30 from existing Isaac actuator; not measured'
                          if physics_profile == 'isaac_matched' else 'legacy kp/kv from Isaac; force limit from URDF effort (10), not measured'),
-            'robot_collision': 'URDF per-mesh convex hulls; self collision disabled; grasp fidelity unverified',
+            'robot_collision': ('offline convex decomposition of finger collision STL; other links per-mesh convex hulls; self collision disabled'
+                                if physics_profile=='isaac_matched' else 'legacy URDF per-mesh convex hulls; self collision disabled'),
             'bin_collision': ('Builder-exported collision parts; AABB used for success/inertia approximation' if builder_scene else 'open primitive bottom and 4x32 box wall segments; wall provenance from profile'),
             'friction': 'task dynamic_friction as MuJoCo sliding friction; torsion/rolling .005/.0001 provisional',
             'restitution': 'MuJoCo solref .01 1 configured; no direct PhysX restitution equivalence',
@@ -328,7 +341,6 @@ def build_scene(output_dir, workspace=None, width=320, height=240, timestep=.002
         },
     }
     info['model_sha256'] = hashlib.sha256(
-        (output_dir / 'scene.xml').read_bytes() + (output_dir / 'so101.xml').read_bytes()
+        scene_data + robot_data
         + json.dumps(hashes, sort_keys=True).encode()).hexdigest()
-    (output_dir / 'scene_metadata.json').write_text(json.dumps(info, indent=2, ensure_ascii=False))
-    return output_dir / 'scene.xml', reduced, info
+    return scene_data.decode('utf-8'), {'so101.xml': robot_data}, reduced, info

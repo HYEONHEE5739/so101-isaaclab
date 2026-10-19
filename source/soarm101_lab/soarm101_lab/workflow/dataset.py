@@ -483,7 +483,7 @@ def migrate(source,destination,*,names=None):
         reader.names=[name for name in reader.names if name in names]
     if reader.contract.get('joint_order')!=list(JOINTS) or reader.contract.get('action_space')!=MIMIC_SPACE:
         raise ValueError('Recorded coordinate/action contract required for common import; legacy unknown cannot be relabeled')
-    from .artifacts import fingerprint
+    from ..utils.artifact_identity import fingerprint
     from .episodes import source_catalog
     before=fingerprint(source);records,partition=source_catalog(source,allow_unknown=True)
     args=copy.deepcopy(reader.args);args['migration']={'source':str(source),'source_sha256':before,'numeric_comparison':'exact; original numeric arrays retained under legacy/','video_encoding':'byte copy'}

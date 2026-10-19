@@ -296,7 +296,8 @@ def test_replay_cache_identity_tracks_all_physical_inputs(field,monkeypatch):
 
 
 @pytest.mark.parametrize('grasp,place,accepted',[(False,True,False),(True,False,False),(True,True,True)])
-def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,grasp,place,accepted):
+@pytest.mark.parametrize('manual',[False,True])
+def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,grasp,place,accepted,manual,monkeypatch):
     """Synthetic signal fixture checks the gate; it does not claim physical success."""
     from soarm101_lab.workflow.unified import replay
     values,attrs,videos,args,contract=episode
@@ -304,13 +305,16 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
     with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
     reader=EpisodeDataset(source);calls=[]
     class Buffer:
-        video=None
+        video=None;metrics={}
         def append(self,*args):pass
         def abort(self):pass
-        def finish(self,attrs):return copy.deepcopy(values),attrs,videos
+        def finish(self,attrs):
+            result=copy.deepcopy(values);result['obs'].setdefault('events',{})
+            return result,dict(attrs,annotation=json.dumps({'grasp':2,'place':4})),videos
     class Adapter:
         workspace={'task':{'dynamic':['cube']}};base_world=np.eye(4);step_index=0
-        annotation_auto=True;buffer=Buffer();tracker=SimpleNamespace(completed=False)
+        annotation_auto=True;buffer=Buffer();tracker=SimpleNamespace(completed=False);metrics={};last_images={}
+        def close(self):pytest.fail('Annotation must not close its caller-owned primary adapter')
         def restore(self,*args):self.tracker.completed=False;self.step_index=0
         def state(self):return {'joint_pos':np.zeros(6),'object_poses':{'cube':np.eye(4)}}
         def step(self,*args):self.step_index+=1
@@ -318,9 +322,24 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
         def place_success(self):return place
         def check_success(self):return self.tracker.completed and self.place_success()
         def failure_category(self):return 'grasp_failure' if not self.tracker.completed else 'place_failure'
-    adapter=Adapter();adapter.backend=SimpleNamespace(step=adapter.step)
-    writer=SimpleNamespace(commit=lambda *args,**kwargs:calls.append(True) or 'demo_0')
-    result=replay(adapter,reader,tmp_path/'replayed',writer=writer)
+    adapter=Adapter();adapter.backend=SimpleNamespace(step=adapter.step,render_metrics={})
+    adapter.annotation_auto=not manual;adapter.realtime=True
+    bridge=None
+    if manual:
+        class Bridge:
+            callbacks={};details={};steps=0;config={};progress_provider=None
+            def before_step(self):
+                if adapter.annotation_position[0]==2:self.callbacks['mark']()
+            def status(self,*args):pass
+            def poll(self):pass
+        bridge=Bridge();bridge.paused=False;bridge.single_step=False
+    def commit(result,*args,**kwargs):
+        if manual:np.testing.assert_array_equal(result['obs']['events']['grasp'][:,0],[0,0,1,1,1])
+        calls.append(True);return 'demo_0'
+    writer=SimpleNamespace(commit=commit)
+    from soarm101_lab.workflow import unified
+    monkeypatch.setattr(unified.time,'sleep',lambda *args:pytest.fail('Annotation must not pace by control Hz'))
+    result=replay(adapter,reader,tmp_path/'replayed',bridge=bridge,writer=writer)
     assert result['passed']==accepted and result['accepted']==int(accepted)
     assert bool(calls)==accepted
 

@@ -3,6 +3,30 @@ import numpy as np
 from soarm101_lab.workflow.data_resume import combine
 
 
+def test_datagen_resume_rejects_video_folder_before_worker_output(tmp_path):
+    import pytest
+    from soarm101_lab.workflow.data_resume import inspect_resume_input
+    from soarm101_lab.workflow.unified import execute
+    video=tmp_path/'dataset.videos';video.mkdir()
+    with pytest.raises(ValueError,match='영상 보관용'):inspect_resume_input('datagen',video)
+    output=tmp_path/'must_not_be_created'
+    with pytest.raises(ValueError,match='영상 보관용'):
+        execute({'stage':'datagen','options':{'resume_data':str(video)},'output':str(output),'input':'unused'})
+    assert not output.exists()
+
+
+def test_datagen_resume_requires_actual_generated_result(tmp_path,monkeypatch):
+    import pytest
+    from soarm101_lab.workflow import data_resume
+    from soarm101_lab.workflow.dataset import SCHEMA
+    path=tmp_path/'data.hdf5';path.touch()
+    item={'format':SCHEMA,'env_args':{}}
+    monkeypatch.setattr(data_resume,'inspect_artifact',lambda *args:item)
+    with pytest.raises(ValueError,match='이전 DataGen 결과'):data_resume.inspect_resume_input('datagen',path)
+    item['env_args'].update(generation_method='isaaclab_mimic/1.0.15',generation_seed=1047)
+    assert data_resume.inspect_resume_input('datagen',path) is item
+
+
 def test_merge_rejects_different_simulation_calibration_before_modifying_output(tmp_path):
     import pytest,json
     from soarm101_lab.so101_dataset_contract import write_contract

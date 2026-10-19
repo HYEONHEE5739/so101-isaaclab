@@ -125,7 +125,7 @@ class Window(QMainWindow):
         self.live_scene.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         scene_controls.addWidget(self.live_scene)
         scene_buttons=QHBoxLayout();scene_controls.addLayout(scene_buttons)
-        self.scene_browse=self.button(scene_buttons,'Scene 선택 / Import',lambda:self.workflow_panel.browse_workspace())
+        self.scene_browse=self.button(scene_buttons,'Scene 선택 / Import',self.browse_scene)
         self.scene_refresh=self.button(scene_buttons,'목록 새로고침',self.refresh_live_scenes)
         self.live_workspace=QCheckBox('선택한 Scene 사용');self.live_workspace.setChecked(True);scene_controls.addWidget(self.live_workspace)
         self.scene_selection_hint=QLabel();self.scene_selection_hint.setWordWrap(True)
@@ -204,7 +204,7 @@ class Window(QMainWindow):
         self.live_scene.blockSignals(True);self.live_scene.clear()
         self.live_scene.addItem('Scene을 선택하세요', '')
         seen=set()
-        for artifact in self.workflow_panel.registry.all():
+        for artifact in self.workflow_panel.registry.all(metadata_only=True):
             scene=artifact['path']
             if artifact['type']!='workspace' or artifact.get('status','SUCCEEDED')!='SUCCEEDED' or not Path(scene).exists() or scene in seen:continue
             seen.add(scene)
@@ -217,6 +217,22 @@ class Window(QMainWindow):
         self.live_scene.blockSignals(False)
         self.update_scene_selection_hint()
         if self.tabs.currentIndex()==1 and not self.runtime_enabled:self.sync_scene_cameras()
+
+    def browse_scene(self):
+        """Live Scene import belongs here; Workflow selects a published version."""
+        from ..workflow.artifacts import browse_directory
+        panel=self.workflow_panel
+        if panel.busy:raise ValueError('Workflow 실행이 끝난 뒤 Scene을 선택하세요.')
+        path=QFileDialog.getExistingDirectory(self,'Workspace 또는 Builder export 폴더 선택',
+            browse_directory('workspace',panel.workspace_path))
+        if not path:return
+        if (Path(path)/'scene_manifest.yaml').is_file():
+            import subprocess
+            result=subprocess.run([panel.worker_python,str(ROOT/'scripts/real2sim/workflow.py'),
+                'import-builder',path],capture_output=True,text=True,timeout=180)
+            if result.returncode:raise RuntimeError('Builder 가져오기 실패: '+result.stderr[-3000:])
+            path=result.stdout.strip().splitlines()[-1]
+        panel.registry.register('workspace',path);panel.select_workspace(path)
 
     def select_live_scene(self):
         path=self.live_scene.currentData()
