@@ -5,7 +5,8 @@ import hashlib
 from pathlib import Path
 import time
 import numpy as np
-from .policy import MiniVLA, ActionGuard
+from .policy import MiniVLA
+from ...workflow.policy import ActionGuard
 from ...simulation.mujoco_backend import MujocoSO101
 from .evaluate import summarize_episode, aggregate
 from .train import seed_all

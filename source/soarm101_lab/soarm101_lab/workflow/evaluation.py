@@ -35,9 +35,9 @@ class EvaluationRecorder:
     def __init__(self, native, workspace, backend, checkpoint, output, hz, seed, *, index=0, writers=None, contact_views=None):
         import threading
         from .adapters import IsaacAdapter, MujocoAdapter
-        from .dataset import DatasetWriter, recording_args
+        from ..data.episodes import DatasetWriter, recording_args
         from ..so101_dataset_contract import read_contract, MIMIC_SPACE
-        from .tasks import configured, selected
+        from ..real2sim.workspaces.tasks import configured, selected
         self.backend = backend
         self.writers=writers;self.output=Path(output);self.index=index
         self.recording=(workspace['task'].get('observation_cameras')==['side','wrist'] and
@@ -77,7 +77,7 @@ class EvaluationRecorder:
             goal = np.linalg.inv(a.base_workspace) @ a.backend.target_pose(target)
         else:
             goal = a.kinematics.forward_kinematics(target[:5])
-        a.buffer.append(target, goal,observation,images)
+        a.record_frame(target, goal,observation,images)
 
     def finish(self, row, tracker, max_steps):
         a = self.adapter
@@ -85,7 +85,7 @@ class EvaluationRecorder:
         grasp = bool(tracker.completed)
         place = bool(a.place_success())
         if self.writers is not None and self.recording:
-            from .dataset import DatasetWriter
+            from ..data.episodes import DatasetWriter
             path=self.output/('success' if row['success'] else 'failure')/'dataset.hdf5'
             if path not in self.writers:self.writers[path]=DatasetWriter(path,self.args,self.contract)
             self.writer=self.writers[path]
@@ -109,7 +109,7 @@ class EvaluationRecorder:
             'scene_configuration':json.dumps(self.writer.args['scene_configuration'])}
         if self.initial_physics_state is not None:attrs['legacy_initial_state']=json.dumps(self.initial_physics_state)
         try:
-            prepared=a.buffer.finish(attrs)
+            prepared=a.buffer.finish(attrs,success=a.check_success())
             if self.writers is not None:
                 a.buffer.video.relocate(self.writer.path.parent)
                 for spec in prepared[2].values():spec['file']=str(a.buffer.video.folder/Path(spec['file']).name)
@@ -222,9 +222,10 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
     """
     from concurrent.futures import ThreadPoolExecutor
     from .policy import batch_actions, MiniVLAJointPolicy
-    from .tasks import configured, object_metrics, evaluation_distribution, evaluation_metrics
+    from .tasks import object_metrics, evaluation_distribution, evaluation_metrics
+    from ..real2sim.workspaces.tasks import configured
     from ..so101_dataset_contract import read_contract
-    from ..learning.minivla.policy import ActionGuard
+    from .policy import ActionGuard
     opts=request['options'];count=validate_evaluation_options(opts);episodes=opts.get('episodes',1)
     limit=opts.get('max_steps',300);backend=request.get('backend','isaac')
     if backend=='common':backend='isaac'
@@ -263,7 +264,8 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                     from isaaclab.envs import ManagerBasedEnv
                     from ..real2sim.workspaces.environment import make_config
                     cfg=make_config(w['root'],device,count,task_definition=definition,
-                                    coordinates=read_contract(minivla_root(path)),active_object_ids=active)
+                                    coordinates=read_contract(minivla_root(path)),active_object_ids=active,
+                                    overview_camera=bridge is not None,grasp_observations=bridge is not None)
                     cfg.seed=seed;cfg.events.reset_episode.params['randomization_seed']=seed
                     native=ManagerBasedEnv(cfg=cfg);native._workflow_task_workspace=w
                     native.reset();hz=1/native.step_dt
@@ -416,7 +418,8 @@ def evaluate(request):
         policy,pre,post=load_policy(path,coordinate_contract(w),device) if stage!='sim_eval' else (None,None,None)
         if hasattr(policy,'policy') and hasattr(policy.policy,'checkpoint_step'):
             atomic(Path(request['output']).with_suffix('')/'selected_checkpoint.json',{'path':path,'step':policy.policy.checkpoint_step})
-        from .tasks import catalog, selected, validate, configured, active_objects, object_metrics, evaluation_distribution
+        from .tasks import object_metrics, evaluation_distribution
+        from ..real2sim.workspaces.tasks import catalog, selected, validate, configured, active_objects
         active = active_objects(w,opts.get('active_object_ids'))
         definitions = [t for t in catalog(w) if t['pick_object_id'] in active] if opts.get('task_scope') == 'all' else opts.get('tasks') or [selected(w)]
         definitions = [validate(t, w) for t in definitions]

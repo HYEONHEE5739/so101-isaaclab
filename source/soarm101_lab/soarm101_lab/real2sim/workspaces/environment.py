@@ -113,7 +113,14 @@ def task_success_details(env, workspace):
         speed_limit=task['success']['max_speed_m_s'], wall_tolerance=WALL_TOLERANCE_M)
 
 
-def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None, simulation=None, coordinates=None):
+def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, identity_sim=False, active_object_ids=None, simulation=None, coordinates=None, *, overview_camera=False, grasp_observations=False):
+    """Build engine config from explicit scene and sensor requirements.
+
+    overview_camera adds the inspection-only 800x600 camera. grasp_observations
+    adds the existing grasp/open subtask terms used by evaluation diagnostics.
+    Neither flag changes the Workspace-selected policy cameras or control clock.
+    The caller owns engine creation; this function never reads UI session state.
+    """
     if type(num_envs) is not int or num_envs<1:raise ValueError('Positive num_envs required')
     from isaaclab.utils import configclass
     from isaaclab.envs import ManagerBasedEnvCfg
@@ -125,7 +132,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
     from ...assets.robots.so101 import SO101_FOLLOWER_CFG
     from ...tasks.manager_based.soarm101_lab.base_pick_place_teleop_env_cfg import ActionsCfg, ObservationsCfg
     from ..profile import pose, render_k
-    from ...workflow.tasks import configured
+    from .tasks import configured
     recorded_model=simulation or (coordinates or {}).get('simulation_model') or {}
     recorded_reset=(recorded_model.get('scene_configuration') or {}).get('reset')
     w=configured(workspace if isinstance(workspace,dict) else load(workspace), task_definition or (workspace.get('task_definition') if isinstance(workspace,dict) else None), active_object_ids, backend='isaac',reset=recorded_reset);p=w['profile'];task=w['task'];root=w['root']
@@ -217,11 +224,8 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
             spawn=sim.PinholeCameraCfg(focal_length=24.,horizontal_aperture=24*width/k[0,0],vertical_aperture=24*height/k[1,1],horizontal_aperture_offset=24*(width/2-k[0,2])/k[0,0],vertical_aperture_offset=24*(k[1,2]-height/2)/k[1,1],clipping_range=(.001,100.),f_stop=0.),
             offset=CameraCfg.OffsetCfg(pos=pos,rot=rot,convention='ros')))
     # Inspection-only camera: same scene/runtime, outside policy observation space.
-    from ...workflow.presentation import current
-    from ...workflow.stages import INSPECTION_STAGES
-    presentation = current()
-    if presentation and presentation.config['stage'] in INSPECTION_STAGES:
-        from ...workflow.presentation import framing
+    if overview_camera:
+        from ...simulation.workspace_scene import framing
         overview_pos, overview_rot = framing(w)
         scene.camera_overview = CameraCfg(prim_path='{ENV_REGEX_NS}/Camera_Overview', width=800, height=600,
             data_types=['rgb'], update_period=.1,
@@ -237,7 +241,7 @@ def make_config(workspace, device='cuda:0', num_envs=1, task_definition=None, id
         term = copy.deepcopy(image_template); term.params['sensor_cfg'] = SceneEntityCfg('camera_'+view+'view')
         setattr(cfg.observations.policy, view+'_cam', term)
 
-    if presentation and presentation.config['stage'] == 'sim_eval':
+    if grasp_observations:
         from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
         from isaaclab.managers import SceneEntityCfg
         subtask = copy.deepcopy(SO101PickPlaceMimicEnvCfg().observations.subtask_terms)

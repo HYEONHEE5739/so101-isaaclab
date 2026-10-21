@@ -90,33 +90,36 @@ def motion_canonical(tmp_path,w,ids):
 
 @pytest.mark.parametrize('ids',[['cube_red'],['cube_red','cube_blue','cube_green']])
 def test_robot_object_coordinate_alignment_and_canonical_telemetry(tmp_path,motion_workspace,ids):
-    from soarm101_lab.workflow.curation import analyze,load_episode,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze,load_episode
+    from soarm101_lab.data.episodes import EpisodeReader
     from soarm101_lab.workflow.robot_preview import RobotPreview
-    writer=motion_canonical(tmp_path,motion_workspace,ids);row=analyze(writer.root)[0];reader=EpisodeReader(row);loaded=load_episode(row)
-    assert set(loaded['object_paths'])==set(ids) and all(p.shape==(4,4,4) for p in loaded['object_paths'].values())
-    assert row['display_frame']=='robot_base' and row['pick_object_id']=='cube_red'
-    assert row['active_object_count']==len(ids) and row['source_group']==writer.manifest['episodes'][0]['group_id']
-    assert row['physical_success'] is None and row['recorded_success'] is True
-    assert row['events']=={'grasp':1,'place':3} and row['lift_height_m']==pytest.approx(.03,abs=1e-6)
-    assert row['movement_before_grasp_m']>0 and row['movement_after_grasp_m']>0
-    raw=np.load(writer.root/'episode_0000/object_pose.npy');w=motion_workspace['profile']
-    base_workspace=np.linalg.inv(w['robot_base']['T_world'])@w['workspace']['T_world']
-    np.testing.assert_allclose(loaded['object_paths']['cube_red'],base_workspace@raw)
-    model=RobotPreview(row['robot_urdf'])
-    for i in range(4):
-        frame=reader.frame(i,'side')
-        np.testing.assert_allclose(frame['ee'],model.transforms(frame['robot_q'])['tool0'][:3,3],atol=1e-7)
-        assert frame['rgb_timestamp']==pytest.approx(frame['timestamp'])
-    assert set(row['object_approach'])==set(ids)
-    assert set(writer.manifest['episodes'][0]['object_telemetry'])==set(ids)
-    assert (writer.root/'episode_0000/object_poses.npy').exists()==(len(ids)>1)
+    writer=motion_canonical(tmp_path,motion_workspace,ids);row=analyze(writer.root)[0]
+    with EpisodeReader(row) as reader:
+        loaded=load_episode(row)
+        assert set(loaded['object_paths'])==set(ids) and all(p.shape==(4,4,4) for p in loaded['object_paths'].values())
+        assert row['display_frame']=='robot_base' and row['pick_object_id']=='cube_red'
+        assert row['active_object_count']==len(ids) and row['source_group']==writer.manifest['episodes'][0]['group_id']
+        assert row['physical_success'] is None and row['recorded_success'] is True
+        assert row['events']=={'grasp':1,'place':3} and row['lift_height_m']==pytest.approx(.03,abs=1e-6)
+        assert row['movement_before_grasp_m']>0 and row['movement_after_grasp_m']>0
+        raw=np.load(writer.root/'episode_0000/object_pose.npy');w=motion_workspace['profile']
+        base_workspace=np.linalg.inv(w['robot_base']['T_world'])@w['workspace']['T_world']
+        np.testing.assert_allclose(loaded['object_paths']['cube_red'],base_workspace@raw)
+        model=RobotPreview(row['robot_urdf'])
+        for i in range(4):
+            frame=reader.frame(i,'side')
+            np.testing.assert_allclose(frame['ee'],model.transforms(frame['robot_q'])['tool0'][:3,3],atol=1e-7)
+            assert frame['rgb_timestamp']==pytest.approx(frame['timestamp'])
+        assert set(row['object_approach'])==set(ids)
+        assert set(writer.manifest['episodes'][0]['object_telemetry'])==set(ids)
+        assert (writer.root/'episode_0000/object_poses.npy').exists()==(len(ids)>1)
 
 
 def hdf5_motion(path,w,mode='pre',frames=12,large_rgb=False):
     from soarm101_lab.real2sim.workspaces.package import metadata
     from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
     from soarm101_lab.so101_dataset_contract import write_contract
-    from soarm101_lab.workflow.tasks import catalog,configured
+    from soarm101_lab.real2sim.workspaces.tasks import catalog, configured
     definition=next(t for t in catalog(w) if t['pick_object_id']=='cube_red');cfg=configured(w,definition,backend='isaac')['scene_configuration']
     args={'workspace':metadata(w),'workspace_path':str(w['root']),'control_dt':.1,'task_definitions':[definition],'scene_configuration':cfg,
           'ee_frame':'robot_base','root_quaternion_order':'wxyz'}
@@ -142,25 +145,28 @@ def hdf5_motion(path,w,mode='pre',frames=12,large_rgb=False):
 
 @pytest.mark.parametrize('mode',['pre','post','initial'])
 def test_hdf5_pre_post_and_initial_only(tmp_path,motion_workspace,mode):
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.data.episodes import EpisodeReader
     path=tmp_path/'motion.hdf5';hdf5_motion(path,motion_workspace,mode)
     with h5py.File(path,'a') as h:
         h['data/demo_0'].attrs['annotation']=json.dumps({'transport':6})
         if mode=='initial':
             for camera in ('side','wrist'):h.move('data/demo_0/obs/policy/'+camera+'_cam','data/demo_0/obs/camera/'+camera)
-    row=analyze(path)[0];reader=EpisodeReader(row);one=reader.frame(4,'wrist')
-    assert row['events']=={'grasp':3,'place':9,'transport':6} and row['physical_success'] is None
-    assert one['rgb'][0,0,0]==14 and one['timestamp']==pytest.approx(.4)
-    pair=reader.frame(4,('side','wrist'))
-    assert pair['rgb_frames']['side'][0,0,0]==4 and pair['rgb_frames']['wrist'][0,0,0]==14
-    assert pair['rgb_timestamps']=={'side':pytest.approx(.4),'wrist':pytest.approx(.4)}
-    if mode!='initial':
-        actual=one['object_poses']['cube_red'];base_world=np.linalg.inv(motion_workspace['profile']['robot_base']['T_world'])
-        np.testing.assert_allclose(actual[:3,3],(base_world@np.array([.008,0,.01,1]))[:3],atol=1e-7)
-        assert row['target_movement_m']==pytest.approx(.022,abs=1e-7)
-    else:
-        assert one['object_poses']['cube_red'] is None and one['initial_object_poses']['cube_red'] is not None
-        assert row['target_movement_m'] is None and row['xy'] is not None
+    row=analyze(path)[0]
+    with EpisodeReader(row) as reader:
+        one=reader.frame(4,'wrist')
+        assert row['events']=={'grasp':3,'place':9,'transport':6} and row['physical_success'] is None
+        assert one['rgb'][0,0,0]==14 and one['timestamp']==pytest.approx(.4)
+        pair=reader.frame(4,('side','wrist'))
+        assert pair['rgb_frames']['side'][0,0,0]==4 and pair['rgb_frames']['wrist'][0,0,0]==14
+        assert pair['rgb_timestamps']=={'side':pytest.approx(.4),'wrist':pytest.approx(.4)}
+        if mode!='initial':
+            actual=one['object_poses']['cube_red'];base_world=np.linalg.inv(motion_workspace['profile']['robot_base']['T_world'])
+            np.testing.assert_allclose(actual[:3,3],(base_world@np.array([.008,0,.01,1]))[:3],atol=1e-7)
+            assert row['target_movement_m']==pytest.approx(.022,abs=1e-7)
+        else:
+            assert one['object_poses']['cube_red'] is None and one['initial_object_poses']['cube_red'] is not None
+            assert row['target_movement_m'] is None and row['xy'] is not None
 
 
 def test_old_canonical_distractor_trajectory_unavailable(tmp_path,motion_workspace):
@@ -174,24 +180,28 @@ def test_old_canonical_distractor_trajectory_unavailable(tmp_path,motion_workspa
 
 @pytest.mark.parametrize('mode',['post','initial'])
 def test_legacy_saved_root_registers_object_without_guessing_active_set(tmp_path,motion_workspace,mode):
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.data.episodes import EpisodeReader
     path=tmp_path/'legacy.hdf5';hdf5_motion(path,motion_workspace,mode)
     with h5py.File(path,'a') as h:
         d=h['data'];args=json.loads(d.attrs['env_args'])
         for key in ('workspace','workspace_path','scene_configuration','task_definitions'):args.pop(key,None)
         args['grasp_object']='cube_red';d.attrs['env_args']=json.dumps(args)
         d['demo_0'].create_dataset('initial_state/articulation/robot/root_pose',data=[[.1,.2,.3,1,0,0,0]])
-    row=analyze(path)[0];reader=EpisodeReader(row);frame=reader.frame(4)
-    assert row['active_object_ids'] is None and row['active_object_count'] is None
-    assert row['robot_urdf'] is None and row['recorded_object_ids']==['cube_red']
-    if mode=='post':np.testing.assert_allclose(frame['object_poses']['cube_red'][:3,3],[-.092,-.2,-.29],atol=1e-7)
-    else:
-        assert frame['object_poses']['cube_red'] is None
-        np.testing.assert_allclose(frame['initial_object_poses']['cube_red'][:3,3],[-.1,-.2,-.29],atol=1e-7)
+    row=analyze(path)[0]
+    with EpisodeReader(row) as reader:
+        frame=reader.frame(4)
+        assert row['active_object_ids'] is None and row['active_object_count'] is None
+        assert row['robot_urdf'] is None and row['recorded_object_ids']==['cube_red']
+        if mode=='post':np.testing.assert_allclose(frame['object_poses']['cube_red'][:3,3],[-.092,-.2,-.29],atol=1e-7)
+        else:
+            assert frame['object_poses']['cube_red'] is None
+            np.testing.assert_allclose(frame['initial_object_poses']['cube_red'][:3,3],[-.1,-.2,-.29],atol=1e-7)
 
 
 def test_large_hdf5_lazy_rgb_and_small_cache(tmp_path,motion_workspace,monkeypatch):
-    from soarm101_lab.workflow.curation import analyze,load_episode,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze,load_episode
+    from soarm101_lab.data.episodes import EpisodeReader
     path=tmp_path/'large.hdf5';hdf5_motion(path,motion_workspace,'initial',frames=10000,large_rgb=True)
     reads=[];original=h5py.Dataset.__getitem__
     def audit(dataset,selection):
@@ -202,11 +212,11 @@ def test_large_hdf5_lazy_rgb_and_small_cache(tmp_path,motion_workspace,monkeypat
     monkeypatch.setattr(h5py.Dataset,'__getitem__',audit)
     rows=analyze(path);loaded=load_episode(rows[0],max_points=75)
     assert not reads and len(loaded['ee'])==75 and 'ee' not in rows[0]
-    reader=EpisodeReader(rows[0])
-    for i in range(15):reader.frame(i,'side')
-    assert len(reader.cache)<=8 and reader.cache_bytes<=16*2**20
-    count=len(reads);reader.frame(14,'side');assert len(reads)==count
-    assert path.stat().st_size<2**20 # logical RGB size ~18GiB; no materialized frame series
+    with EpisodeReader(rows[0]) as reader:
+        for i in range(15):reader.frame(i,'side')
+        assert len(reader.cache)<=8 and reader.cache_bytes<=16*2**20
+        count=len(reads);reader.frame(14,'side');assert len(reads)==count
+        assert path.stat().st_size<2**20 # logical RGB size ~18GiB; no materialized frame series
 
 
 def test_composition_and_source_group_stratification():
@@ -267,6 +277,41 @@ def test_synchronized_ui_rgb_events_seek_and_responsive_worker(tmp_path,motion_w
     d.close()
 
 
+
+def test_ui_reader_release_waits_for_inflight_frame(tmp_path,motion_workspace,monkeypatch):
+    import threading
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.workflow.curation_ui import CurationDialog
+    from soarm101_lab.workflow.artifacts import Registry
+    app=QApplication.instance() or QApplication([])
+    writer=motion_canonical(tmp_path,motion_workspace,['cube_red'])
+    rows=analyze(writer.root);d=CurationDialog(Registry(tmp_path/'registry'))
+    d.error=lambda error:pytest.fail(str(error));d.loaded(str(writer.root),rows);d.show()
+    wait_qt(lambda:d.reader is not None and d.frame_job is None and d.job is None)
+    old=d.reader;entered=threading.Event();release=threading.Event();original=old.frame
+    def slow(index,camera):
+        entered.set()
+        if not release.wait(5):raise RuntimeError('Frame release timed out')
+        assert not old._closed
+        return original(index,camera)
+    monkeypatch.setattr(old,'frame',slow)
+    try:
+        d.show_frame(1);wait_qt(entered.is_set)
+        d.select(0)
+        assert not old._closed
+        release.set()
+        wait_qt(lambda:d.reader is not None and d.reader is not old and d.frame_job is None and d.job is None)
+        assert old._closed and not old.video_readers and not old.cache
+        assert d.trajectory.frame==0  # stale frame 1 was not installed
+        current=d.reader;assert current.video_readers
+        videos=list(current.video_readers.values())
+        d.close();app.processEvents()
+        assert current._closed and d.reader is None
+        assert all(getattr(v,'_container',None) is None for v in videos)
+    finally:
+        release.set();wait_qt(lambda:d.frame_job is None and d.job is None);d.close()
+
 def test_export_registry_convert_review_and_immutable_input(tmp_path,motion_workspace,monkeypatch):
     from soarm101_lab.workflow.artifacts import Registry,fingerprint
     from soarm101_lab.workflow import episodes
@@ -301,7 +346,8 @@ def test_export_registry_convert_review_and_immutable_input(tmp_path,motion_work
 
 @pytest.mark.parametrize('kind',['object','action','rgb_future'])
 def test_timestamp_mismatch_rejected(tmp_path,motion_workspace,kind):
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.data.episodes import EpisodeReader
     writer=motion_canonical(tmp_path,motion_workspace,['cube_red']);folder=writer.root/'episode_0000'
     if kind=='object':
         np.save(folder/'wrong_time.npy',np.load(folder/'timestamp.npy')+.4)
@@ -309,9 +355,9 @@ def test_timestamp_mismatch_rejected(tmp_path,motion_workspace,kind):
     elif kind=='action':np.save(folder/'action_timestamp.npy',np.load(folder/'timestamp.npy')+.1)
     else:
         np.save(folder/'side_timestamp.npy',np.load(folder/'timestamp.npy')+.001)
-        reader=EpisodeReader(analyze(writer.root)[0])
-        with pytest.raises(ValueError,match='not aligned'):reader.frame(0,'side')
-        return
+        with EpisodeReader(analyze(writer.root)[0]) as reader:
+            with pytest.raises(ValueError,match='not aligned'):reader.frame(0,'side')
+            return
     with pytest.raises(ValueError,match='timestamp mismatch'):analyze(writer.root)
 
 

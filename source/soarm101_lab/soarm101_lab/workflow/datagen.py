@@ -10,8 +10,10 @@ import time
 import numpy as np
 import torch
 
-from .dataset import EpisodeDataset,DatasetWriter
-from .mimic import GenerationScheduler,GenerationStopped,MimicGenerator,source_pool,execute_trial
+from .dataset import EpisodeDataset
+from ..data.episodes import DatasetWriter
+from ..simulation.control import GenerationStopped
+from .mimic import GenerationScheduler,MimicGenerator,source_pool,execute_trial
 from .adapters import MujocoAdapter,IsaacAdapter
 from ..real2sim.storage import atomic
 from ..simulation.ik import solver_configuration,validate_solver,validate_failure_policy,policy_configuration
@@ -91,7 +93,7 @@ def _save_trial(writer,reader,adapter,generator,seed):
         'failure_reason':'','simulation_backend':writer.args['backend'],'episode_metrics':json.dumps(dict(adapter.buffer.metrics))}
     attrs.update(ik_failure_policy=adapter.ik_failure_policy,ik_policy_configuration=json.dumps(policy_configuration(adapter.ik_failure_policy)),ik_solver=adapter.ik_solver,ik_configuration=json.dumps(solver_configuration(adapter.ik_solver,adapter.ik_failure_policy)),
         ik_summary=json.dumps(dict(adapter.ik_attempt)))
-    values,attrs,videos=adapter.buffer.finish(attrs)
+    values,attrs,videos=adapter.buffer.finish(attrs,success=adapter.check_success())
     # Save exactly the pre-IK generated target trajectory and subtask transitions.
     values['mimic_plan']={str(i):{'target_eef_pose':t['poses'],'gripper_action':t['gripper'],'action_noise':t['noise']} for i,t in enumerate(generator.trace)}
     return writer.commit(values,attrs,videos,video_staging=adapter.buffer.video)

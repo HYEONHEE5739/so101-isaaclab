@@ -34,7 +34,7 @@ try:
     from soarm101_lab.tasks.manager_based.soarm101_lab import SO101TeleopEnvCfg
     legacy_before=SO101TeleopEnvCfg().scene.to_dict()
     from soarm101_lab.so101_dataset_contract import read_contract
-    cfg=make_config(w,args.device,coordinates=read_contract(dataset) if args.command=='replay' else None)
+    cfg=make_config(w,args.device,coordinates=read_contract(dataset) if args.command=='replay' else None, overview_camera=False, grasp_observations=False)
     w=cfg.workflow_workspace
     assert SO101TeleopEnvCfg().scene.to_dict()==legacy_before, 'Legacy scene mutated'
     from soarm101_lab.workflow.presentation import attach

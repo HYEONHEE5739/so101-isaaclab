@@ -12,7 +12,7 @@ import yaml
 from soarm101_lab.real2sim.workspaces import builder, package
 from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
 from soarm101_lab.so101_joint_mapping import DEFAULT_MAPPER
-from soarm101_lab.workflow.tasks import catalog
+from soarm101_lab.real2sim.workspaces.tasks import catalog
 
 
 def val(x): return {'value': x, 'provenance': 'estimated', 'evidence': []}
@@ -310,7 +310,7 @@ def test_no_workflow_is_fixed_review_not_inferred_task(exported, tmp_path):
     assert catalog({'task':t})==[]
     state=WorkspaceRandomizer({'profile':p,'task':t}).sample()
     assert state['cube_positions']=={} and state['sampling']['mode']=='fixed'
-    from soarm101_lab.workflow.tasks import selected
+    from soarm101_lab.real2sim.workspaces.tasks import selected
     with pytest.raises(ValueError,match='workflow metadata'):selected({'task':t})
     bad=copy.deepcopy(t);bad['success']={'relation':'contained_and_settled'}
     with pytest.raises(ValueError,match='review contract'):package.validate_task(bad,p)

@@ -1,7 +1,7 @@
 """Annotation execution: independent MuJoCo slots or one Isaac vector clock.
 
-One episode state machine serves Replay and Annotation. Scheduling replaces the
-old serial Annotation loop; restoration, recorded targets and acceptance stay shared.
+Annotation owns signals/manual controls and scheduling. Restoration, measured
+errors and the two-phase recorded command stream belong to Simulation Playback.
 """
 from collections import Counter,defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -13,73 +13,55 @@ import time
 import numpy as np
 
 from ..real2sim.storage import atomic
-from .mimic import PhysicsControl,GenerationStopped
+from ..simulation.control import PhysicsControl,GenerationStopped
+from ..simulation.playback import step_targets
 
 
-def replay_episode(adapter,reader,name,values,attrs,bridge=None,*,annotate=False,evaluation_playback=False):
-    """One replay/annotation state machine. The caller owns physics scheduling."""
+def annotate_episode(adapter,reader,name,values,attrs,bridge=None):
+    """Annotation signals/manual controls/output over borrowed physics playback."""
+    from ..simulation.playback import restore_episode,replay_steps
     boundary=getattr(adapter,'interrupt_boundary',None)
-    adapter.restore(values,attrs);joint_errors=[];object_errors=[];reason='';category=''
-    marks=[];skipped=[];position=[0]
+    restore_episode(adapter,values,attrs)
+    reason='';marks=[];skipped=[];position=[0]
     adapter.annotation_marks=marks;adapter.annotation_position=position;adapter.annotation_skipped=skipped
-    if bridge and annotate:
+    if bridge:
         bridge.callbacks['mark']=lambda:marks.append(position[0])
         bridge.callbacks['skip']=lambda:skipped.append(True)
-    first=adapter.state();expected=values['initial_state']['articulation']['robot']['joint_position'][0]
-    from .robot_preview import pose_matrix
-    if not np.allclose(adapter.base_world,pose_matrix(values['initial_state']['articulation']['robot']['root_pose'][0]),atol=1e-5):
-        raise ValueError('Initial fixed robot base differs from recorded frame')
-    if not np.allclose(first['joint_pos'],expected,atol=1e-5):raise ValueError('Initial joint restoration differs')
-    for obj in adapter.workspace['task']['dynamic']:
-        expected_obj=values['obs']['datagen_info']['object_pose'][obj][0]
-        if not np.allclose(first['object_poses'][obj],expected_obj,atol=1e-5):raise ValueError('Initial object transform differs: '+obj)
-    try:
-        for i,command in enumerate(values['joint_targets']):
+    def before_step(i):
+        position[0]=i
+        if bridge:
+            if bridge.details.get('workflow_phase')=='source_validation':
+                bridge.source_progress(reader.names.index(name),len(reader.names),name,i+1,len(values['actions']))
+            bridge.before_step()
+        while getattr(adapter,'annotation_paused',False) and not skipped:
             if boundary:boundary()
-            position[0]=i
-            if bridge:
-                if bridge.details.get('workflow_phase')=='source_validation':
-                    bridge.source_progress(reader.names.index(name),len(reader.names),name,i+1,len(values['actions']))
-                bridge.before_step()
-            while getattr(adapter,'annotation_paused',False) and not skipped:
-                if boundary:boundary()
-                adapter.native.sim.render();time.sleep(.01)
-            if skipped:reason='User skipped annotation episode';break
-            before=adapter.state();joint_errors.append(float(np.linalg.norm(before['joint_pos']-values['obs']['policy']['joint_pos'][i])))
-            for obj in adapter.workspace['task']['dynamic']:
-                object_errors.append(float(np.linalg.norm(before['object_poses'][obj][:3,3]-values['obs']['datagen_info']['object_pose'][obj][i,:3,3])))
-            if annotate:adapter.buffer.append(command,values['obs']['datagen_info']['target_eef_pose']['tool0'][i],before)
-            yield command
-            adapter.previous=np.array(command,copy=True);adapter.update_grasp()
-            yield None  # all vector slots observe this tick before any slot resets
-            if bridge and not annotate:
-                bridge.steps=i+1;bridge.details.update(episode=name,episode_index=reader.names.index(name)+1,
-                    episode_total=len(reader.names),task_signals={'grasp':adapter.tracker.completed,'place':adapter.place_success()});bridge.status()
-            if not annotate and getattr(adapter,'realtime',False):time.sleep(1/reader.hz)
-        task_passed=adapter.check_success() and not skipped
-        evaluation_replay=evaluation_playback and bool(reader.args.get('evaluation_schema')) and not annotate
-        passed=(not skipped) if evaluation_replay else task_passed
-        category='success' if task_passed else adapter.failure_category()
-        if not passed and not reason:
-            reason='Stable grasp was not observed' if category=='grasp_failure' else 'Stable grasp observed; final placement condition not met'
-    except (ValueError,RuntimeError) as exc:passed=False;reason=str(exc);category='simulation_failure'
+            adapter.native.sim.render();time.sleep(.01)
+        return not skipped
+    def record(i,command,before):
+        adapter.record_frame(command,values['obs']['datagen_info']['target_eef_pose']['tool0'][i],before)
+    metrics=yield from replay_steps(adapter,values,before_step=before_step,on_observation=record,after_step=adapter.update_grasp)
+    passed=False;category='simulation_failure'
+    if metrics['simulation_error'] is not None:reason=metrics['simulation_error']
+    else:
+        if skipped:reason='User skipped annotation episode'
+        try:
+            task_passed=adapter.check_success() and not skipped
+            passed=task_passed;category='success' if task_passed else adapter.failure_category()
+            if not passed and not reason:
+                reason='Stable grasp was not observed' if category=='grasp_failure' else 'Stable grasp observed; final placement condition not met'
+        except (ValueError,RuntimeError) as exc:passed=False;reason=str(exc);category='simulation_failure'
     row={'episode':name,'physical_replay_passed':bool(passed),'category':category,'reason':reason,
-        **({'annotation_accepted':False} if annotate else {}),
-        'grasp_confirmed':adapter.tracker.completed,'place_confirmed':bool(adapter.place_success()),
-        'steps':adapter.step_index,'joint_l2_max_rad':max(joint_errors,default=0.),
-        'object_position_error_max_m':max(object_errors,default=0.),'source_backend':reader.backend,
+        'annotation_accepted':False,'grasp_confirmed':adapter.tracker.completed,'place_confirmed':bool(adapter.place_success()),
+        'steps':adapter.step_index,'joint_l2_max_rad':metrics['joint_l2_max_rad'],
+        'object_position_error_max_m':metrics['object_position_error_max_m'],'source_backend':reader.backend,
         'execution_backend':'mujoco' if hasattr(adapter,'backend') else 'isaac'}
-    if evaluation_playback and reader.args.get('evaluation_schema'):
-        row.update(recorded_evaluation_success=bool(attrs.get('success',False)),
-            replay_task_success=bool(adapter.check_success()),
-            replay_scope='recorded evaluation playback; passed is execution, task outcome may fail')
     prepared=None
-    if annotate and passed:
+    if passed:
         exported_attrs={**attrs,'success':True,'success_source':'simulation_stable_grasp_and_place',
             'simulation_backend':row['execution_backend'],
             'annotation_method':'cross_backend_stable_contact_replay','source_group':attrs.get('source_group','UNKNOWN'),
             'physical_replay':json.dumps(row)}
-        prepared=adapter.buffer.finish(exported_attrs)
+        prepared=adapter.buffer.finish(exported_attrs,success=adapter.check_success())
         if not getattr(adapter,'annotation_auto',True):
             if len(marks)!=1 or not 0<marks[0]<len(values['actions'])-1:
                 row.update(annotation_accepted=False,reason='Mark one grasp boundary before placement')
@@ -127,13 +109,13 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
             index=next(r['env_id'] for r in assignments if r['ordinal']==ordinal)
             workers[index]['total_steps']=len(values['actions'])
         if not input_validated:
-            from .dataset import validate_episode
+            from ..data.episodes import validate_episode
             t=time.perf_counter()
             validate_episode(values,attrs,videos,reader.hz,video_root=reader.path.parent)
             with lock:timings['input_validation_s']+=time.perf_counter()-t
         if not attrs.get('source_lineage') and name in sources:attrs['source_lineage']=json.dumps(sources[name])
         # execute() has already validated the entire input, including video PTS/SHA.
-        episode=replay_episode(a,reader,name,values,attrs,bridge if not auto else None,annotate=True)
+        episode=annotate_episode(a,reader,name,values,attrs,bridge if not auto else None)
         active_episodes[a]=episode
         return episode
 
@@ -232,10 +214,7 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
                         report_progress()
                         t=time.perf_counter();render_before=timings['native_render_s']
                         try:
-                            if actions is None:primary.backend.step(command)
-                            else:
-                                actions[primary.index]=torch.as_tensor(command,device=primary.native.device,dtype=actions.dtype)
-                                primary.native.step(actions)
+                            step_targets(primary,command,actions)
                         except (ValueError,RuntimeError) as exc:command=episode.throw(exc)
                         else:
                             timings['physics_s']+=time.perf_counter()-t-(timings['native_render_s']-render_before)
@@ -261,7 +240,7 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
                                 control.before_step(index,stop)
                                 if stop.is_set():raise GenerationStopped()
                                 try:
-                                    t=time.perf_counter();backend.step(command)
+                                    t=time.perf_counter();step_targets(a,command)
                                     a.metrics['physics_s']+=time.perf_counter()-t
                                 except (ValueError,RuntimeError) as exc:command=episode.throw(exc)
                                 else:command=next(episode)

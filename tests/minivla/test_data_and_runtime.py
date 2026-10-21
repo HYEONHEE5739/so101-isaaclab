@@ -4,7 +4,7 @@ import pytest
 import torch
 from soarm101_lab.learning.minivla.config import MiniVLAConfig
 from soarm101_lab.learning.minivla.data import JOINTS, UNITS, load_manifest, fit_statistics, Episodes
-from soarm101_lab.learning.minivla.policy import ActionGuard
+from soarm101_lab.workflow.policy import ActionGuard
 from soarm101_lab.learning.minivla.evaluate import summarize_episode
 
 def create_data(root):
@@ -65,11 +65,42 @@ def test_checkpoint_roundtrip(tmp_path):
     save_checkpoint(path,c,h,FrozenStub(),{},opt,1,.5,0,30)
     ck=torch.load(path,weights_only=True)
     restored=ActionHead(MiniVLAConfig(**ck['config'])); restored.load_state_dict(ck['head'])
-    from soarm101_lab.learning.minivla.train import require_architecture
+    from soarm101_lab.learning.minivla.checkpoint import require_architecture
     require_architecture(ck)
     with pytest.raises(ValueError,match='Legacy'):require_architecture({'config':ck['config']})
     assert ck['step']==1 and ck['adapter'] is None
     for p,q in zip(h.parameters(),restored.parameters()): torch.testing.assert_close(p,q)
+
+
+def test_inference_reads_legacy_config_and_saved_statistics_without_training(tmp_path,monkeypatch):
+    from dataclasses import asdict
+    import sys
+    from types import SimpleNamespace
+    from soarm101_lab.learning.minivla import policy
+    cfg=MiniVLAConfig();saved=asdict(cfg);saved.pop('batch_size');saved['accumulation']=8
+    stats={'state_mean':[1.]*6,'state_std':[2.]*6,'action_mean':[-1.]*6,'action_std':[.5]*6}
+    path=tmp_path/'legacy.pt'
+    torch.save({'architecture_schema':cfg.architecture_schema,'config':saved,'statistics':stats,
+                'control_hz':30,'step':123,'adapter':None,'head':{'fixture':torch.ones(1)}},path)
+    class Backbone:
+        def __init__(self,cfg):self.cfg=cfg
+        def eval(self):self.training=False
+    class Head:
+        def __init__(self,cfg):self.cfg=cfg
+        def to(self,device):return self
+        def load_state_dict(self,state):self.state=state
+        def eval(self):self.training=False
+    monkeypatch.setitem(sys.modules,'soarm101_lab.learning.minivla.backbone',SimpleNamespace(QwenBackbone=Backbone))
+    monkeypatch.setattr(policy,'ActionHead',Head)
+    restored=policy.MiniVLA(path)
+    assert restored.cfg.batch_size==1 and restored.cfg.accumulation==8
+    assert restored.checkpoint_step==123 and restored.control_hz==30
+    assert not restored.backbone.training and not restored.head.training
+    torch.testing.assert_close(restored.head.state['fixture'],torch.ones(1))
+    assert restored.pre.stats==stats
+    np.testing.assert_array_equal(restored.pre.normalize(np.full(6,3.),'state'),np.ones(6,np.float32))
+    np.testing.assert_array_equal(restored.pre.denormalize(np.ones(6,np.float32)),np.full(6,-.5))
+
 
 def test_explicit_hdf5_import(tmp_path):
     h5py=pytest.importorskip('h5py')

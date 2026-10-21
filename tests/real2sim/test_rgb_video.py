@@ -42,7 +42,8 @@ def test_abort_and_encoder_failure_never_deadlock(tmp_path):
 def test_canonical_video_writer_numeric_loader_curation_and_legacy(tmp_path):
     from test_minivla_integration import make_dataset
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment,configure_rendering
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.data.episodes import EpisodeReader
     from soarm101_lab.learning.minivla.data import load_manifest,episode_arrays
     configure_rendering('none')
     root=Path(__file__).resolve().parents[2]
@@ -54,7 +55,7 @@ def test_canonical_video_writer_numeric_loader_curation_and_legacy(tmp_path):
         writer=make_dataset(tmp_path/'dataset',env)
         folder=writer.root/'episode_0000'
         assert (folder/'side.mp4').exists() and not (folder/'side.npy').exists()
-        assert all('camera_images' not in r for r in writer.rows)
+        assert not list(writer.root.glob('.video-*'))
         m=load_manifest(writer.root/'manifest.json');a=episode_arrays(m['episodes'][0],m['cameras'],m['control_hz'])
         assert isinstance(a['side'],VideoFrames)
         # Legacy compatibility uses the same numeric arrays with old RGB NPY.
@@ -70,7 +71,8 @@ def test_canonical_video_writer_numeric_loader_curation_and_legacy(tmp_path):
 def test_external_hdf5_curation_subset_resume_and_identity(tmp_path):
     import h5py
     from test_source_partitions import source_fixture
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader,export_subset
+    from soarm101_lab.workflow.curation import analyze,export_subset
+    from soarm101_lab.data.episodes import EpisodeReader
     from soarm101_lab.workflow.data_resume import combine
     from soarm101_lab.workflow.artifacts import fingerprint
     from soarm101_lab.workflow.episodes import source_catalog
@@ -85,13 +87,15 @@ def test_external_hdf5_curation_subset_resume_and_identity(tmp_path):
             for c in ['side','wrist']:del g['obs/policy/'+c+'_cam']
             g.create_dataset('obs/timestamp',data=np.arange(4,dtype=float)[:,None]/30)
     before=fingerprint(source);records,_=source_catalog(source)
-    rows=analyze(source);reader=EpisodeReader(rows[0]);assert reader.frame(3,'side')['rgb'].shape==(48,64,3)
-    subset=export_subset(source,tmp_path/'curated.hdf5',['demo_3','demo_1'])
-    after,_=source_catalog(subset)
-    assert {r['source_id'] for r in after.values()}=={records[n]['source_id'] for n in ['demo_3','demo_1']}
-    combine(source,subset)
-    with h5py.File(subset,'r') as h:
-        assert len(h['data'])==6
-        for g in h['data'].values():
-            for spec in json.loads(g.attrs['external_videos']).values():assert external_camera(subset,spec)[3].shape==(48,64,3)
-    assert fingerprint(source)==before
+    rows=analyze(source)
+    with EpisodeReader(rows[0]) as reader:
+        assert reader.frame(3,'side')['rgb'].shape==(48,64,3)
+        subset=export_subset(source,tmp_path/'curated.hdf5',['demo_3','demo_1'])
+        after,_=source_catalog(subset)
+        assert {r['source_id'] for r in after.values()}=={records[n]['source_id'] for n in ['demo_3','demo_1']}
+        combine(source,subset)
+        with h5py.File(subset,'r') as h:
+            assert len(h['data'])==6
+            for g in h['data'].values():
+                for spec in json.loads(g.attrs['external_videos']).values():assert external_camera(subset,spec)[3].shape==(48,64,3)
+        assert fingerprint(source)==before

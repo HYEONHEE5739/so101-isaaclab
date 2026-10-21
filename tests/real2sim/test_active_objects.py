@@ -3,7 +3,8 @@ import copy,json
 from pathlib import Path
 import numpy as np
 import pytest
-from soarm101_lab.workflow.tasks import active_objects,configured,catalog,recorded_scene,object_metrics,evaluation_distribution
+from soarm101_lab.workflow.tasks import recorded_scene, object_metrics, evaluation_distribution
+from soarm101_lab.real2sim.workspaces.tasks import active_objects, configured, catalog
 from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
 from soarm101_lab.real2sim.workspaces import package
 from test_builder_workspace import make_export
@@ -201,16 +202,21 @@ def test_ui_filters_objects_and_requires_explicit_task(workspace):
 
 def record_fixture(path,w,ids,episodes=1):
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment
-    from soarm101_lab.workflow.episodes import EpisodeWriter
+    from soarm101_lab.data.episodes import LegacyEpisodeWriter
+    from soarm101_lab.data.recording import SourceEpisode
+    from soarm101_lab.workflow.source import metadata
     with PolicyEnvironment(w['root'],'none',full_workspace=True,
                            task_definition=definition(w),active_object_ids=ids) as env:
         env.backend.get_rgb=lambda camera=None:np.zeros((24,32,3),np.uint8)
-        writer=EpisodeWriter(path,env,definition(w)['language_instruction'])
+        manifest,provenance=metadata(env.recording_context(),definition(w)['language_instruction'])
+        writer=LegacyEpisodeWriter(path,manifest,provenance)
+        recording=SourceEpisode(path,env.hz,manifest['cameras'],env.backend.metadata['dynamic_objects'],env.backend.metadata['pick'])
         for i in range(episodes):
-            env.reset(i);writer.begin()
+            env.reset(i);recording.begin(env.backend.get_initial_state())
             for _ in range(4):
-                writer.append(env.observe(),env.backend.home);env.backend.step(env.backend.home)
-            writer.save(True) # Synthetic labels for metadata tests only, no grasp-success claim.
+                obs=env.observe();recording.append(env.recording_sample(obs,env.backend.home),obs['camera_images']);env.backend.step(env.backend.home)
+            writer.provenance['coordinates']=env.coordinates.metadata()
+            writer.save(recording.rows,recording.initial,recording.video,dict(success=True));recording.abort() # Synthetic labels only
     return writer
 
 
@@ -233,14 +239,17 @@ def test_legacy_episode_stages_use_only_common_import_boundary(workspace,tmp_pat
 def test_resume_and_curated_mixed_compositions(workspace,tmp_path):
     import shutil
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment
-    from soarm101_lab.workflow.episodes import EpisodeWriter,prepare_dataset
+    from soarm101_lab.workflow.episodes import prepare_dataset
+    from soarm101_lab.data.episodes import LegacyEpisodeWriter
+    from soarm101_lab.workflow.source import metadata,resume_legacy
     from soarm101_lab.workflow.curation import export_subset
     from soarm101_lab.workflow.artifacts import inspect_artifact
     a=record_fixture(tmp_path/'single',workspace,['cube_red'],2)
     b=record_fixture(tmp_path/'double',workspace,['cube_red','cube_blue'])
     with PolicyEnvironment(workspace['root'],'none',task_definition=definition(workspace),active_object_ids=['cube_red','cube_blue']) as env:
-        resumed=EpisodeWriter(tmp_path/'resume',env,a.instruction)
-        with pytest.raises(ValueError,match='active'):resumed.resume(a.root)
+        manifest,provenance=metadata(env.recording_context(),a.provenance['instruction'])
+        resumed=LegacyEpisodeWriter(tmp_path/'resume',manifest,provenance)
+        with pytest.raises(ValueError,match='active'):resume_legacy(resumed,a.root,env.backend.workspace)
     mixed=tmp_path/'mixed';shutil.copytree(a.root,mixed)
     entry=copy.deepcopy(b.manifest['episodes'][0]);shutil.copytree(b.root/entry['path'],mixed/'episode_0002')
     entry.update(id='episode_0002',path='episode_0002');manifest=copy.deepcopy(a.manifest);manifest['episodes'].append(entry)

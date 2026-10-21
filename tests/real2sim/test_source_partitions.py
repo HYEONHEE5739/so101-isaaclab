@@ -13,7 +13,7 @@ def source_fixture(path,count=30,workspace=None):
     if workspace:
         from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
         from soarm101_lab.real2sim.workspaces.package import metadata
-        from soarm101_lab.workflow.tasks import configured
+        from soarm101_lab.real2sim.workspaces.tasks import configured
         workspace=configured(workspace);contract=coordinate_contract(workspace)
         args.update(workspace=metadata(workspace),workspace_path=str(workspace['root']),scene_configuration=workspace['scene_configuration'],task_definitions=[workspace['task_definition']],so101_coordinates=contract)
     with h5py.File(path,'w') as h:

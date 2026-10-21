@@ -2,9 +2,20 @@ import time
 import numpy as np
 import torch
 from .config import MiniVLAConfig
-from .data import RobotPreprocessor
 from .head import ActionHead
-from .train import restore_adapter, require_architecture
+from .checkpoint import restore_adapter, require_architecture
+
+class RobotPreprocessor:
+    def __init__(self, stats):
+        self.stats = stats
+        for key in ('state', 'action'):
+            mean=np.asarray(stats[key+'_mean']); std=np.asarray(stats[key+'_std'])
+            if mean.shape!=(6,) or std.shape!=(6,) or not np.isfinite(mean).all() or not np.isfinite(std).all() or np.any(std<=0):
+                raise ValueError('Invalid statistics')
+    def normalize(self, x, key):
+        return (np.asarray(x, np.float32)-np.asarray(self.stats[key+'_mean'], np.float32))/np.asarray(self.stats[key+'_std'], np.float32)
+    def denormalize(self, x, key='action'):
+        return np.asarray(x)*np.asarray(self.stats[key+'_std'])+np.asarray(self.stats[key+'_mean'])
 
 class MiniVLA:
     """Public RGB + instruction + canonical state -> absolute action chunk API."""
@@ -33,27 +44,3 @@ class MiniVLA:
         return action,{'latency_s':time.perf_counter()-start,
             'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,
             'peak_reserved_gib':torch.cuda.max_memory_reserved()/2**30}
-
-class ActionGuard:
-    def __init__(self, lower, upper, max_velocity, hz):
-        self.low=np.asarray(lower,float); self.high=np.asarray(upper,float)
-        self.speed=np.asarray(max_velocity,float); self.hz=float(hz)
-        if any(x.shape!=(6,) or not np.isfinite(x).all() for x in (self.low,self.high,self.speed)):
-            raise ValueError('Guard limits must be finite 6D')
-        if np.any(self.low>=self.high) or np.any(self.speed<=0) or self.hz<=0: raise ValueError('Invalid guard bounds')
-        self.reset()
-    def reset(self): self.last=None; self.violations=0; self.rate_limited=0
-    def apply(self, requested, observed):
-        a=np.asarray(requested,float); q=np.asarray(observed,float)
-        if a.shape!=(6,) or q.shape!=(6,) or not np.isfinite(a).all() or not np.isfinite(q).all():
-            raise ValueError('Nonfinite or malformed command/state')
-        if np.any(q<self.low-.05) or np.any(q>self.high+.05): raise ValueError('Observed state outside configured bounds')
-        self.violations+=int(np.any((a<self.low)|(a>self.high)))
-        target=np.clip(a,self.low,self.high); base=q if self.last is None else self.last
-        delta=self.speed/self.hz
-        clipped=np.clip(target,base-delta,base+delta)
-        # Also bound tracking error relative to actual state to avoid accumulating a distant command.
-        clipped=np.clip(clipped,q-delta,q+delta)
-        self.rate_limited+=int(np.any(np.abs(clipped-target)>1e-8))
-        self.last=np.clip(clipped,self.low,self.high)
-        return self.last.copy()

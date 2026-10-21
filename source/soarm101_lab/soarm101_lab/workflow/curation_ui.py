@@ -6,7 +6,8 @@ from PyQt6.QtCore import Qt, QPointF, QRectF, QEvent, pyqtSignal, QThread, QTime
 from PyQt6.QtGui import QPainter, QColor, QPen, QPolygonF, QImage, QPixmap
 from PyQt6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QListWidget,
     QListWidgetItem,QSpinBox,QDoubleSpinBox,QFileDialog,QMessageBox,QSplitter,QCheckBox,QWidget,QSlider,QComboBox,QFormLayout,QTabWidget,QScrollArea,QStyle,QStyleOptionSlider,QToolTip,QLineEdit)
-from .curation import analyze, load_episode, EpisodeReader, select_distribution, export_subset
+from .curation import analyze, load_episode, select_distribution, export_subset
+from ..data.episodes import EpisodeReader
 from .view import CameraView
 
 SPLIT_COLORS={'train':'#55d6b0','val':'#69b9ff'}
@@ -372,6 +373,7 @@ class CurationDialog(QDialog):
         super().__init__(parent);self.registry=registry;self.workspace=workspace;self.split_generation=0
         self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None;self.split_plan=None;self.saved_collection=None
         self.reader=None;self.frame_job=None;self.pending_frame=None;self.generation=0;self.seek_generation=0;self.pending_selection=None
+        self.finished.connect(lambda _result:self.release_reader())
         self.setWindowTitle('Data Curation · 에피소드 검토');self.resize(1400,920)
         layout=QVBoxLayout(self);layout.setSpacing(10)
         header=QHBoxLayout();layout.addLayout(header)
@@ -597,11 +599,21 @@ class CurationDialog(QDialog):
         self.pause();self.pending_frame=None
         if any(j is not None and j.isRunning() for j in (self.job,self.frame_job)):
             self.error('저장/분석 완료 후 닫아주세요.');return
+        self.release_reader()
         super().reject()
     def closeEvent(self,event):
         self.pause();self.pending_frame=None
         if any(j is not None and j.isRunning() for j in (self.job,self.frame_job)):event.ignore()
-        else:super().closeEvent(event)
+        else:
+            self.release_reader();super().closeEvent(event)
+
+    def release_reader(self):
+        """The dialog owns playback; an in-flight frame retains it until finished."""
+        reader=self.reader;self.reader=None
+        if reader is None:return
+        if self.frame_job is not None and self.frame_job.isRunning():
+            self.frame_job.finished.connect(reader.close)
+        else:reader.close()
     def open_data(self):
         from .artifacts import browse_directory
         directory=browse_directory('source',self.path or '',self.registry,self.workspace)
@@ -627,7 +639,7 @@ class CurationDialog(QDialog):
         path=str(Path(path).resolve());self.pause();self.generation+=1;self.pending_frame=None;self.pending_selection=None
         self.clear_split_preview()
         self.clear_events()
-        self.reader=None;self.trajectory.row=None;self.list.setEnabled(False);self.load_button.setEnabled(False);self.export_button.setEnabled(False)
+        self.release_reader();self.trajectory.row=None;self.list.setEnabled(False);self.load_button.setEnabled(False);self.export_button.setEnabled(False)
         self.info.setText('데이터 분석 중…')
         self.run_job(lambda:analyze(path),lambda rows:self.loaded(path,rows))
     def loaded(self,path,rows):
@@ -792,7 +804,7 @@ class CurationDialog(QDialog):
     def select(self,i):
         if not 0<=i<len(self.rows):return
         self.pause();self.generation+=1;generation=self.generation
-        self.scatter.selected=i;self.scatter.update();self.pending_frame=None;self.reader=None
+        self.scatter.selected=i;self.scatter.update();self.pending_frame=None;self.release_reader()
         self.list.blockSignals(True)
         for index in range(self.list.count()):
             if self.list.item(index).data(Qt.ItemDataRole.UserRole)==i:self.list.setCurrentRow(index);break
@@ -821,6 +833,7 @@ class CurationDialog(QDialog):
         self.run_job(prepare,lambda result:self.install_episode(*result) if generation==self.generation else None)
 
     def install_episode(self,row,model,bounds):
+        self.release_reader()
         self.trajectory.robot=model;self.trajectory.mesh=None;self.trajectory.frame=0;self.trajectory.payload={}
         if bounds is not None:self.trajectory.robot_bounds=bounds
         self.reader=EpisodeReader(row) if 'data_ref' in row else None

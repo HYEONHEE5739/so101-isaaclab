@@ -31,7 +31,7 @@ def test_source_uniform_reset_resume_and_isaac_dataset_binding(published,tmp_pat
     from test_source_partitions import source_fixture
     from soarm101_lab.real2sim.workspaces.reset import source_workspace
     from soarm101_lab.real2sim.workspaces.demo import verify_dataset
-    from soarm101_lab.workflow.tasks import configured
+    from soarm101_lab.real2sim.workspaces.tasks import configured
     original=load(published[3]);new=source_workspace(configured(original))
     legacy=configured(original,reset={**original['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.})
     for name,w in [('old',configured(original)),('legacy_uniform',legacy),('new',new)]:
@@ -225,7 +225,7 @@ def test_source_timing_options(published, tmp_path):
 
 
 def test_overview_framing_is_read_only(published):
-    from soarm101_lab.workflow.presentation import framing
+    from soarm101_lab.simulation.workspace_scene import framing
     workspace = load(published[3])
     original = copy.deepcopy(workspace['profile'])
     eye, quaternion = framing(workspace)

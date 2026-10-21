@@ -133,3 +133,35 @@ def test_request_worker_and_identity_import_direction():
             imports = (n for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, ast.ImportFrom))
             assert not any((n.module or '').endswith('artifacts') and any(a.name == 'fingerprint' for a in n.names)
                            for n in imports), path
+
+
+@pytest.mark.parametrize('module', [
+    'soarm101_lab.simulation.control', 'soarm101_lab.workflow.policy',
+    'soarm101_lab.real2sim.workspaces.tasks',
+])
+def test_shared_physics_and_policy_do_not_import_mimic_or_model_training(module):
+    code = '''
+import importlib,sys
+importlib.import_module(sys.argv[1])
+assert not any(n.startswith(('soarm101_lab.learning.minivla',
+                           'soarm101_lab.workflow.mimic')) or
+    n == 'soarm101_lab.workflow.tasks' or
+    n.split('.')[0] in {'PyQt6','torch','isaaclab','isaacsim','omni','pxr','mujoco'}
+    for n in sys.modules)
+'''
+    subprocess.run([sys.executable, '-c', code, module], env=dict(os.environ), check=True,
+                   capture_output=True, text=True)
+
+
+def test_minivla_inference_import_does_not_load_training_or_dataset_preparation():
+    code = '''
+import sys
+from soarm101_lab.learning.minivla.policy import MiniVLA
+assert 'soarm101_lab.learning.minivla.train' not in sys.modules
+assert 'soarm101_lab.learning.minivla.data' not in sys.modules
+assert not any(n.startswith('soarm101_lab.workflow') for n in sys.modules)
+assert not any(n.split('.')[0] in {'isaaclab','isaacsim','omni','pxr','mujoco','PyQt6'}
+               for n in sys.modules)
+'''
+    subprocess.run([sys.executable, '-c', code], env=dict(os.environ), check=True,
+                   capture_output=True, text=True)

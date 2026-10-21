@@ -10,9 +10,9 @@ from .environment import make_config, task_success
 def make_mimic_config(workspace, device='cuda:0', num_envs=1, annotation=False, randomization_seed=None, coordinates=None):
     from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
     from ...tasks.manager_based.soarm101_lab.so101_mimic_env_cfg import SO101PickPlaceMimicEnvCfg
-    from ...workflow.tasks import configured
+    from .tasks import configured
     w = configured(workspace if isinstance(workspace,dict) else load(workspace))
-    base = make_config(w, device, num_envs, coordinates=coordinates)
+    base = make_config(w, device, num_envs, coordinates=coordinates, overview_camera=False, grasp_observations=False)
     from isaaclab.sensors import ContactSensorCfg
     # One sensor per rigid body: Isaac filtered contacts are one-to-many.
     for sensor, link in [('grasp_fixed_contact', 'gripper'), ('grasp_moving_contact', 'jaw')]:

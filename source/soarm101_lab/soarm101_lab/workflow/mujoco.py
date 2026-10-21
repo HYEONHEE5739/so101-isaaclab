@@ -33,7 +33,7 @@ def _environment(request, output, coordinates=None, hz=None):
             from ..so101_dataset_contract import read_contract
             recorded_contract = read_contract(path)
     w=load(request['workspace'])
-    from .tasks import configured
+    from ..real2sim.workspaces.tasks import configured
     w=configured(w,options.get('task_definition'),options.get('active_object_ids'),backend='mujoco')
     if request.get('stage')=='source':
         from ..real2sim.workspaces.reset import source_workspace
@@ -126,7 +126,9 @@ def source(request, output, publish, bridge):
     from ..utils.voice import log_say
     from ..real2sim.hardware import Leader
     from ..so101_joint_mapping import DEFAULT_MAPPER
-    from .episodes import EpisodeWriter
+    from . import source as source_stage
+    from ..data.recording import SourceEpisode
+    from ..data.episodes import DatasetWriter,LegacyEpisodeWriter,recording_args
     from ..so101_joint_mapping import observed_positions
     options = request['options']
     from ..real2sim.precision import approved_mappings, collection_coordinates
@@ -154,29 +156,39 @@ def source(request, output, publish, bridge):
                 raise ValueError('Leader mapping changed before Source activation')
             leader.activate()
             storage='common' if env.backend.workspace['task'].get('observation_cameras')==['side','wrist'] else 'legacy'
-            writer = EpisodeWriter(output / 'dataset', env, options['instruction'],storage=storage)
+            manifest,provenance=source_stage.metadata(env.recording_context(),options['instruction'])
             from ..real2sim.workspaces.demo import coordinate_contract
             from ..so101_dataset_contract import current_contract, MIMIC_SPACE
             contract = coordinate_contract(request['workspace']) if request.get('workspace') else current_contract(MIMIC_SPACE)
-            writer.provenance['coordinate_contract'] = collection_coordinates(contract, mapper if selected_precision else None,env.backend.metadata.get('simulation_configuration'))
+            provenance['coordinate_contract'] = collection_coordinates(contract, mapper if selected_precision else None,env.backend.metadata.get('simulation_configuration'))
             if options.get('resume_data'):
                 previous=_provenance(options['resume_data']).get('coordinate_contract',{})
                 if previous and 'simulation_model' not in previous:
                     # Keep a verified historical identity/legacy-mode contract unchanged.
-                    writer.provenance['coordinate_contract'].pop('simulation_model',None)
-            writer.provenance['leader'] = leader.metadata if hasattr(leader, 'metadata') else {'fixture': True}
-            if options.get('resume_data'): writer.resume(options['resume_data'])
-            if len(writer.manifest['episodes']) >= count: raise ValueError('Episode target must exceed existing count')
+                    provenance['coordinate_contract'].pop('simulation_model',None)
+            provenance['leader'] = leader.metadata if hasattr(leader, 'metadata') else {'fixture': True}
+            common=storage=='common'
+            dataset_path=(output/'dataset').with_suffix('.hdf5') if common else output/'dataset'
+            if common:
+                writer=DatasetWriter(dataset_path,recording_args(provenance,manifest),provenance['coordinate_contract'])
+            else:
+                writer=LegacyEpisodeWriter(dataset_path,manifest,provenance);provenance=writer.provenance
+            recording=SourceEpisode(dataset_path.parent if common else dataset_path,env.hz,manifest['cameras'],
+                env.backend.metadata['dynamic_objects'],env.backend.metadata['pick'])
+            if options.get('resume_data'):
+                if common:source_stage.resume_common(writer,provenance,options['resume_data'])
+                else:source_stage.resume_legacy(writer,options['resume_data'],env.backend.workspace)
+            if writer.count >= count: raise ValueError('Episode target must exceed existing count')
             lower = np.maximum(env.coordinates.to_model(env.lower),env.backend.limits[:,0])
             upper = np.minimum(env.coordinates.to_model(env.upper),env.backend.limits[:,1])
             limit_counts = np.zeros(6,dtype=int)
             last_limit_log = -float('inf')
-            episode = len(writer.manifest['episodes'])
-            while len(writer.manifest['episodes']) < count:
+            episode = writer.count
+            while writer.count < count:
                 env.reset(options.get('seed', 0) + episode)
                 episode += 1
-                writer.begin()
-                log_say(f'Episode {len(writer.manifest["episodes"])+1}',blocking=False)
+                recording.begin(env.backend.get_initial_state())
+                log_say(f'Episode {writer.count+1}',blocking=False)
                 end = time.monotonic() + duration
                 discard, quit_recording = False, False
                 while time.monotonic() < end:
@@ -208,25 +220,30 @@ def source(request, output, publish, bridge):
                         last_limit_log = time.monotonic()
                     env.backend._target(target)
                     observation = env.observe()
-                    writer.append(observation, target, requested_target=requested)
+                    recording.append(env.recording_sample(observation,target,requested),observation['camera_images'])
                     env.backend.step(target)
-                    publish(observation['camera_images'], {'episode_index': len(writer.manifest['episodes']) + 1,
-                            'episode_total': count, 'attempt': episode, 'steps': len(writer.rows),
+                    publish(observation['camera_images'], {'episode_index': writer.count + 1,
+                            'episode_total': count, 'attempt': episode, 'steps': len(recording.rows),
                             'task_id': options.get('task_definition', {}).get('task_id', ''),
                             'task_signals': {'place': env.backend.is_success()},
                             'leader_limit_status': '관절 한계 적용: ' + ', '.join(limited) if limited else '',
                             'remaining_s': max(0., end - time.monotonic())})
                     time.sleep(max(0., 1 / env.hz - (time.monotonic() - start)))
-                if not discard and not quit_recording and writer.rows:
-                    writer.provenance['leader_target_limits'] = {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))}
-                    name = writer.save(env.backend.is_success(),success_source='simulation_place_condition')
+                if not discard and not quit_recording and recording.rows:
+                    provenance['leader_target_limits'] = {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))}
+                    outcome=dict(success=env.backend.is_success(),success_source='simulation_place_condition')
+                    if common:name=source_stage.save_common(writer,recording,env,provenance,outcome)
+                    else:
+                        provenance['coordinates']=env.coordinates.metadata()
+                        name=writer.save(recording.rows,recording.initial,recording.video,outcome)
+                    recording.abort()
                     print('Saved ' + name, flush=True)
-                    log_say(f'save episode {len(writer.manifest["episodes"])}',blocking=False)
+                    log_say(f'save episode {writer.count}',blocking=False)
                 if quit_recording:
                     break
-                if len(writer.manifest['episodes']) < count:log_say('resetting',blocking=False)
+                if writer.count < count:log_say('resetting',blocking=False)
                 reset_end = time.monotonic() + float(options.get('reset_time_s', 0))
-                while time.monotonic() < reset_end and len(writer.manifest['episodes']) < count:
+                while time.monotonic() < reset_end and writer.count < count:
                     if bridge:
                         bridge.poll()
                         if 'quit' in bridge.pending: quit_recording = True; break
@@ -235,20 +252,23 @@ def source(request, output, publish, bridge):
                             'reset_remaining_s': max(0., reset_end - time.monotonic())})
                     time.sleep(.05)
                 if quit_recording: break
-            return {'passed': bool(writer.manifest['episodes']), 'dataset': str(writer.root),
-                    'episode_count': len(writer.manifest['episodes']),
+            return {'passed': bool(writer.count), 'dataset': str(dataset_path),
+                    'episode_count': writer.count,
                     'leader_target_limits': {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))},
                     'coordinates': env.coordinates.metadata(), 'hardware': 'leader input only; no follower commands'}
         except KeyboardInterrupt:
             if 'writer' not in locals(): raise
-            return {'passed': bool(writer.manifest['episodes']), 'dataset': str(writer.root),
-                    'episode_count': len(writer.manifest['episodes']), 'stopped': True}
+            return {'passed': bool(writer.count), 'dataset': str(dataset_path),
+                    'episode_count': writer.count, 'stopped': True}
         finally:
-            if 'writer' in locals():writer.close()
-            leader.close()
-            log_say('stop recording',blocking=False)
-
-
+            try:
+                if 'recording' in locals():recording.abort()
+            finally:
+                try:
+                    if 'writer' in locals() and common:writer.close()
+                finally:
+                    try:leader.close()
+                    finally:log_say('stop recording',blocking=False)
 
 
 def train(request, output):
@@ -379,7 +399,6 @@ def _lerobot_index(artifact,options,prefix=''):
     return manifest,coords
 
 
-
 def train_from_lerobot(artifact, options, output):
     """Publish small index/statistics only; Episodes reads original Parquet/MP4 lazily."""
     from .episodes import split_episodes
@@ -459,7 +478,8 @@ def train_from_lerobot(artifact, options, output):
 
 
 def rollout(request, output, publish, bridge, policy_factory=None):
-    from ..learning.minivla.policy import MiniVLA, ActionGuard
+    from ..learning.minivla.policy import MiniVLA
+    from .policy import ActionGuard
     checkpoint = Path(request['checkpoint'])
     if checkpoint.is_dir():
         return rollout_lerobot(request, output, publish, bridge)
@@ -541,7 +561,7 @@ def rollout_lerobot(request, output, publish, bridge):
     import torch
     from .policy import load_policy, observation
     from ..real2sim.workspaces.demo import coordinate_contract
-    from ..learning.minivla.policy import ActionGuard
+    from .policy import ActionGuard
     from .tasks import object_metrics,evaluation_distribution
     options = request['options']; w = load(request['workspace'])
     device = options.get('device', 'cuda:0')
@@ -609,7 +629,7 @@ def execute(request):
         workspace = load(request['workspace'])
         request['primary_camera'] = workspace['task'].get('observation_cameras', list(workspace['profile']['cameras']))[0]
     if request.get('workspace') and request['stage'] in ('source', 'rollout'):
-        from .tasks import configured
+        from ..real2sim.workspaces.tasks import configured
         w = configured(load(request['workspace']), request['options'].get('task_definition'))
         request['options'].setdefault('instruction', w['task_definition']['language_instruction'])
     mujoco_request(request['stage'], sys.executable, request.get('workspace', ''), request.get('input', ''),
@@ -663,7 +683,7 @@ def execute(request):
             result = train(request, output)
         elif stage == 'rollout':
             from .evaluation import evaluate_sim
-            from .tasks import configured
+            from ..real2sim.workspaces.tasks import configured
             w=load(request['workspace'])
             definitions=request['options'].get('tasks') or [configured(w,request['options'].get('task_definition'))['task_definition']]
             result=evaluate_sim(request,request['checkpoint'],w,definitions,bridge,publish)

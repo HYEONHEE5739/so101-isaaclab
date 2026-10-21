@@ -1,7 +1,34 @@
 """Shared ACT/SmolVLA inference, preserving LeRobot saved normalization processors."""
 import json
 from pathlib import Path
+
+import numpy as np
 from ..representation import require_policy
+
+
+class ActionGuard:
+    def __init__(self, lower, upper, max_velocity, hz):
+        self.low=np.asarray(lower,float); self.high=np.asarray(upper,float)
+        self.speed=np.asarray(max_velocity,float); self.hz=float(hz)
+        if any(x.shape!=(6,) or not np.isfinite(x).all() for x in (self.low,self.high,self.speed)):
+            raise ValueError('Guard limits must be finite 6D')
+        if np.any(self.low>=self.high) or np.any(self.speed<=0) or self.hz<=0: raise ValueError('Invalid guard bounds')
+        self.reset()
+    def reset(self): self.last=None; self.violations=0; self.rate_limited=0
+    def apply(self, requested, observed):
+        a=np.asarray(requested,float); q=np.asarray(observed,float)
+        if a.shape!=(6,) or q.shape!=(6,) or not np.isfinite(a).all() or not np.isfinite(q).all():
+            raise ValueError('Nonfinite or malformed command/state')
+        if np.any(q<self.low-.05) or np.any(q>self.high+.05): raise ValueError('Observed state outside configured bounds')
+        self.violations+=int(np.any((a<self.low)|(a>self.high)))
+        target=np.clip(a,self.low,self.high); base=q if self.last is None else self.last
+        delta=self.speed/self.hz
+        clipped=np.clip(target,base-delta,base+delta)
+        # Also bound tracking error relative to actual state to avoid accumulating a distant command.
+        clipped=np.clip(clipped,q-delta,q+delta)
+        self.rate_limited+=int(np.any(np.abs(clipped-target)>1e-8))
+        self.last=np.clip(clipped,self.low,self.high)
+        return self.last.copy()
 
 
 def minivla_root(path):
@@ -236,7 +263,7 @@ class MiniVLAJointPolicy:
     """Expose MiniVLA's canonical actions through the workflow's model-radian API."""
     def __init__(self, path, device):
         import numpy as np
-        from ..learning.minivla.policy import MiniVLA, ActionGuard
+        from ..learning.minivla.policy import MiniVLA
         from ..so101_joint_mapping import RobotCoordinates
         self.policy = MiniVLA(selected_minivla_checkpoint(path))
         self.device = device

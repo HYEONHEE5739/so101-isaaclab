@@ -1,5 +1,7 @@
 # 기능별 수정 시작점
 
+**현재 구현 경계:** 공통 제어·guard·MiniVLA 추론 core·순수 Workspace Task와 Curation Reader(6a)·Common Writer/Buffer(6b-1/2)와 Source Writer(6b-3)·공통 Playback/Replay Stage(6c-1)를 분리했다. Registry와 MiniVLA 학습·Group 정책은 후속 교체 대상이며 아직 실제로 사용된다.
+
 먼저 [전체 구조](PROJECT_STRUCTURE.md)로 소유자를 찾고, [실행 흐름](SYSTEM_FLOW.md)에서 해당 함수의 앞뒤 데이터를
 확인한다. 아래의 경로는 `source/soarm101_lab/soarm101_lab/` 기준이다. 코드 이동이 필요해도 사용자 UI/자산/단위 계약은 유지한다.
 
@@ -19,24 +21,36 @@
 | MuJoCo Scene/물성 | `simulation/mjcf.py:build_scene/robot_xml`, `mujoco_backend.py:MujocoBackend` | workspace_scene.extend_scene/physics.compile_physics, workflow.mujoco._environment | 기존 profile/reset·recorded model·MuJoCo 독립 process·physics defaults |
 | MuJoCo 손가락 collision | `simulation/mjcf.py:robot_xml` | 저장소 루트 `assets/SO101/mujoco/finger_convex_parts.json`, 재생성 `scripts/mujoco/export_finger_collisions.py` | collision만 변경·원본 visual/URDF 불변·STL SHA·모터/물성 보존·접촉/실제 물리 검사 |
 | IK 계산/실패 정책 | `simulation/ik.py:solve_selected/solve_pose` | adapters.target_eef_pose_to_action, utils.so101_kinematics | SciPy/DLS 수식·seed·strict/hold/best_effort·limit·gripper. IK parity tests |
-| Source 기록 | `workflow/mujoco.py:source` (MuJoCo), Isaac `mdp/so101_mimic_recorders.py` | teleop record script/EpisodeWriter/DatasetWriter, hardware mapping | pre-observation/target·초기 state·영상 PTS/Source 계보 |
-| Replay/Annotation | `workflow/unified.py:execute/replay`, `workflow/annotation.py:replay_episode/run` | EpisodeDataset/Adapters/PhysicsControl/annotation controls | 원본 action/dt·공유 판정·동적 재배정·Source 저장 순서·수동1환경 mark/skip |
+| Task/active object/Scene 구성 | `real2sim/workspaces/tasks.py:catalog/validate/selected/configured` | 두 compiler/Workspace 환경/UI/worker; 기록/stamping은 아직 workflow.tasks | 원본 불변·기록 reset/physics·Task/Scene hash·명령문으로 identity 추정 금지 |
+| 공통 pause/step/취소 | `simulation/control.py:PhysicsControl/GenerationStopped` | Annotation/DataGen/Adapter, 기존 Mimic Scheduler | pause 토큰·환경별 single-step·중단 waiter 해제, 엔진 의존 없음 |
+| 정책 명령 guard | `workflow/policy.py:ActionGuard` | Sim 평가/MiniVLAJointPolicy/옛 CLI | finite·실측 범위·rate/target clamp 수학·누적 상태 보존 |
+| Source 수집·Discard·Resume | `workflow/mujoco.py:source`, `workflow/source.py:resume_legacy/resume_common` | Simulation `PolicyEnvironment.recording_context/sample/geometry`, Isaac native recorder는 기존 경로 | pre-observation/target·native 초기 state·기존 Resume 거부 조건/완성분 보존 |
+| Source 기록·Legacy manifest | `data/recording.py:SourceEpisode`, `data/episodes.py:LegacyEpisodeWriter.save/copy_episodes` | 기존 VideoEpisode, Source Stage가 이미 생성된 관측/명령/metadata 전달 | numeric/RGB 소유권·NPY dtype/MP4 PTS·episode 게시 후 provenance→manifest·rollback |
+| Source Common 조립·FK | `workflow/source.py:save_common`, Simulation `PolicyEnvironment.recording_geometry` | `data/recording.py:source_episode_values` → 기존 DatasetWriter | FK는 저장 때만; 기존 Common 첫 관측 초기 state와 별도 native legacy_initial_state 의미 유지 |
+| Replay 진행·결과 | `workflow/replay.py:run` | unified.execute의 명시 dispatch, Simulation Playback/기존 Adapter·Presentation | 기록된 joint_targets·strict task gate와 평가 기록 Playback 구분·기존 Preview/status 빈도 |
+| 공통 물리 재생 | `simulation/playback.py:restore_episode/replay_steps/step_targets` | Replay/Annotation → 기존 Adapter/순수 pose 변환 | restore1회·기존 DT/단위·command→post-step barrier. 벡터 전체 관측 후에만 다음 episode 복원 |
+| Annotation 판정·수동·배정 | `workflow/annotation.py:annotate_episode/run` | Playback의 before/observation/after hooks, 기존 PhysicsControl/Writer | Grasp/Place·mark/skip/pause/step·1/2/4/8 동적 배정·입력 순서 저장. Stage 간 import 금지 |
 | 저장 이름·결과 경로 | `workflow/ui.py:stage_options/execute`, `workflow/artifacts.py:suggested_name/output_location` | Operations.plan/run·Registry | 모든 UI 단계 필수 이름·단계별 값 분리·Annotation flat 경로·기존 데이터/계보 보존·중복 이름 거부 |
 | DataGen 알고리즘 연결 | `workflow/mimic.py:MimicGenerator/source_pool` | datagen.run_mujoco/run_isaac, adapters, mimic_reference | 공식 본문 보존·시도별 RNG·Pool1회. 신규 알고리즘 fallback 금지 |
 | DataGen 성공 수/Resume | `mimic.GenerationScheduler.finish/progress`, `datagen._resume` | writer commit, report/attempts/presentation | 예약→저장→성공 확정·rollback, stop/cancel·seed/IK config 일치 |
 | DataGen 실패 진단 | `adapters.py:SimulationAdapter.failure_category/failure_diagnostics/update_grasp` | datagen._attempt_details→scheduler/presentation.datagen_status_text | 실제 grasp/drop/place 증거·IK 진단 구분. 분모/기존 category/성공 조건 |
-| HDF5/영상 검증 | `workflow/dataset.py:validate_episode/validate_dataset/DatasetWriter.commit` | utils.async_video_writer, EpisodeBuffer/기록 변환 | schema/clock/PTS/SHA·원자 commit·상대경로/소유권 |
+| HDF5/영상 검증 | `data/episodes.py:validate_episode/DatasetWriter.commit`, `workflow/dataset.py:validate_dataset` | utils.async_video_writer, EpisodeBuffer/기록 변환 | schema/clock/PTS/SHA·원자 commit·상대경로/소유권 |
 | 파일/데이터 bytes identity | `utils/artifact_identity.py:fingerprint` | Registry.verify, learning.load_manifest/Resume, Source/catalog | 파일명·정렬·.cache 제외·HDF5 외부 영상. 기존 hash 절대 임의 변경 금지 |
-| Curation | `workflow/curation.py:EpisodeReader/analyze/export_subset` | curation_ui.CurationDialog, episodes Source split, robot_preview | 원본/TrainVal 잠금·동기 seek·불명 lineage·선별 저장 경계 |
+| Curation 분석·선별 | `workflow/curation.py:analyze/export_subset` | data.episodes.EpisodeReader, curation_ui, episodes Source split | 원본/TrainVal 잠금·동기 seek·불명 lineage·선별 저장 경계 |
+| Common 저장/완료·영상 인수 | `data/episodes.py:DatasetWriter.commit/close/validate_episode` | Source/Isaac recorder/Annotation/DataGen/Evaluation/Resume, 기존 VideoEpisode | 배열·PTS·SHA·private group·소유 staging만 rename·외부 영상 byte copy·중복 경로 거부·취소 시 완성분 정책 유지 |
+| Simulation 녹화 경계 | `workflow/adapters.py:SimulationAdapter.record_frame` → `data/recording.py:EpisodeBuffer` | 두 엔진의 pre-step, Annotation의 before state, Evaluation의 이미 읽은 state/images | 관측/이벤트는 Simulation 소유, I/O는 callback 없이 전달값만 기록. q≠target·시간/초기 state·모든 종료 경로 abort |
+| Telemetry/정확한 frame 읽기 | `data/episodes.py:EpisodeReader.read/frame/close` | curation.analyze/load_episode, CurationDialog.release_reader, utils.transforms/영상 utils | 측정 q·target·시각/PTS·pose 정렬 보존. Reader 순차 사용, Qt 작업 완료 후 close. 전체 RGB 읽기 금지 |
 | Source Train/Val 분할 | `workflow/episodes.py:source_catalog/source_split/export_source_splits/split_episodes` | Curation preview/save, Registry.source_collection/ensure_source_origin | frame 기준 분리 금지, Source/group 중복 누수 거절, 동일 origin 여러 split |
 | 결과 경로/Registry | `workflow/artifacts.py:output_location/Registry.register/verify` | Operations.run, input_directory/collection_at/discover_collection | 평평한 이름 경로·IDs/부모/SHA·예약/overwrite·원본 자산. 변경 높은 위험 |
 | Workflow 데이터 선택 | `workflow/ui.py:browse_data/select_data` | Registry.input_directory/discover_collection, Window.browse_scene(Live Import만) | 단계별 입력 폴더/선택 분리·Source 버전·Train/Val 계약·선택 중 worker/장치 시작 금지 |
 | LeRobot 변환 | `scripts/tools/convert_isaac2lerobot.py` | episodes.convert_dataset→동일 converter, dataset contract | measured state와joint_targets action·단위/FPS·MP4·partition |
 | MiniVLA Dataset/정규화 | `learning/minivla/data.py:load_manifest/Episodes/collate/fit_statistics` | workflow.mujoco.train_from_lerobot/_lerobot_index, episodes.validate_training_inputs | Train-only 통계·Source 누수·sample시점·H40 padding·gripper 관측범위 |
+| MiniVLA 추론/정규화 | `learning/minivla/policy.py:MiniVLA/RobotPreprocessor` | checkpoint.py, backbone/head/config | 저장 통계·구형 batch/accumulation 해석 유지. Trainer/Dataset 준비 import 금지 |
 | MiniVLA 모델 | `head.py:ActionHead`, `backbone.py:QwenBackbone` | config/processor/compute_loss/policy | 고정 architecture schema·tokens/masks·loss. CPU tests≠실제 GPU 품질 |
+| MiniVLA Checkpoint 형식 | `learning/minivla/checkpoint.py:require_architecture/restore_adapter/adapter_state` | policy, 현재 Trainer 저장 | architecture schema·adapter 상태 해석·기존 파일 불변 |
 | MiniVLA 학습/Checkpoint | `train.py:main/compute_loss/save_checkpoint/validate_resume`, `config.py:training_config` | workflow.mujoco.train, settings/option_help, data.identity | Batch/accumulation·optimizer·stats/dataset identity/옛 Resume 유지 |
 | ACT/SmolVLA 학습 | `workflow/policy.py:train/resume_checkpoint` | 공식 lerobot trainer/config, Operations 옵션 | LeRobot processor·dataset/modelrad·checkpoint output·명시 publication |
-| 평가/Checkpoint 선택 | `workflow/evaluation.py:evaluate_sim/EvaluationProgress/EvaluationRecorder`, `workflow/policy.py:selected_minivla_checkpoint/load_policy/batch_actions` | mujoco.execute, evaluation.evaluate, curation.analyze, unified.replay | 전체 평가 quota·정책 queue 환경 분리·성공/실패 label·Sim/Real 구분 |
+| 평가/Checkpoint 선택 | `workflow/evaluation.py:evaluate_sim/EvaluationProgress/EvaluationRecorder`, `workflow/policy.py:selected_minivla_checkpoint/load_policy/batch_actions` | mujoco.execute, evaluation.evaluate, curation.analyze, replay.run | 전체 평가 quota·정책 queue 환경 분리·성공/실패 label·Sim/Real 구분 |
 | 실물 정책 실행 | `workflow/evaluation.py:evaluate/real_start_pose`의 real_eval 경로 | `workflow/ui.py:stage_options, real_evaluation_defaults`, representation/precision/hardware/policy | UI 시작 버튼/CLI opt-in·활성화 전 float64 자세 검사·hardware_preflight.json·strict inverse/보정 identity·finite/freshness/모터 range |
 | 업로드 | `workflow/hub.py:publish/publication_metadata` | HF API, Registry·기존 provenance | 별도 명시 실행·기존 인증/정확한 commit, 자동 공개/업로드 금지 |
 | 전체 UI | `workflow/ui.py:WorkflowPanel.configure_stage/refresh/stage_options/execute` | real2sim.ui.Window, view/settings_form/task_ui/theme | 확정 widget tree/visibility/defaults/연결/Stage별 폴더·선택/잠금 |
@@ -69,3 +83,13 @@
 4. 먼저 기존 호출자 interface의 기대값/오류를 고정한 다음 작은 범위를 바꾼다.
 5. GUI/Isaac/USD/MuJoCo/학습 native 의존성을 검사 환경에 한꺼번에 섞지 않는다.
 6. 사용자 자산 대신 tmp fixture로 저장·실패·복구를 검사하고 실제 장치/GPU 성공을 별도로 구분한다.
+
+## 6c-2a 진행 상태 — 2026-10-20
+
+기록 Scene의 Isaac 생성만 `simulation/environment.py:create_isaac`로 이동하고 unified._native_isaac를 삭제했다. Worker가 identity 검사에 사용한 Workspace를 재사용한다. 105개 계약 회귀 통과, 설정/reset/close 본문은 입력 치환 외 AST 동일. 실제 Isaac baseline부터 GPU OOM으로 실패하여 native A/B 및 성능은 미검증이다. MuJoCo 생성, Source/평가의 별도 Isaac 경로, make_config의 기존 Presentation 간접 참조는 남아 있다. **6c-2 전체 완료 아님.** 근거: `outputs/workflow_validation/functional_refactor/environment/REPORT.md`.
+
+## 6c-2b 실제 소유권 — 2026-10-21
+
+`real2sim.workspaces.environment.make_config(..., overview_camera=False, grasp_observations=False)`는 전달된 요구만 사용한다. Workspace/Simulation의 Presentation.current/INSPECTION_STAGES 참조는 삭제했다. `workflow.unified.execute`는 연결된 DataGen의 Overview, `workflow.evaluation.evaluate_sim`은 연결된 평가의 Overview/Grasp 관측을 결정한다. 독립 Script/Source/Runtime은 false/false다. 정책 카메라 목록은 기존 Task가 소유한다. framing은 `simulation.workspace_scene.framing` 한 곳에 있고 이전 `workflow.presentation.framing`은 없다. MuJoCo는 같은 순수 구도 함수를 쓴다.
+
+삭제 edge: workspaces.environment→workflow.presentation/stages, simulation.workspace_scene→workflow.presentation. 새 edge: workspaces.environment→simulation.workspace_scene. 다른 Stage/I/O 역참조나 전체 SCC 해소를 뜻하지 않는다. 실제8종 설정/32회 UI독립 구성·Isaac2환경 Annotation/평가·MuJoCo 모델/물리/RGB 비교 근거는 `outputs/workflow_validation/functional_refactor/presentation_config/REPORT.md`다. 이전6c-2a의 간접 UI 결합 문구는 당시 상태다. 전체6c-2는 미완료다.

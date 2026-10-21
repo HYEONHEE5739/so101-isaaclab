@@ -1,10 +1,10 @@
 """Read-only, bounded-memory episode inspection and non-destructive selection."""
 import json
-from collections import OrderedDict
 from pathlib import Path
 import numpy as np
 from .tasks import episode_definition
-from .robot_preview import pose_matrix
+from ..data import episodes as episode_io
+from ..utils.transforms import pose_matrix
 
 
 def _json(value, default=None):
@@ -29,112 +29,6 @@ def _group_id(path, name, attrs, args):
     generated=args.get('source_dataset') or args.get('source_env_args')
     if generated:return 'UNKNOWN:'+str(args.get('source_dataset',Path(path).resolve()))
     return str(Path(path).resolve())+'/'+name
-
-
-class EpisodeReader:
-    """Open one episode on demand. No RGB series reads; LRU caches at most 8 frames/16MiB."""
-    def __init__(self,row):
-        self.row=row;self.ref=row['data_ref'];self.path=Path(self.ref['path']);self.canonical=self.path.is_dir()
-        self.cache=OrderedDict();self.cache_bytes=0;self.bytes_read=0;self.video_readers=OrderedDict()
-        self.frames=row['frames'];self.dt=row['dt'];self.specs=row.get('object_specs',{})
-        self.objects=row.get('active_object_ids') or row.get('recorded_object_ids',list(self.specs))
-        self.transforms=row['pose_transforms'];self.display_frame=row['display_frame']
-
-    def read(self,key,selection=slice(None)):
-        if self.canonical:
-            path=(self.path/self.ref['episode']/key).resolve()
-            if not path.is_relative_to(self.path.resolve()):raise ValueError('Episode telemetry outside dataset')
-            value=np.asarray(np.load(path,mmap_mode='r',allow_pickle=False)[selection])
-        else:
-            import h5py
-            with h5py.File(self.path,'r') as h:value=np.asarray(h['data'][self.ref['episode']][key][selection])
-        self.bytes_read+=value.nbytes
-        return value
-
-    def timestamps(self,selection=slice(None)):
-        key=self.row.get('timestamp_key')
-        if key:return self.read(key,selection).reshape(-1)
-        return self.indices(selection)*self.dt
-
-    def action_timestamp(self,selection):
-        key=self.row.get('action_timestamp_key')
-        stamp=self.read(key,selection).reshape(-1) if key else self.timestamps(selection)
-        if not np.allclose(stamp,self.timestamps(selection),atol=1e-7,rtol=0):
-            raise ValueError('Action/observation timestamp mismatch')
-        return stamp
-
-    def indices(self,selection):
-        if isinstance(selection,slice):return np.arange(*selection.indices(self.frames))
-        return np.asarray(selection).reshape(-1)
-
-    def initial_pose(self,name):
-        desc=self.row.get('object_telemetry',{}).get(name,{})
-        if desc.get('initial_pose') is None or self.transforms.get(desc.get('frame')) is None:return None
-        return np.asarray(self.transforms[desc['frame']])@pose_matrix(desc['initial_pose'],'xyzw' if desc.get('pose_format')=='xyz_xyzw' else 'wxyz')
-
-    def ee(self,selection):
-        value=self.read(self.row['ee_key'],selection)
-        if value.shape[-2:]==(4,4):xyz=value[...,:3,3]
-        else:xyz=value[...,:3]
-        t=np.asarray(self.transforms[self.row['ee_frame']])
-        return xyz@t[:3,:3].T+t[:3,3]
-
-    def pose(self,name,selection):
-        desc=self.row.get('object_telemetry',{}).get(name)
-        if not desc or desc.get('unavailable'):return None
-        t=self.transforms.get(desc['frame'])
-        if t is None:return None
-        indices=self.indices(selection)
-        if desc.get('post_step'):
-            # Existing states/workspace_states are AFTER action[t]. RGB/state[t] are BEFORE it.
-            unique,inverse=np.unique(np.maximum(indices-1,0),return_inverse=True)
-            old=self.read(desc['path'],unique)[inverse]
-            if 0 in indices:old[indices==0]=np.asarray(desc['initial_pose'])
-        else:
-            old=self.read(desc.get('file',desc.get('path')),selection)
-            if 'index' in desc:old=old[...,desc['index'],:]
-        tskey=desc.get('timestamp_file') or desc.get('timestamp_path')
-        if tskey and not np.allclose(self.read(tskey,selection).reshape(-1),self.timestamps(selection),atol=1e-7,rtol=0):
-            raise ValueError('Object/observation timestamp mismatch: '+name)
-        matrices=pose_matrix(old,'xyzw' if desc.get('pose_format')=='xyz_xyzw' else 'wxyz')
-        return np.asarray(t)@matrices
-
-    def frame(self,index,camera=None):
-        if not 0<=index<self.frames:raise ValueError('Frame outside episode')
-        poses={n:self.pose(n,index) for n in self.objects}
-        result={'index':index,'timestamp':float(self.timestamps(index)[0]),'robot_q':self.read(self.row['q_key'],index) if self.row.get('q_key') else None,
-                'action':self.read(self.row['action_key'],index),'action_timestamp':float(self.action_timestamp(index)[0]),
-                'ee':self.ee(index),'object_poses':{n:(v[0] if v is not None and v.ndim==3 else v) for n,v in poses.items()},
-                'initial_object_poses':{n:self.initial_pose(n) for n,v in poses.items() if v is None},'rgb':None}
-        cameras=[camera] if isinstance(camera,str) else list(camera or [])
-        result['rgb_frames']={};result['rgb_timestamps']={}
-        for camera in cameras:
-            spec=self.row['cameras'][camera];key=(camera,index)
-            if key not in self.cache:
-                if spec.get('file') or spec['path'].endswith('.mp4'):
-                    from ..utils.async_video_writer import VideoFrames,external_camera
-                    if camera not in self.video_readers:
-                        self.video_readers[camera]=(VideoFrames(self.path/self.ref['episode']/spec['path'],self.frames,1/self.dt)
-                            if self.canonical else external_camera(self.path,spec,self.frames,1/self.dt))
-                        while len(self.video_readers)>2:
-                            _,old=self.video_readers.popitem(last=False)
-                            if hasattr(old,'close'):old.close()
-                    self.video_readers.move_to_end(camera)
-                    rgb=self.video_readers[camera][index][...,:3]
-                else:rgb=self.read(spec['path'],index)[...,:3]
-                if rgb.dtype!=np.uint8:rgb=np.clip(rgb*(255 if rgb.max(initial=0)<=1.5 else 1),0,255).astype(np.uint8)
-                rgb=np.ascontiguousarray(rgb)
-                self.cache[key]=rgb;self.cache_bytes+=rgb.nbytes
-                while len(self.cache)>8 or self.cache_bytes>16*2**20:
-                    _,old=self.cache.popitem(last=False);self.cache_bytes-=old.nbytes
-                result['rgb']=rgb
-            else:self.cache.move_to_end(key);result['rgb']=self.cache[key]
-            stamp=float(self.read(spec['timestamp_key'],index).reshape(-1)[0]) if spec.get('timestamp_key') else result['timestamp']
-            result['rgb_timestamp']=stamp
-            result['rgb_frames'][camera]=result['rgb'];result['rgb_timestamps'][camera]=stamp
-            age=result['timestamp']-stamp
-            if age < -1e-7 or age > 2*self.dt+1e-7:raise ValueError('RGB frame is not aligned with the observation')
-        return result
 
 
 def _context(w,scene,canonical):
@@ -180,17 +74,17 @@ def _events(reader,annotation=None,signal_keys=None):
     return events
 
 
-def _scan(row):
-    reader=EpisodeReader(row);events=row['events'];pick=row['pick_object_id']
+def _scan(row,reader):
+    events=row['events'];pick=row['pick_object_id']
     total_move=before=after=0.;initial_height=lift_max=None;last_ee=last_q=last_v=last_obj=last_t=None
     duration=stop=cmdstop=samples=0;accsum=np.zeros(6);accn=0;distances={};dist_sum=dist_n=0;time_start=None
     for start in range(0,reader.frames,2048):
         end=min(reader.frames,start+2048);sl=slice(start,end);t=reader.timestamps(sl)
-        reader.action_timestamp(sl)
+        reader.action_timestamp(sl,observation_timestamps=t)
         ee=reader.ee(sl);q=reader.read(row['action_key'],sl)
         if len(ee)!=len(t) or q.shape!=(len(t),6) or not np.isfinite(t).all() or not np.isfinite(ee).all() or not np.isfinite(q).all():raise ValueError('Invalid aligned trajectory: '+row['name'])
         if time_start is None:time_start=float(t[0])
-        objects={n:reader.pose(n,sl) for n in reader.objects}
+        objects={n:reader.pose(n,sl,observation_timestamps=t) for n in reader.objects}
         for n,poses in objects.items():
             if poses is None:continue
             dist=np.linalg.norm(poses[:,:3,3]-ee,axis=1);distances[n]=min(distances.get(n,float('inf')),float(dist.min()))
@@ -380,11 +274,12 @@ def analyze(path):
                 if evaluation or args.get('evaluation_schema'):
                     row.update(evaluation=evaluation,evaluation_outcome='success' if row['recorded_success'] else 'failure',
                         failure_reason=g.attrs.get('failure_reason',''),env_id=evaluation.get('env_id'))
-        reader=EpisodeReader(row);row['events']=_events(reader,annotation,signal_keys)
         row['annotation_status']='annotated' if annotation is not None or 'obs/datagen_info/subtask_term_signals/grasp' in signal_keys.values() else 'signals_only' if signal_keys else 'UNAVAILABLE'
         trusted=row['success_source'] in ('simulation_place_condition','simulation_stable_grasp_and_place','simulation_success_term')
         row['physical_success']=row['recorded_success'] if trusted and not row['validation_only'] else None
-        rows.append(_scan(row))
+        with episode_io.EpisodeReader(row) as reader:
+            row['events']=_events(reader,annotation,signal_keys)
+            rows.append(_scan(row,reader))
     return flag_outliers(rows)
 
 
@@ -393,10 +288,12 @@ def analyze_canonical(path):return analyze(path)
 
 def load_episode(row,max_points=1500):
     """Selected episode plot samples only; playback still reads each exact original frame."""
-    reader=EpisodeReader(row);indices=np.unique(np.linspace(0,reader.frames-1,min(max_points,reader.frames)).astype(int))
-    return {**row,'sample_indices':indices,'ee':reader.ee(indices),'actions':reader.read(row['action_key'],indices),
-        'robot_q':reader.read(row['q_key'],indices) if row.get('q_key') else None,
-        'object_paths':{n:reader.pose(n,indices) for n in reader.objects},'timestamps':reader.timestamps()}
+    with episode_io.EpisodeReader(row) as reader:
+        indices=np.unique(np.linspace(0,reader.frames-1,min(max_points,reader.frames)).astype(int))
+        timestamps=reader.timestamps()
+        return {**row,'sample_indices':indices,'ee':reader.ee(indices),'actions':reader.read(row['action_key'],indices),
+            'robot_q':reader.read(row['q_key'],indices) if row.get('q_key') else None,
+            'object_paths':{n:reader.pose(n,indices,observation_timestamps=timestamps[indices]) for n in reader.objects},'timestamps':timestamps}
 
 
 def flag_outliers(rows):

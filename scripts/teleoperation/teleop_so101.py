@@ -156,7 +156,7 @@ def main():
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.environment import make_config
         env_cfg = make_config(args_cli.workspace, args_cli.device, args_cli.num_envs,
-                              identity_sim=bool(getattr(leader, 'precision_mapper', None)))
+                              identity_sim=bool(getattr(leader, 'precision_mapper', None)), overview_camera=False, grasp_observations=False)
     else:
         env_cfg = SO101TeleopEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs

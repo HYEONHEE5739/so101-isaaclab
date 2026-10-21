@@ -443,6 +443,36 @@ class PolicyEnvironment:
     def step(self, canonical):
         return self.backend.step(self.coordinates.to_model(canonical))
 
+    def recording_context(self):
+        """Detached scene/coordinate facts; no output path or file-format policy."""
+        from ..real2sim.workspaces.tasks import selected,configured
+        b=self.backend;w=b.workspace;scene=copy.deepcopy(b.metadata)
+        if not scene.get('task_definition'):scene['task_definition']=selected(w)
+        if not scene.get('scene_configuration'):
+            scene['scene_configuration']=configured(w,scene['task_definition'],scene['dynamic_objects'],backend='mujoco')['scene_configuration']
+        scene['robot_base_T_world']=copy.deepcopy(w['profile']['robot_base']['T_world'])
+        return dict(control_hz=self.hz,cameras=list(w['task'].get('observation_cameras',['side'])),
+            scene=scene,coordinates=self.coordinates.metadata(),workspace_path=str(w['root']) if w.get('root') else None)
+
+    def recording_sample(self,observation:dict,model_target:np.ndarray,requested_target=None)->dict:
+        """Generate borrowed pre-command values without new observation/FK.
+
+        Targets are six-axis model rad; policy action keeps the existing
+        fraction conversion. Recording must freeze these arrays before step.
+        """
+        return dict(state=observation['state'],action=self.coordinates.to_policy(model_target),
+            raw_state=observation['model_joint_rad'],raw_action=model_target,
+            requested_action=model_target if requested_target is None else requested_target,
+            timestamp=observation['timestamp'],eef_pose=observation['eef_pose'],object_poses=observation['object_poses'])
+
+    def recording_geometry(self,joint_targets):
+        """Save-time FK/static geometry, exactly once per saved Common episode."""
+        b=self.backend;world_base=np.asarray(b.workspace['profile']['robot_base']['T_world'])
+        return dict(world_base=world_base,base_workspace=np.linalg.inv(world_base)@b.world_from_workspace,
+            target_poses=np.array([b.target_pose(v) for v in joint_targets]),
+            static_poses={name:b.get_object_pose(name) for name in b.metadata['target_objects']},
+            camera_names=b.workspace['task']['observation_cameras'])
+
     def reset(self, seed):
         return self.backend.reset(seed=seed)
 

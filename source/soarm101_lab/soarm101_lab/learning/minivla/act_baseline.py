@@ -11,7 +11,8 @@ from PIL import Image, ImageOps, ImageEnhance
 import torch
 from torch.nn import functional as F
 from .config import MiniVLAConfig
-from .data import Episodes, collate, RobotPreprocessor
+from .data import Episodes, collate
+from .policy import RobotPreprocessor
 from .train import seed_all
 
 def build(cfg, pretrained=True):

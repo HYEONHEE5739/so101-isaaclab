@@ -182,7 +182,7 @@ def inspect_artifact(kind, path):
                 raise ValueError('Some episodes have no task definition')
             result.update(workspace=args.get('workspace'), episode_count=len(episodes), env_args=args, tasks=list(unique.values()))
             if args.get('dataset_schema'):
-                from .dataset import SCHEMA
+                from ..data.episodes import SCHEMA
                 if args['dataset_schema']!=SCHEMA:raise ValueError('Unknown episode dataset schema')
                 result.update(format=SCHEMA,backend=args.get('backend'),scene_configuration=args.get('scene_configuration'))
             if args.get('source_partition'):

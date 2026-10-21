@@ -100,7 +100,8 @@ class VideoHDF5DatasetFileHandler(HDF5DatasetFileHandler):
 
     def _write_common(self,episode,video):
         import json
-        from soarm101_lab.workflow.dataset import DatasetWriter,isaac_recording_episode
+        from soarm101_lab.workflow.dataset import isaac_recording_episode
+        from soarm101_lab.data.episodes import DatasetWriter
         if video is None:raise ValueError('Common recording requires streamed Side and Wrist videos')
         def numpy(value):
             return {k:numpy(v) for k,v in value.items()} if isinstance(value,dict) else value.detach().cpu().numpy()

@@ -88,17 +88,23 @@ def env(tmp_path):
 
 
 def make_dataset(root, env, smoke=False):
-    from soarm101_lab.workflow.episodes import EpisodeWriter
-    writer = EpisodeWriter(root, env, 'pick the red cube')
+    from soarm101_lab.data.episodes import LegacyEpisodeWriter
+    from soarm101_lab.data.recording import SourceEpisode
+    from soarm101_lab.workflow.source import metadata
+    manifest,provenance=metadata(env.recording_context(),'pick the red cube')
+    writer=LegacyEpisodeWriter(root,manifest,provenance)
+    recording=SourceEpisode(root,env.hz,manifest['cameras'],env.backend.metadata['dynamic_objects'],env.backend.metadata['pick'])
     for i in range(3):
         env.reset(i)
-        writer.begin()
+        recording.begin(env.backend.get_initial_state())
         for _ in range(4):
             obs = env.observe()
             target = env.backend.home.copy()
-            writer.append(obs, target)
+            recording.append(env.recording_sample(obs,target),obs['camera_images'])
             env.backend.step(target)
-        writer.save(success=True, validation_only=smoke)  # fixture labels; not a manipulation benchmark
+        writer.provenance['coordinates']=env.coordinates.metadata()
+        writer.save(recording.rows,recording.initial,recording.video,dict(success=True,validation_only=smoke))
+        recording.abort() # fixture labels; not a manipulation benchmark
     return writer
 
 
@@ -280,14 +286,16 @@ def test_ik_is_bounded_and_does_not_change_physics(env):
 
 def test_canonical_registry_and_resume_preserve_original(tmp_path, env):
     from soarm101_lab.workflow.artifacts import Registry, fingerprint
-    from soarm101_lab.workflow.episodes import EpisodeWriter
+    from soarm101_lab.data.episodes import LegacyEpisodeWriter
+    from soarm101_lab.workflow.source import metadata,resume_legacy
     writer = make_dataset(tmp_path / 'source', env)
     registry = Registry(tmp_path / 'registry')
     artifact = registry.register('source', writer.root)
     assert artifact['backend'] == 'mujoco'
     before = fingerprint(writer.root)
-    resumed = EpisodeWriter(tmp_path / 'resumed', env, 'pick the red cube')
-    resumed.resume(writer.root)
+    manifest,provenance=metadata(env.recording_context(),'pick the red cube')
+    resumed=LegacyEpisodeWriter(tmp_path/'resumed',manifest,provenance)
+    resume_legacy(resumed,writer.root,env.backend.workspace)
     assert len(resumed.manifest['episodes']) == 3
     assert fingerprint(writer.root) == before
     registry.verify(artifact)
@@ -382,17 +390,22 @@ def test_front_camera_dataset_and_policy_contract(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from test_builder_workspace import fruit_export
     from soarm101_lab.real2sim.workspaces.builder import import_scene
-    from soarm101_lab.workflow.episodes import EpisodeWriter
+    from soarm101_lab.data.episodes import LegacyEpisodeWriter
+    from soarm101_lab.data.recording import SourceEpisode
+    from soarm101_lab.workflow.source import metadata
     from soarm101_lab.workflow import mujoco as worker
     from soarm101_lab.learning.minivla.data import load_manifest,episode_arrays
     export=fruit_export.__wrapped__(tmp_path);workspace=import_scene(export,registry=tmp_path/'workspaces')
     env=PolicyEnvironment(workspace,'none',control_hz=30)
     env.backend.get_rgb=lambda camera=None:np.zeros((240,320,3),np.uint8)
-    writer=EpisodeWriter(tmp_path/'front_dataset',env,'Place the apple in the basket.')
-    writer.begin()
+    manifest,provenance=metadata(env.recording_context(),'Place the apple in the basket.')
+    writer=LegacyEpisodeWriter(tmp_path/'front_dataset',manifest,provenance)
+    recording=SourceEpisode(writer.root,env.hz,manifest['cameras'],env.backend.metadata['dynamic_objects'],env.backend.metadata['pick'])
+    recording.begin(env.backend.get_initial_state())
     for _ in range(4):
-        obs=env.observe();writer.append(obs,env.backend.home);env.backend.step(env.backend.home)
-    writer.save(False,validation_only=True)
+        obs=env.observe();recording.append(env.recording_sample(obs,env.backend.home),obs['camera_images']);env.backend.step(env.backend.home)
+    writer.provenance['coordinates']=env.coordinates.metadata()
+    writer.save(recording.rows,recording.initial,recording.video,dict(success=False,validation_only=True));recording.abort()
     manifest=load_manifest(writer.root/'manifest.json')
     arrays=episode_arrays(manifest['episodes'][0],['front'],30)
     assert arrays['front'].shape==(4,240,320,3)

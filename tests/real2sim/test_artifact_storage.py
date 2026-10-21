@@ -336,7 +336,7 @@ def test_output_reservation_and_existing_empty_bundle(storage_workspace,tmp_path
 def test_act_resume_name_and_explicit_canonical_output(storage_workspace,tmp_path,monkeypatch):
     from test_training_resume import checkpoint
     from soarm101_lab.real2sim.workspaces.package import metadata
-    from soarm101_lab.workflow.tasks import catalog
+    from soarm101_lab.real2sim.workspaces.tasks import catalog
     import shutil
     old,_=checkpoint(tmp_path);dest=tmp_path/'models/act_name/checkpoints/040000';dest.parent.mkdir(parents=True);shutil.move(old,dest)
     opts={'architecture':'act','resume_checkpoint':str(dest),'backend':'mujoco'}

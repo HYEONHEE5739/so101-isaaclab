@@ -15,7 +15,7 @@ def inspect_resume_input(stage, path):
     if stage=='source' and (item.get('source_partition') or item.get('provenance',{}).get('source_partition')):
         raise ValueError('Source Partition is locked: Train/Val에는 이어 수집할 수 없습니다. origin의 원본 데이터를 선택하세요.')
     if stage=='datagen':
-        from .dataset import SCHEMA
+        from ..data.episodes import SCHEMA
         args=item.get('env_args',{})
         if item.get('format')!=SCHEMA or not args.get('generation_method') or 'generation_seed' not in args:
             raise ValueError('DataGen 이어 생성에는 이전 DataGen 결과의 dataset.hdf5를 선택하세요. Source/Annotation 입력은 이어 생성 결과가 아닙니다. 새 생성은 기존 완료 데이터를 비우세요.')
@@ -89,7 +89,8 @@ def combine(previous, segment):
 def _combine_common(previous, segment):
     """Normalize legacy inputs before appending them to a new common recording."""
     import uuid
-    from .dataset import DatasetWriter, EpisodeDataset, migrate
+    from .dataset import EpisodeDataset, migrate
+    from ..data.episodes import DatasetWriter
     from ..so101_dataset_contract import sidecar
     old=EpisodeDataset(previous);new=EpisodeDataset(segment)
     if old.args.get('source_partition')!=new.args.get('source_partition'):

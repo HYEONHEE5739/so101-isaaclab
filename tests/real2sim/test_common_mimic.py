@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from soarm101_lab.workflow.dataset import (DatasetWriter,EpisodeDataset,SEMANTICS,SCHEMA,
-    validate_dataset,validate_episode,recording_args)
+from soarm101_lab.workflow.dataset import EpisodeDataset, validate_dataset
+from soarm101_lab.data.episodes import DatasetWriter, SEMANTICS, SCHEMA, validate_episode, recording_args
 from soarm101_lab.so101_dataset_contract import current_contract,MIMIC_SPACE
 from soarm101_lab.so101_joint_mapping import JOINTS
 
@@ -185,7 +185,7 @@ def test_finalized_owned_video_is_adopted_without_copy(tmp_path,episode,monkeypa
 
 
 def test_owned_video_commit_failure_removes_only_private_staging(tmp_path,episode,monkeypatch):
-    from soarm101_lab.workflow import dataset
+    from soarm101_lab.data import episodes as dataset
     from soarm101_lab.utils.async_video_writer import VideoEpisode
     values,attrs,original,args,contract=episode
     original_hashes={name:dataset.file_sha256(spec['file']) for name,spec in original.items()}
@@ -244,71 +244,20 @@ def test_pool_reuse_is_read_only_and_respects_selected_episodes(tmp_path,episode
     assert hashlib.sha256(pickle.dumps((pool.datagen_infos,pool.subtask_boundaries))).hexdigest()==before
 
 
-def test_only_complete_positive_physical_replay_proofs_are_cached(tmp_path,monkeypatch):
-    from soarm101_lab.workflow import unified
-    source=tmp_path/'input.bin';source.write_bytes(b'unchanged source')
-    reader=SimpleNamespace(names=['demo_0'],path=source)
-    request={'options':{'replay_cache_dir':str(tmp_path/'cache')}}
-    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('identity',{'code':'v1'}))
-    calls=[]
-    def replay(*args):
-        calls.append(True)
-        return {'passed':True,'episodes':[{'episode':'demo_0','physical_replay_passed':True}]}
-    monkeypatch.setattr(unified,'replay',replay)
-    first=unified.cached_replay(reader,request,None,tmp_path/'first')
-    second=unified.cached_replay(reader,request,None,tmp_path/'second')
-    assert not first['cache']['hit'] and second['cache']['hit'] and len(calls)==1
-    # A code/config change invalidates the proof even when the dataset is unchanged.
-    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('changed',{'code':'v2'}))
-    unified.cached_replay(reader,request,None,tmp_path/'changed')
-    assert len(calls)==2
-    def failed(*args):
-        calls.append(False)
-        return {'passed':False,'episodes':[{'episode':'demo_0','physical_replay_passed':False}]}
-    monkeypatch.setattr(unified,'replay',failed)
-    monkeypatch.setattr(unified,'replay_cache_identity',lambda *args:('failed',{'code':'v3'}))
-    for index in range(2):
-        assert not unified.cached_replay(reader,request,None,tmp_path/f'failed{index}')['passed']
-    assert calls[-2:]==[False,False] and not (tmp_path/'cache/failed.json').exists()
-
-
-@pytest.mark.parametrize('field',['source','episodes','workspace','scene','calibration','backend','physics','version'])
-def test_replay_cache_identity_tracks_all_physical_inputs(field,monkeypatch):
-    import importlib.metadata
-    from soarm101_lab.workflow.unified import replay_cache_identity
-    options=SimpleNamespace(timestep=.001,integrator=0,solver=1,gravity=np.array([0.,0.,-9.81]))
-    backend=SimpleNamespace(metadata={'simulation_configuration':{'controller':'calibrated'},'model_sha256':'model'},
-        model=SimpleNamespace(opt=options),decimation=10)
-    adapter=SimpleNamespace(backend=backend)
-    reader=SimpleNamespace(names=['demo_0'],args={'workspace':{'sha256':'workspace'},'scene_configuration':{'reset':'uniform'}},
-        contract={'calibration':'v1'},hz=30.)
-    request={'backend':'mujoco','options':{'source_pool_sha256':'source'}}
-    original=replay_cache_identity(reader,request,adapter)[0]
-    if field=='source':request['options']['source_pool_sha256']='different'
-    elif field=='episodes':reader.names.append('demo_1')
-    elif field=='workspace':reader.args['workspace']['sha256']='different'
-    elif field=='scene':reader.args['scene_configuration']['reset']='different'
-    elif field=='calibration':reader.contract['calibration']='v2'
-    elif field=='backend':request['backend']='isaac'
-    elif field=='physics':options.timestep=.002
-    elif field=='version':monkeypatch.setattr(importlib.metadata,'version',lambda name:'changed version')
-    assert replay_cache_identity(reader,request,adapter)[0]!=original
-
-
 @pytest.mark.parametrize('grasp,place,accepted',[(False,True,False),(True,False,False),(True,True,True)])
 @pytest.mark.parametrize('manual',[False,True])
 def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,grasp,place,accepted,manual,monkeypatch):
     """Synthetic signal fixture checks the gate; it does not claim physical success."""
-    from soarm101_lab.workflow.unified import replay
+    from soarm101_lab.workflow.annotation import run
     values,attrs,videos,args,contract=episode
     source=tmp_path/'source.hdf5'
     with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
     reader=EpisodeDataset(source);calls=[]
     class Buffer:
         video=None;metrics={}
-        def append(self,*args):pass
         def abort(self):pass
-        def finish(self,attrs):
+        def finish(self,attrs,*,success):
+            assert success == (grasp and place)
             result=copy.deepcopy(values);result['obs'].setdefault('events',{})
             return result,dict(attrs,annotation=json.dumps({'grasp':2,'place':4})),videos
     class Adapter:
@@ -319,6 +268,7 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
         def state(self):return {'joint_pos':np.zeros(6),'object_poses':{'cube':np.eye(4)}}
         def step(self,*args):self.step_index+=1
         def update_grasp(self):self.tracker.completed=grasp
+        def record_frame(self,*args):pass
         def place_success(self):return place
         def check_success(self):return self.tracker.completed and self.place_success()
         def failure_category(self):return 'grasp_failure' if not self.tracker.completed else 'place_failure'
@@ -339,7 +289,7 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
     writer=SimpleNamespace(commit=commit)
     from soarm101_lab.workflow import unified
     monkeypatch.setattr(unified.time,'sleep',lambda *args:pytest.fail('Annotation must not pace by control Hz'))
-    result=replay(adapter,reader,tmp_path/'replayed',bridge=bridge,writer=writer)
+    result=run(adapter,reader,tmp_path/'replayed',bridge,writer,1)
     assert result['passed']==accepted and result['accepted']==int(accepted)
     assert bool(calls)==accepted
 
@@ -397,11 +347,17 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
         for _ in range(14):writer.commit(values,attrs,videos)
     monkeypatch.setattr(package,'load',lambda *args:{})
     monkeypatch.setattr(package,'metadata',lambda *args:identity)
-    monkeypatch.setattr(unified,'replay',lambda *args:pytest.fail('DataGen must not replay the Source pool'))
-    monkeypatch.setattr(unified,'cached_replay',lambda *args:pytest.fail('DataGen must not require a replay proof'))
+    from soarm101_lab.workflow import replay,annotation
+    monkeypatch.setattr(replay,'run',lambda *args,**kw:pytest.fail('DataGen must not replay the Source pool'))
+    monkeypatch.setattr(annotation,'run',lambda *args,**kw:pytest.fail('DataGen must not annotate the Source pool'))
     native=SimpleNamespace(backend=object(),close=lambda:None)
     adapter=SimpleNamespace(buffer=SimpleNamespace(abort=lambda:None),close=lambda:None)
-    monkeypatch.setattr(unified,'_native_isaac',lambda *args:native)
+    from soarm101_lab.simulation import environment
+    camera_requests=[]
+    def create_isaac(*args,**kwargs):
+        camera_requests.append(kwargs['overview_camera'])
+        return native
+    monkeypatch.setattr(environment,'create_isaac',create_isaac)
     monkeypatch.setattr(mujoco,'_environment',lambda *args,**kwargs:native)
     monkeypatch.setattr(adapters,'IsaacAdapter',lambda *args:adapter)
     monkeypatch.setattr(adapters,'MujocoAdapter',lambda *args:adapter)
@@ -427,6 +383,7 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
     result=unified.execute({'backend':backend,'stage':'datagen','input':str(source),'workspace':'fixture',
         'output':str(tmp_path/'generated'),'options':{'generation_seed':1047,'num_envs':4,'num_successful_demos':2}})
     assert calls==[backend] and result['passed']
+    assert camera_requests==([True] if backend=='isaac' else [])
     assert 'cross_replay_cache' not in result
     assert not (tmp_path/'generated/cross_replay.json').exists()
     status=json.loads((session/'status.json').read_text())
@@ -435,7 +392,7 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
 
 def test_isaac_replay_holds_idle_commands_despite_measured_drift(tmp_path,episode):
     import torch
-    from soarm101_lab.workflow.unified import replay
+    from soarm101_lab.workflow.replay import run as replay
     values,attrs,videos,args,contract=episode
     values['joint_targets'][:,0]=np.arange(len(values['actions']))*.01
     source=tmp_path/'source.hdf5'
@@ -498,7 +455,7 @@ def test_shared_subtask_source_cannot_leak_across_splits():
 
 def test_common_source_resume_keeps_previous_and_video_references(tmp_path,episode):
     from soarm101_lab.workflow.data_resume import combine
-    from soarm101_lab.workflow.dataset import file_sha256
+    from soarm101_lab.data.episodes import file_sha256
     values,attrs,videos,args,contract=episode
     old=tmp_path/'old.hdf5';new=tmp_path/'new.hdf5'
     for path in (old,new):
@@ -512,7 +469,7 @@ def test_common_source_resume_keeps_previous_and_video_references(tmp_path,episo
 
 def test_official_pool_order_and_trace_lineage_are_consistent(tmp_path,episode):
     import h5py
-    from soarm101_lab.workflow.dataset import _write
+    from soarm101_lab.data.episodes import _write
     from soarm101_lab.workflow.datagen import _lineage
     from soarm101_lab.workflow.mimic_reference.dataset import HDF5DatasetFileHandler
     values,attrs,_,args,_=episode
@@ -534,7 +491,8 @@ def test_official_pool_order_and_trace_lineage_are_consistent(tmp_path,episode):
 
 def test_legacy_internal_and_external_rgb_import_across_directories(tmp_path,episode,monkeypatch):
     import h5py
-    from soarm101_lab.workflow.dataset import _write,migrate,file_sha256
+    from soarm101_lab.workflow.dataset import migrate
+    from soarm101_lab.data.episodes import _write, file_sha256
     values,attrs,videos,args,contract=copy.deepcopy(episode)
     folder=tmp_path/'legacy';folder.mkdir();source=folder/'source.hdf5';destination=tmp_path/'export/common.hdf5'
     wrist=folder/'wrist.mp4';shutil.copyfile(videos['wrist_cam']['file'],wrist)

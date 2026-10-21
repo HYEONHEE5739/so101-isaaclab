@@ -55,7 +55,8 @@ def default_python():
 
 def run_folder_name(stage, artifact, workspace='', options=None):
     """Human-readable local timestamp and semantic task ID, never language text."""
-    from .tasks import from_artifact, catalog
+    from .tasks import from_artifact
+    from ..real2sim.workspaces.tasks import catalog
     opts = options or {}
     definitions = from_artifact(artifact)
     if stage in ('source', 'sim_eval', 'real_eval'):
@@ -205,7 +206,8 @@ class Operations:
             raise ValueError('Geometry review Workspace: use Real/Sim preview; explicit workflow metadata is required for task execution')
         if w and artifact.get('workspace') != metadata(w):
             raise ValueError('Input workspace identity differs from selected workspace')
-        from .tasks import catalog, validate, from_artifact
+        from .tasks import from_artifact
+        from ..real2sim.workspaces.tasks import catalog, validate
         definitions = from_artifact(artifact, w)
         if stage in ('source', 'sim_eval', 'real_eval'):
             if opts.get('task_scope') == 'all' and stage != 'source':
@@ -221,10 +223,11 @@ class Operations:
                 from ..real2sim.workspaces.reset import source_workspace
                 w = source_workspace(w,opts.get('resume_data'))
             elif stage in ('replay','annotate','datagen'):
-                from .tasks import configured,recorded_scene
+                from .tasks import recorded_scene
+                from ..real2sim.workspaces.tasks import configured
                 w = configured(w,reset=recorded_scene(artifact,w)['reset'])
             if stage in ('source','sim_eval','real_eval','replay','annotate','datagen'):
-                from .tasks import configured
+                from ..real2sim.workspaces.tasks import configured
                 for definition in definitions:
                     configured(w,definition,opts['active_object_ids'],backend)
                 if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],backend)['scene_configuration']
@@ -482,7 +485,8 @@ class Operations:
 
 def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
     """Translate common stage names to the existing engine worker protocol."""
-    from .tasks import catalog, validate, from_artifact
+    from .tasks import from_artifact
+    from ..real2sim.workspaces.tasks import catalog, validate
     if stage in ('hf_dataset', 'hf_policy', 'real_eval'):
         raise ValueError('This operation is handled by the common workflow')
     workspace = artifact['path'] if stage == 'source' else workspace
@@ -522,10 +526,11 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
         from ..real2sim.workspaces.reset import source_workspace
         w = source_workspace(w,opts.get('resume_data'))
     elif stage in ('replay','annotate','datagen'):
-        from .tasks import configured,recorded_scene
+        from .tasks import recorded_scene
+        from ..real2sim.workspaces.tasks import configured
         w = configured(w,reset=recorded_scene(artifact,w)['reset'])
     if stage in ('source','sim_eval','replay','annotate','datagen'):
-        from .tasks import configured
+        from ..real2sim.workspaces.tasks import configured
         for definition in definitions:configured(w,definition,opts['active_object_ids'], 'mujoco')
         if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],'mujoco')['scene_configuration']
     if not definitions or (stage in ('source', 'annotate', 'datagen') and len(definitions) != 1):
@@ -568,7 +573,8 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
 
 def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
     """Plan common episode stages without importing a simulation or Torch in the GUI."""
-    from .tasks import bind_scene_options,from_artifact,validate
+    from .tasks import bind_scene_options, from_artifact
+    from ..real2sim.workspaces.tasks import validate
     if stage=='datagen':
         from ..simulation.ik import validate_solver,validate_failure_policy
         options={**options,'ik_solver':validate_solver(options.get('ik_solver','scipy_ls')),'ik_failure_policy':validate_failure_policy(options.get('ik_failure_policy','strict'))}

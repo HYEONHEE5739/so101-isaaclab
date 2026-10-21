@@ -825,7 +825,8 @@ class WorkflowPanel(QWidget):
             self.workspace_path = str(w['root'])
             self.scene_cameras = tuple(w['profile']['cameras'])
             self.configure_stage()
-            from .tasks import workspace_key, recorded_scene
+            from .tasks import recorded_scene
+            from ..real2sim.workspaces.tasks import workspace_key
             key = json.dumps(workspace_key(w),sort_keys=True)
             selected = getattr(self,'object_selections',{}).get(key)
             if self.stage.currentData() in ('replay','annotate','datagen'):
@@ -1199,7 +1200,7 @@ class WorkflowPanel(QWidget):
         self.task_state.setVisible(stage in INSPECTION_STAGES)
         self.task_state.setMinimumHeight(0)
         self.task_state.setText('접근 / Grasp / 작업 성공 조건: 실행 대기')
-        self.task_selector.setVisible(stage == 'source')
+        self.task_selector.setVisible(stage in ('source', 'sim_eval', 'real_eval'))
         self.mode.setVisible(stage in SIM_STAGES); self.main_form.labelForField(self.mode).setVisible(stage in SIM_STAGES)
         descriptions = {'source': 'Leader로 조작 · 저장/다음 또는 리셋 · Episode/Reset Time은 초 단위',
                         'replay': '기록된 episode 재현 · 카메라/관절 오차 확인',

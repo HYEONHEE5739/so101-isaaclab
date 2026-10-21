@@ -204,7 +204,7 @@ def build_scene(workspace=None, width=320, height=240, timestep=.002, decimation
     if task_definition is not None or active_object_ids is not None or w.get('scene_configuration') or reset is not None:
         if workspace is None:
             raise ValueError('Task Definition requires a published workspace')
-        from ..workflow.tasks import configured
+        from ..real2sim.workspaces.tasks import configured
         w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco',reset=reset)
     p, task = w['profile'], w['task']
     builder_scene = bool(w.get('manifest', {}).get('builder'))

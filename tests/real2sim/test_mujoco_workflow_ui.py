@@ -485,7 +485,7 @@ def test_folder_selection_for_conversion_and_real_policy_ignores_sim_engine_filt
 def test_object_selection_persisted_per_workspace_and_not_overwritten_by_replay(panel,monkeypatch):
     import copy
     from PyQt6.QtCore import Qt
-    from soarm101_lab.workflow.tasks import workspace_key
+    from soarm101_lab.real2sim.workspaces.tasks import workspace_key
     from soarm101_lab.workflow import ui
     w=ui.load(panel.workspace_path)
     selector=panel.task_selector
@@ -660,7 +660,7 @@ def test_source_uses_common_execution_and_keyboard(panel, tmp_path, backend):
 def test_lerobot_training_is_independent_of_selected_engine(panel, tmp_path, monkeypatch, backend, architecture):
     from soarm101_lab.workflow import operations
     from soarm101_lab.workflow import episodes
-    from soarm101_lab.workflow.tasks import selected
+    from soarm101_lab.real2sim.workspaces.tasks import selected
     from soarm101_lab.so101_dataset_contract import JOINT_SPACE
     monkeypatch.setattr(operations, 'require_compatible', lambda *args: None)
     monkeypatch.setattr(operations, 'coordinate_contract', lambda *args: {'action_space': JOINT_SPACE})
@@ -870,3 +870,32 @@ def test_rejected_validation_never_switches_silently_to_another_dataset(panel):
     panel._ready_future=(panel._ready_generation,result);panel._poll_ready_check()
     assert panel.validation_input.findData('invalid')<0 and panel.validation_input.findData('valid')>0
     assert panel.validation_input.currentData() is None
+
+
+@pytest.mark.parametrize('stage', ['sim_eval', 'real_eval'])
+@pytest.mark.parametrize('architecture', ['act', 'smolvla', 'minivla'])
+def test_evaluation_task_editor_visible_and_instruction_forwarded(panel, stage, architecture):
+    from soarm101_lab.real2sim.storage import atomic
+    from soarm101_lab.workflow import ui
+    atomic(panel.registry.root / 'artifacts/evaluation_policy.json', {
+        'id': 'evaluation_policy', 'type': 'policy', 'path': str(panel.registry.root / 'model'),
+        'workspace': ui.metadata(ui.load(panel.workspace_path)), 'created_at': 2,
+        'format': {'type': architecture}, 'tasks': panel.task_selector.selection()})
+    panel.refresh()
+    if stage == 'real_eval':
+        panel.section.setCurrentIndex(panel.section.findData('real_eval'))
+    else:
+        panel.stage.setCurrentIndex(panel.stage.findData(stage))
+    panel.inputs.setCurrentIndex(panel.inputs.findData('evaluation_policy'))
+    panel.sync_tasks()
+    selector = panel.task_selector
+    assert panel.stage.currentData() == stage
+    assert not selector.isHidden()
+    assert selector.pick.isEnabled() and selector.target.isEnabled() and selector.instruction.isEnabled()
+    text = 'Pick the selected block and place it in the selected cup.'
+    selector.instruction.setText(text)
+    selector.instruction.textEdited.emit(text)
+    tasks = panel.stage_options(require_name=False)['tasks']
+    assert tasks[0]['language_instruction'] == text
+    assert tasks[0]['pick_object_id'] == selector.pick.currentText()
+    assert tasks[0]['target_object_id'] == selector.target.currentText()

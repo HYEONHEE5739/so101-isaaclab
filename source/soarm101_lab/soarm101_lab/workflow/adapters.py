@@ -8,77 +8,12 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from .dataset import as_pose7,cartesian_actions
-from .mimic import GenerationStopped,configuration
+from ..utils.transforms import as_pose7
+from ..data import recording
+from ..simulation.control import GenerationStopped
+from .mimic import configuration
 from ..real2sim.workspaces.grasp import StableGrasp, HOLD_SECONDS, RELATIVE_DRIFT_M
 from ..so101_joint_mapping import JOINTS
-
-
-class EpisodeBuffer:
-    """One environment owns numeric rows and two bounded MP4 streams."""
-    def __init__(self,adapter,output):
-        self.adapter=adapter;self.output=Path(output);self.rows=[];self.video=None;self.initial=None
-        self.metrics=defaultdict(float);self.queue_peak=0
-
-    def abort(self):
-        if self.video is not None:
-            self.video.abort()
-            self.metrics['encoding_s']+=sum(w.encoding_seconds for w in self.video.writers.values())
-            self.queue_peak=max(self.queue_peak,max((w.queue_peak for w in self.video.writers.values()),default=0))
-            self.video=None
-        self.rows=[]
-
-    def begin(self):self.abort();self.initial=self.adapter.initial_state()
-
-    def append(self,joints,target,observation=None,images=None):
-        from ..utils.async_video_writer import VideoEpisode
-        a=self.adapter
-        if self.video is None:self.video=VideoEpisode(self.output,a.hz,18)
-        t=time.perf_counter();state=a.state() if observation is None else observation
-        self.metrics['observation_s']+=time.perf_counter()-t
-        t=time.perf_counter();images=a.images() if images is None else images;self.metrics['render_s']+=time.perf_counter()-t
-        a.last_images=images
-        t=time.perf_counter();self.video.append({k+'_cam':v for k,v in images.items()})
-        self.metrics['video_enqueue_s']+=time.perf_counter()-t
-        self.queue_peak=max(self.queue_peak,max((v._queue.qsize() for v in self.video.writers.values()),default=0))
-        self.rows.append({'state':state,'joint_target':np.array(joints,copy=True),'eef_target':np.array(target,copy=True),
-            'grasp':bool(a.tracker.completed),'place':bool(a.place_success()),'ik':a.last_ik})
-
-    def finish(self,attrs):
-        if not self.rows or self.video is None:raise ValueError('No completed episode frames')
-        n=len(self.rows);a=self.adapter;states=[r['state'] for r in self.rows]
-        q=np.array([s['joint_pos'] for s in states]);targets=np.array([r['joint_target'] for r in self.rows])
-        ee=np.array([s['eef_pose'] for s in states]);goals=np.array([r['eef_target'] for r in self.rows])
-        ts=np.arange(n,dtype=np.float64)/a.hz
-        objects={name:np.array([s['object_poses'][name] for s in states]) for name in states[0]['object_poses']}
-        b=a.base_world;world={name:as_pose7(b@value) for name,value in objects.items()}
-        values={'actions':cartesian_actions(goals,ee[0],targets[:,5]),'joint_targets':targets,'action_timestamp':ts,
-            'obs':{'timestamp':ts[:,None],'policy':{'joint_pos':q,'ee_state':as_pose7(ee)},
-                'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
-                    'object_pose':objects,'subtask_term_signals':{'grasp':np.array([r['grasp'] for r in self.rows],dtype=np.uint8)[:,None]}},
-                'camera_timestamps':{name:ts for name in a.camera_names}},'initial_state':self.initial}
-        if all(r.get('ik') is not None for r in self.rows):
-            values['ik']={key:np.asarray([r['ik'][key] for r in self.rows]) for key in
-                ('ik_converged','ik_candidate_applied','ik_held','ik_invalid_candidate','ik_invalid_command','ik_numerical_failure',
-                 'ik_position_error_mm','ik_orientation_error_deg','ik_success','ik_duration_ms','ik_iterations_or_evaluations','position_error_mm',
-                 'orientation_error_deg','joint_limit_violation','common_pose_passed','command_applied')}
-            values['ik']['candidate_joint_rad']=np.asarray([r['ik']['fitted_joint_rad'] for r in self.rows])
-            values['ik']['failure_reason']=np.asarray([r['ik']['failure_reason'].encode() for r in self.rows],dtype='S64')
-        events={key:np.array([r[key] for r in self.rows],dtype=np.uint8)[:,None] for key in ('grasp','place')}
-        if a.check_success():events['place'][-1]=1
-        values['obs']['events']=events
-        indices={key:int(np.flatnonzero(signal)[0]) for key,signal in events.items() if np.any(signal)}
-        if not np.any(events['grasp']):
-            values['obs']['datagen_info']['subtask_term_signals']={}
-        if 'grasp' in indices and 'place' in indices:
-            attrs={**attrs,'annotation':json.dumps({'schema':'so101.common-subtasks/1','frame_count':n,**indices,
-                'method':attrs.get('annotation_method','stable_contact_replay'),
-                'timing':'first pre-step observation with event; final post-step placement mapped to last action'})}
-        else:
-            attrs={k:v for k,v in attrs.items() if k!='annotation'}
-        t=time.perf_counter();specs=self.video.finish(n);self.metrics['video_finalize_s']+=time.perf_counter()-t
-        videos={name:{**spec,'file':str((self.video.folder/spec['file']).resolve())} for name,spec in specs.items()}
-        return values,attrs,videos
 
 
 class _RecorderProtocol:
@@ -95,7 +30,7 @@ class SimulationAdapter:
         if require_standard_cameras and self.camera_names!=['side','wrist']:raise ValueError('Common collection requires Side and Wrist')
         self.cfg=configuration(workspace['task']['pick'],workspace['task']['place'],seed)
         self.base_world=np.asarray(workspace['profile']['robot_base']['T_world'])
-        self.buffer=EpisodeBuffer(self,output);self.recorder_manager=_RecorderProtocol(self)
+        self.buffer=recording.EpisodeBuffer(output,hz,self.base_world,self.camera_names);self.recorder_manager=_RecorderProtocol(self)
         self.scene=SimpleNamespace(get_state=lambda is_relative=True:self.initial_state())
         self.obs_buf={};self.reset_count=0;self.step_index=0;self.pending_pose=None;self.metrics=defaultdict(float)
         self.ik_solver="scipy_ls";self.ik_failure_policy="strict";self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
@@ -187,7 +122,7 @@ class SimulationAdapter:
         self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
         self.grasp_reference=None;self.grasp_command=None;self.release_commanded=False;self.loss_steps=0;self.drop_step=None
         self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.workspace['task']['pick']]['dimensions_m'])
-        self.buffer.begin();self.obs_buf={}
+        self.buffer.begin(self.initial_state());self.obs_buf={}
         state=self.state()
         self.initial_configuration={'joint_rad':state['joint_pos'].tolist(),
             'object_poses_base':{k:v.tolist() for k,v in state['object_poses'].items()}}
@@ -203,6 +138,16 @@ class SimulationAdapter:
         result=np.eye(4);result[:3,3]=previous[:3,3]+delta[:3]
         result[:3,:3]=Rotation.from_rotvec(delta[3:]).as_matrix()@previous[:3,:3]
         return result
+
+    def record_frame(self,joints,target,observation=None,images=None):
+        """Capture the pre-command boundary; the buffer only receives snapshots."""
+        t=time.perf_counter();state=self.state() if observation is None else observation
+        self.buffer.metrics['observation_s']+=time.perf_counter()-t
+        t=time.perf_counter();images=self.images() if images is None else images
+        self.buffer.metrics['render_s']+=time.perf_counter()-t
+        self.last_images=images
+        self.buffer.append(joints,target,state,images,grasp=self.tracker.completed,
+            place=self.place_success(),ik=self.last_ik)
 
     def close(self):self.buffer.abort()
 
@@ -263,7 +208,7 @@ class MujocoAdapter(SimulationAdapter):
     def step(self,actions):
         self._check_stop();q=actions[0].detach().cpu().numpy()
         if hasattr(self,'control'):self.control.before_step(self.worker_index,self.stop)
-        self.buffer.append(q,self.pending_pose)
+        self.record_frame(q,self.pending_pose)
         t=time.perf_counter();self.backend.step(q);self.metrics['physics_s']+=time.perf_counter()-t
         self.previous=q.copy();self.update_grasp();self.obs_buf={}
         if getattr(self,'preview',None):self.preview(self)
@@ -314,7 +259,7 @@ class IsaacAdapter(SimulationAdapter):
         self.native.obs_buf=self.native.observation_manager.compute();self.previous=q[0].cpu().numpy().copy();self.after_reset()
 
     def state(self):
-        from .robot_preview import pose_matrix
+        from ..utils.transforms import pose_matrix
         robot=self.native.scene['robot'];i=self.index
         root=robot.data.root_pose_w[i].detach().cpu().numpy();base=pose_matrix(root)
         tool=robot.body_names.index('tool0');ee=pose_matrix(torch.cat([robot.data.body_link_pos_w[i,tool],robot.data.body_link_quat_w[i,tool]]).cpu().numpy())
@@ -349,5 +294,5 @@ class IsaacAdapter(SimulationAdapter):
         finally:self.record_ik(self.last_ik)
         return torch.as_tensor(command,dtype=torch.float64)
 
-    def before_batch_step(self,command):self.buffer.append(command,self.pending_pose)
+    def before_batch_step(self,command):self.record_frame(command,self.pending_pose)
     def after_batch_step(self,command):self.previous=np.array(command,copy=True);self.update_grasp();self.obs_buf={}

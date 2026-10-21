@@ -5,7 +5,8 @@ import pytest
 from test_workspaces import published
 from soarm101_lab.real2sim.workspaces.package import load, metadata
 from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
-from soarm101_lab.workflow.tasks import catalog, validate, configured, stamp_file, episode_definition, evaluation_metrics
+from soarm101_lab.workflow.tasks import stamp_file, episode_definition, evaluation_metrics
+from soarm101_lab.real2sim.workspaces.tasks import catalog, validate, configured
 from soarm101_lab.workflow.artifacts import Registry
 from soarm101_lab.workflow.operations import Operations
 

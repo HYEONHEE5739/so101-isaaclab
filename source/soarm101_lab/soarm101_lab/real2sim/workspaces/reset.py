@@ -5,7 +5,8 @@ import numpy as np
 
 def source_workspace(workspace, resume=None):
     """New collection allows edge-touching XY; resumed collection keeps its recorded policy."""
-    from ...workflow.tasks import configured, recorded_scene
+    from ...workflow.tasks import recorded_scene
+    from .tasks import configured
     if resume:
         from ...workflow.artifacts import inspect_artifact
         reset = recorded_scene(inspect_artifact('source',resume),workspace)['reset']

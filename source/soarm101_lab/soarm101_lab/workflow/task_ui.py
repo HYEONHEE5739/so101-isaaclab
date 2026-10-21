@@ -2,7 +2,7 @@
 import copy
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QFormLayout, QComboBox, QLineEdit, QListWidget, QListWidgetItem, QLabel
-from .tasks import catalog, object_ids, active_objects, workspace_key
+from ..real2sim.workspaces.tasks import catalog, object_ids, active_objects, workspace_key
 
 
 class TaskSelector(QWidget):

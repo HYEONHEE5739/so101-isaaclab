@@ -18,7 +18,7 @@ def test_datagen_resume_rejects_video_folder_before_worker_output(tmp_path):
 def test_datagen_resume_requires_actual_generated_result(tmp_path,monkeypatch):
     import pytest
     from soarm101_lab.workflow import data_resume
-    from soarm101_lab.workflow.dataset import SCHEMA
+    from soarm101_lab.data.episodes import SCHEMA
     path=tmp_path/'data.hdf5';path.touch()
     item={'format':SCHEMA,'env_args':{}}
     monkeypatch.setattr(data_resume,'inspect_artifact',lambda *args:item)

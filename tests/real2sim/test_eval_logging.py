@@ -45,7 +45,8 @@ def test_real_policy_execution_uses_simple_urdf_path_without_real_devices(tmp_pa
     import torch
     from types import SimpleNamespace
     from pathlib import Path
-    from soarm101_lab.workflow import evaluation,tasks,presentation
+    from soarm101_lab.workflow import evaluation,presentation
+    from soarm101_lab.real2sim.workspaces import tasks
     from soarm101_lab.real2sim import hardware,cameras
     from soarm101_lab import so101_dataset_contract
     from soarm101_lab.so101_joint_mapping import JOINTS,DEFAULT_MAPPER

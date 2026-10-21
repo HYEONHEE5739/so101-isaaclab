@@ -11,6 +11,21 @@ import torch
 from soarm101_lab.workflow import annotation,unified,adapters,episodes
 
 
+def test_paused_physics_control_cancellation_releases_waiter():
+    from soarm101_lab.simulation.control import PhysicsControl, GenerationStopped
+    control=PhysicsControl(1);stop=threading.Event();started=threading.Event();result=[]
+    control.update(True)
+    def wait():
+        started.set()
+        try:control.before_step(0,stop)
+        except GenerationStopped:result.append('cancelled')
+        else:result.append('advanced')
+    worker=threading.Thread(target=wait,daemon=True);worker.start()
+    assert started.wait(1)
+    stop.set();worker.join(timeout=2)
+    assert not worker.is_alive() and result==['cancelled']
+
+
 @pytest.mark.parametrize('count',[1,2,4,8])
 @pytest.mark.parametrize('with_controls',[False,True])
 @pytest.mark.parametrize('reject',[False,True])
@@ -68,7 +83,7 @@ def test_vector_refills_short_episode_preserves_order_and_holds_idle(count,tmp_p
         failed=reject and ordinal in (1,4)
         row=dict(episode=name,steps=a.step_index,physical_replay_passed=not failed,annotation_accepted=False,category='grasp_failure' if failed else 'success')
         return row,None if failed else ({},attrs,{})
-    monkeypatch.setattr(annotation,'replay_episode',replay)
+    monkeypatch.setattr(annotation,'annotate_episode',replay)
     writer=SimpleNamespace(commit=lambda v,a,s,**kw:commits.append(a['ordinal']) or f'demo_{len(commits)-1}')
     result=annotation.run(primary,reader,tmp_path,bridge,writer,count,input_validated=True)
     if controller:

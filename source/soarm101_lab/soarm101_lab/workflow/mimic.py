@@ -10,6 +10,7 @@ import time
 import numpy as np
 import torch
 
+from ..simulation.control import PhysicsControl
 from .mimic_reference.config import MimicEnvCfg,SubTaskConfig
 from .mimic_reference.data_generator import DataGenerator
 from .mimic_reference.datagen_info_pool import DataGenInfoPool
@@ -84,25 +85,6 @@ def source_pool(env,source,names=None):
     pool.load_from_dataset_file(str(source),select_demo_keys=names)
     if pool.num_datagen_infos==0:raise ValueError('No annotated Source in Mimic pool')
     return pool
-
-
-class GenerationStopped(Exception):pass
-
-
-class PhysicsControl:
-    def __init__(self,num_envs):
-        self.condition=threading.Condition();self.paused=False;self.tokens={i:0 for i in range(num_envs)}
-    def update(self,paused,single_step=False):
-        with self.condition:
-            self.paused=paused
-            if single_step:self.tokens={i:1 for i in self.tokens}
-            self.condition.notify_all()
-    def before_step(self,index,stop):
-        with self.condition:
-            while self.paused and self.tokens[index]==0:
-                if stop.is_set():raise GenerationStopped()
-                self.condition.wait(.03)
-            if self.paused:self.tokens[index]-=1
 
 
 class GenerationScheduler:

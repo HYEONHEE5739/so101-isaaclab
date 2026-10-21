@@ -10,7 +10,8 @@ import torch
 
 from soarm101_lab.workflow.evaluation import EvaluationProgress, validate_evaluation_options
 from soarm101_lab.workflow.policy import batch_actions, MiniVLAJointPolicy
-from soarm101_lab.workflow.dataset import DatasetWriter, EpisodeDataset, validate_dataset
+from soarm101_lab.workflow.dataset import EpisodeDataset, validate_dataset
+from soarm101_lab.data.episodes import DatasetWriter
 from test_common_mimic import episode
 
 
@@ -61,7 +62,7 @@ def test_batch_pre_post_normalization_and_slot_order():
 
 
 def test_minivla_batch_shares_weights_and_isolates_chunks_and_guards():
-    from soarm101_lab.learning.minivla.policy import ActionGuard
+    from soarm101_lab.workflow.policy import ActionGuard
     class Model:
         cfg=SimpleNamespace(cameras=['side'],horizon=3,replan_steps=2)
         def predict(self,images,state,instruction):
@@ -98,16 +99,17 @@ def evaluated_dataset(tmp_path,episode):
 
 
 def test_outcomes_keep_video_trajectory_and_failed_labels(evaluated_dataset):
-    from soarm101_lab.workflow.curation import analyze,EpisodeReader
+    from soarm101_lab.workflow.curation import analyze
+    from soarm101_lab.data.episodes import EpisodeReader
     rows=analyze(evaluated_dataset)
     assert {r['name'] for r in rows}=={'success/demo_0','failure/demo_0'}
     assert {r['recorded_success'] for r in rows}=={True,False}
     for row in rows:
-        reader=EpisodeReader(row)
-        payload=reader.frame(2,['side','wrist'])
-        assert len(payload['ee'])==3 and set(payload['rgb_frames'])=={'side','wrist'}
-        assert row['xy'] is not None or row['object_telemetry']['cube']
-        assert validate_dataset(EpisodeDataset(row['data_ref']['path']))['episodes']==1
+        with EpisodeReader(row) as reader:
+            payload=reader.frame(2,['side','wrist'])
+            assert len(payload['ee'])==3 and set(payload['rgb_frames'])=={'side','wrist'}
+            assert row['xy'] is not None or row['object_telemetry']['cube']
+            assert validate_dataset(EpisodeDataset(row['data_ref']['path']))['episodes']==1
     failure=next(r for r in rows if not r['recorded_success'])
     assert failure['failure_reason']=='drop_failure'
 
@@ -130,7 +132,7 @@ def test_legacy_evaluation_folder_is_discovered_without_rewriting(evaluated_data
 
 
 def test_failed_evaluation_playback_does_not_bypass_source_gate(evaluated_dataset,tmp_path):
-    from soarm101_lab.workflow.unified import replay
+    from soarm101_lab.workflow.replay import run as replay
     reader=EpisodeDataset(evaluated_dataset/'failure/dataset.hdf5')
     values,_,_=reader.episode(reader.names[0])
     class Adapter:

@@ -13,6 +13,7 @@ import torch
 from .config import MiniVLAConfig, ARCHITECTURE_SCHEMA
 from .data import Episodes, collate, dataset_identity
 from .head import ActionHead
+from . import checkpoint as checkpoint_format
 
 def seed_all(seed):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -25,24 +26,9 @@ def compute_loss(backbone, head, batch, augment=False):
     features=backbone(batch['images'], batch['instruction'], augment=augment)
     return head.loss(features,batch['state'],batch['actions'],batch['mask'])
 
-def adapter_state(backbone):
-    if backbone.cfg.adaptation=='frozen': return None
-    from peft import get_peft_model_state_dict
-    return {k:v.detach().cpu() for k,v in get_peft_model_state_dict(backbone.model).items()}
-
-def restore_adapter(backbone, state):
-    if state is not None:
-        from peft import set_peft_model_state_dict
-        set_peft_model_state_dict(backbone.model,state)
-
-def require_architecture(checkpoint):
-    if checkpoint.get('architecture_schema') != ARCHITECTURE_SCHEMA:
-        raise ValueError('Legacy/incompatible MiniVLA checkpoint: expected '+ARCHITECTURE_SCHEMA+'; retraining is required')
-
-
 def validate_resume(checkpoint, cfg, stats, control_hz, identity=None):
     """Allow extending total steps while retaining model, dataset and optimizer contracts."""
-    require_architecture(checkpoint)
+    checkpoint_format.require_architecture(checkpoint)
     if identity is not None and checkpoint.get('dataset_identity') is not None and checkpoint['dataset_identity']!=identity:
         raise ValueError('Resume dataset byte identity mismatch')
     saved = asdict(MiniVLAConfig.from_dict(checkpoint['config'])); current = asdict(cfg)
@@ -58,7 +44,7 @@ def validate_resume(checkpoint, cfg, stats, control_hz, identity=None):
 
 def save_checkpoint(path, cfg, head, backbone, stats, optimizer, step, best, stale, hz, identity=None):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix('.tmp')
-    torch.save({'architecture_schema':ARCHITECTURE_SCHEMA,'config':asdict(cfg),'head':head.state_dict(),'adapter':adapter_state(backbone),
+    torch.save({'architecture_schema':ARCHITECTURE_SCHEMA,'config':asdict(cfg),'head':head.state_dict(),'adapter':checkpoint_format.adapter_state(backbone),
                 'statistics':stats,'optimizer':optimizer.state_dict(),'step':step,'best':best,'stale':stale,
                 'control_hz':hz,'dataset_identity':identity},tmp)
     tmp.replace(path)
@@ -93,7 +79,7 @@ def main():
     if list(out.glob('*.pt')) or list((out/'checkpoints').glob('*.pt')):
         raise FileExistsError('Checkpoints already exist: choose a fresh --out; --resume reads the original checkpoint')
     if args.resume:
-        previous=torch.load(args.resume,map_location='cpu',weights_only=True);require_architecture(previous)
+        previous=torch.load(args.resume,map_location='cpu',weights_only=True);checkpoint_format.require_architecture(previous)
         if cfg.revision=='main':cfg.revision=previous['config']['revision']
         if previous.get('dataset_identity') is None and not train.manifest.get('storage'):
             # Historical canonical checkpoints need their original full Workflow artifact hash.
@@ -120,7 +106,7 @@ def main():
     if args.resume:
         ck=torch.load(args.resume,map_location='cpu',weights_only=True)
         validate_resume(ck, cfg, stats, train.manifest['control_hz'],identity)
-        head.load_state_dict(ck['head']); restore_adapter(backbone,ck['adapter']); opt.load_state_dict(ck['optimizer'])
+        head.load_state_dict(ck['head']); checkpoint_format.restore_adapter(backbone,ck['adapter']); opt.load_state_dict(ck['optimizer'])
         start=ck['step']; best=ck['best']; stale=ck['stale']
         previous_root=Path(args.resume).parent
         if previous_root.name=='checkpoints':previous_root=previous_root.parent

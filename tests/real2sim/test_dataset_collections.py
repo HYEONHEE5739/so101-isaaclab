@@ -279,7 +279,8 @@ def test_stage_output_uses_flat_annotation_and_other_stage_groups(collection,sta
 
 
 def test_origin_copy_preserves_common_mp4_bytes_and_lineage(tmp_path,episode):
-    from soarm101_lab.workflow.dataset import DatasetWriter,EpisodeDataset
+    from soarm101_lab.workflow.dataset import EpisodeDataset
+    from soarm101_lab.data.episodes import DatasetWriter
     values,attrs,videos,args,contract=episode
     source=tmp_path/'old/source.hdf5'
     with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)

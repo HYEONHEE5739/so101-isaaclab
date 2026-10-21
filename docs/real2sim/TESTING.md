@@ -1,3 +1,137 @@
+# 기능 단위 리팩터링 검증 — 2026-10-19 (완료 경계별 기록)
+
+## 2026-10-19 단위6c-1 — Replay/Annotation 공통 물리 재생
+
+보고서: `outputs/workflow_validation/functional_refactor/playback/REPORT.md`. 최신6b-3 이후 dirty tree를 baseline_files.json과 before/에 보존했다. Source/Reader/Writer·DataGen/평가·물리·IK·보정·학습·UI의 보호 package140파일 bytes와 Annotation scheduler/수동 출력 AST를 확인했다. API/기존 callback 연결만 교체했고 engine/공식 Mimic 알고리즘은 변경하지 않았다.
+
+```bash
+task_repo=/home/hyeonhee/soarm_isaaclab/soarm101_lab
+task_python=/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python
+task_playback_evidence="$task_repo/outputs/workflow_validation/functional_refactor/playback"
+cd "$task_playback_evidence/test_cwd"
+env PYTHONPATH="$task_repo/source/soarm101_lab" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 "$task_python" -m pytest "$task_repo/tests/real2sim/test_playback.py" "$task_repo/tests/real2sim/test_common_mimic.py" "$task_repo/tests/real2sim/test_parallel_annotation.py" "$task_repo/tests/real2sim/test_parallel_sim_eval.py" "$task_repo/tests/real2sim/test_recording_io.py" "$task_repo/tests/real2sim/test_data_resume.py" "$task_repo/tests/real2sim/test_annotation_diagnostics.py" -q -rs -k 'not diagnostics_remain_in_raw_log'
+task_usd=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311
+env QT_QPA_PLATFORM=offscreen OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab:$task_repo/.venv-real2sim-ui/lib/python3.11/site-packages:$task_usd" LD_LIBRARY_PATH="$task_usd/bin" "$task_python" -m pytest "$task_repo/tests/real2sim/test_presentation.py" "$task_repo/tests/real2sim/test_mujoco_workflow_ui.py" "$task_repo/tests/real2sim/test_workflow_view.py" "$task_repo/tests/real2sim/test_parallel_sim_eval.py::test_evaluation_setting_and_curation_review" "$task_repo/tests/real2sim/test_annotation_diagnostics.py" -q
+```
+
+실행 로그는 native121PASS/Qt1skip·Qt1제외, GUI107PASS와 별도진단3PASS다. GUI 결합 명령은 두 로그의 suite를 함께 재현한다. baseline93PASS→동일회귀84PASS인 차이는 실사용 없는 Replay cache 전용9검사를 삭제했기 때문이며 실패를 숨기지 않는다. 주요 회귀 실행 시 새 Playback21개는 command/None 순서·before state 재사용·step exception/Interrupt·Manual mark/missing/skip/pause·실제 iterator를 쓰는1/2/4/8 vector refill/Cancel·Worker 소유 engine 미종료를 검사한다. 기존32조합 scheduler fixture는 pause/single-step/resume/idle hold·입력 순서 저장·실패 집계를 계속 검사한다.
+
+마지막에 독립 Stage import2개를 보강하고 test_playback/test_architecture_contracts의 공개 계약45개를 별도로 통과했다(final_interfaces.log). 앞선 회귀와 합산하지 않는다.
+
+native 실행은 이전 검증의 annotated4episode를 읽기 전용으로 재생했다. 원본 Dataset/MP4 fingerprint·좌표/Scene 계약을 유지했고 새 출력은 이 검증 폴더에만 만든다. 아래 재실행 예시는 **아직 존재하지 않는 고유 label**을 써야 한다. baseline prefix가 snapshot_before이면 보존한 옛 annotation/unified 본문을 검증 process 안에서만 읽고, 이후 최신 구현을 실행한다. Production 구 import·Wrapper를 복구하지 않는다.
+
+```bash
+env PYTHONPATH="$task_repo/source/soarm101_lab" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 "$task_python" "$task_playback_evidence/native_compare.py" snapshot_before_recheck_mujoco2 mujoco 2 annotate
+env PYTHONPATH="$task_repo/source/soarm101_lab" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 "$task_python" "$task_playback_evidence/native_compare.py" after_recheck_mujoco2 mujoco 2 annotate
+env PYTHONPATH="$task_repo/source/soarm101_lab" OPENBLAS_NUM_THREADS=1 "$task_python" "$task_playback_evidence/compare_native.py" snapshot_before_recheck_mujoco2 after_recheck_mujoco2
+# 실제 Isaac 검증은 별도 process/동일 conda에서 backend=isaac,count=2로 실행했다.
+# native.close 전에 trace를 게시하여 Kit 종료 후에도 evidence를 남긴다.
+env PYTHONPATH="$task_repo/source/soarm101_lab" OPENBLAS_NUM_THREADS=1 "$task_python" "$task_playback_evidence/benchmark_steps.py"
+"$task_python" "$task_playback_evidence/audit.py"
+"$task_python" "$task_playback_evidence/dependency_audit.py"
+```
+
+MuJoCo Annotation1·2env 각4episode/1524step과 명시Replay432step, Isaac Annotation2env4episode를 비교했다. Native engine trace/numeric·grasp/place/attrs·state 호출 수는 정확 일치한다. MuJoCo MP4도8개씩bytes일치. Isaac은 옛 구현 두 번부터MP4가 달라 baseline/전후3048frame을 전부 streaming decode했다. PTS/count 동일, 영상별 최대평균 절대RGB차0.832/255→0.815/255이며 전후video bitwise일치는 주장하지 않는다. 물리·renderer seed나 성공 기준을 바꿔 영상을 맞추지 않았다.
+
+순수5000frame/6회 iterator 중앙5.350→5.528µs(+0.178µs), 실제 Annotation processing MuJoCo1 12.265→12.391초·순차MuJoCo2 10.724→11.293초·Isaac2 71.147→71.726초다. trace/영상/physics 포함 단일paired값이며 성능 개선/장시간 동등성 보장이 아니다. 다른 검사와 겹친 초기MuJoCo2 측정도 별도로 보존했다. cProfile은 Physics/render/I/O 없는 합성 iterator만 측정한다.
+
+core_initial의 잘못된 test경로/cwd, interfaces의 USD 누락, core_final의 nativeQt1실패는 최종환경검사와 구분해 남겼다. 첫Isaac 비교의 byte일치 실패 후 실제 기존반복/RGB 차이를 별도 기록했다. 기존 SDK visual/seed·unknown provenance 경고를 수정하지 않았다. 실제Isaac Replay1env·양 엔진4/8env·수동developer창·실물·장시간/강제전원종료는 미검증이다. Commit/Push/의존성 설치는 하지 않는다.
+
+## 2026-10-19 단위6b-3 — Source EpisodeWriter 책임 분리
+
+보고서: `outputs/workflow_validation/functional_refactor/source_writer/REPORT.md`. 기존 dirty-tree baseline과 실제 코드/test를 읽은 뒤6b-3만 교체했다. 기존 Reader/Common Writer/Buffer AST·보호 package134파일·Source 외 물리/학습/과거 Partition 함수 보존을 확인했다. 사용자 결과를 검증 출력으로 사용/수정하지 않는다.
+
+아래는 검증용 cwd에서 실행하는 최종 Source 회귀 명령이다. 기존 conda/Qt/USD만 사용하고 dependency는 설치하지 않는다.
+
+```bash
+task_repo=/home/hyeonhee/soarm_isaaclab/soarm101_lab
+task_python=/home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python
+task_source_evidence="$task_repo/outputs/workflow_validation/functional_refactor/source_writer"
+cd "$task_source_evidence/test_cwd"
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab" "$task_python" -m pytest "$task_repo/tests/real2sim/test_source_recording.py" "$task_repo/tests/real2sim/test_recording_io.py" "$task_repo/tests/real2sim/test_minivla_integration.py" "$task_repo/tests/real2sim/test_active_objects.py" "$task_repo/tests/real2sim/test_rgb_video.py" -q -k 'not ui_filters_objects'
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab" "$task_python" -m pytest "$task_repo/tests/real2sim/test_episode_reader.py" "$task_repo/tests/real2sim/test_parallel_annotation.py" "$task_repo/tests/real2sim/test_parallel_sim_eval.py" "$task_repo/tests/real2sim/test_eval_logging.py" "$task_repo/tests/real2sim/test_training_resume.py" "$task_repo/tests/real2sim/test_architecture_contracts.py" -q -rs
+task_usd=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311
+env QT_QPA_PLATFORM=offscreen OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab:$task_repo/.venv-real2sim-ui/lib/python3.11/site-packages:$task_usd" LD_LIBRARY_PATH="$task_usd/bin" "$task_python" -m pytest "$task_repo/tests/real2sim/test_mujoco_workflow_ui.py" "$task_repo/tests/real2sim/test_artifact_storage.py" "$task_repo/tests/real2sim/test_parallel_sim_eval.py::test_evaluation_setting_and_curation_review" -q
+```
+
+최종 Source/소유권/영상58PASS·Qt1개 제외(별도GUI에서통과), 경계82PASS/Qt1skip(위GUI130PASS에서통과). 별도 Curation/분할/목록과 active object UI76PASS다. 초기 저장/Resume76PASS 이후 새로운 수명/FK/외부 staging 검사를 추가해 최종58개를 실행했다. 겹치는 suite는 합산하지 않는다. 기존 unknown provenance 경고는 유지한다.
+
+`compare_source.py before`는 변경 전 실제 EpisodeWriter로 이미 실행한 baseline이며 현재 삭제된 import를 복구해 실행하지 않는다. 해당 원본 snapshot과 before/after payload를 보존했다. `compare_resume.py`는 검증 process 안에서만 snapshot의 원래 Writer를 읽어 비교하고 production에 옛 export를 만들지 않는다.
+
+```bash
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab" "$task_python" "$task_source_evidence/verify_results.py"
+env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH="$task_repo/source/soarm101_lab" "$task_python" "$task_source_evidence/benchmark_recording.py"
+"$task_python" "$task_source_evidence/audit.py"
+"$task_python" "$task_source_evidence/dependency_audit.py"
+```
+
+실제 MuJoCo/EGL seed1047/1048 각형식2×8step의 numeric·RGB·MP4 bytes/PTS·metadata/순서 비교다. Resume2+1episode의 실제 MuJoCo·합성RGB 비교도 별도 보존한다. append benchmark는 합성64×48/128frame/7회, 기존 bounded encoder 포함·Physics/render/save 제외이며 중앙0.07668→0.07667ms/frame이다. cold EGL 한 번의 저장 시간 차이를 speedup으로 해석하지 않는다.
+
+초기 caller 편집 경로/구 import 실패(source_core.log), A/B harness의 Legacy.close 호출(after_source.log), Qt 없는 실행(ui_native_environment_attempt.log), spy fixture의 camera 목록 누락/잘못된 Qt 제외(source_final.log)는 보존하고 최종 *_verified 로그와 구분한다. audit harness의 상수 정규화는 실제 코드가 아닌 검사만 수정했다. 실제 Isaac PhysX·실물 장치·장시간·디스크 강제 종료·GPU 학습은 미실행이다. 실제 장치 검증은 별도 명시 요청이 필요하다.
+
+## 2026-10-19 단위6b-1/2 — Common Writer / 명시적 recording Buffer
+
+보고서: `outputs/workflow_validation/functional_refactor/dataset_writer/REPORT.md`. 최신 미커밋 기준을 보존하고6a Reader 클래스 AST 동일성을 검사했다. 이번6b의 완료 범위는 Common Writer/validator와 전달값 Buffer까지이며 Source Legacy Writer/FK/normalization 전체 분리는 남아 있다.
+
+```bash
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_recording_io.py tests/real2sim/test_rgb_video.py tests/real2sim/test_common_mimic.py tests/real2sim/test_parallel_annotation.py tests/real2sim/test_parallel_sim_eval.py tests/real2sim/test_data_resume.py -q -rs
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_episode_reader.py tests/real2sim/test_curation.py tests/real2sim/test_source_partitions.py tests/real2sim/test_dataset_collections.py tests/real2sim/test_parallel_sim_eval.py::test_evaluation_setting_and_curation_review -q
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_mujoco_workflow_ui.py tests/real2sim/test_artifact_storage.py tests/real2sim/test_settings_form.py tests/real2sim/test_workflow_view.py -q
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python outputs/workflow_validation/functional_refactor/dataset_writer/benchmark_preparation.py
+PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python outputs/workflow_validation/functional_refactor/dataset_writer/audit.py
+```
+
+최종 storage111PASS/Qt1skip(뒤 GUI84개 중 실제 통과), Reader/Curation/평가UI84PASS·WorkflowUI158PASS. 별도 Source/Resume6PASS, Native 경계53PASS와 Qt 누락1실패→해당GUI1PASS. 오래된 provenance 경고는 보존했으며 중복 suite 합산 없음.6b-1/2는 각113PASS/1skip로 단계별 검사한 뒤 다음 변경을 진행했다.
+
+Native 명령은 검증 소유 cwd에서 실행해 기존 MUJOCO_LOG를 보존했다.
+
+```bash
+# cwd: outputs/workflow_validation/functional_refactor/dataset_writer/test_cwd
+PYTHONPATH=/home/hyeonhee/soarm_isaaclab/soarm101_lab/source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest /home/hyeonhee/soarm_isaaclab/soarm101_lab/tests/real2sim/test_minivla_integration.py -k 'source or recorded_state_actions or resume or front_camera' -q
+PYTHONPATH=/home/hyeonhee/soarm_isaaclab/soarm101_lab/source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest /home/hyeonhee/soarm_isaaclab/soarm101_lab/tests/real2sim/test_active_objects.py /home/hyeonhee/soarm_isaaclab/soarm101_lab/tests/real2sim/test_eval_logging.py /home/hyeonhee/soarm_isaaclab/soarm101_lab/tests/real2sim/test_training_resume.py /home/hyeonhee/soarm_isaaclab/soarm101_lab/tests/real2sim/test_architecture_contracts.py -q
+```
+
+`verify_storage.py`는 보존한 이전 본문과 실제 새 Writer/Buffer를 실제 MuJoCo·기존 agent 소유 Workspace·검은 RGB fixture로 비교했다.12step/qpos/hash·numeric28개·attrs8개·영상 bytes와 adopt inode가 같다. 비교 payload는 충돌 방지상 같은 경로에 재실행하지 않는다. 원래 결과를 삭제하지 말고 새 검증 위치에서 비교할 것.
+
+준비3문장만의 fixture profile은2만frame/pose10개·7회. float64 peak33.30→12.80MB, 중앙15.19→5.93ms. 전체 저장/Physics/영상 처리량 측정이 아니다. 실제 Isaac PhysX/실물/학습 정책/장시간은 미검증이며 dependency/사용자 데이터/Commit/Push 변경 없음. 초기 호출자 import SyntaxError·renderer none RGB 요청 실패는 수정한 최종 로그와 구분해 보존했다.
+
+
+## 2026-10-19 기능 단위6a — Curation 공통 Reader
+
+실제 계약/수명·전후 측정은 `outputs/workflow_validation/functional_refactor/dataset_reader/REPORT.md`를 따른다. 추가 구현 품질 기준은 설계안 상단에 반영했다. 전체 Dataset I/O·Registry/Training 전환은 아직 완료하지 않았다.
+
+```bash
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_episode_reader.py tests/real2sim/test_rgb_video.py tests/real2sim/test_parallel_annotation.py tests/real2sim/test_common_mimic.py tests/real2sim/test_parallel_sim_eval.py tests/real2sim/test_data_resume.py tests/real2sim/test_training_resume.py tests/real2sim/test_architecture_contracts.py -q -rs
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_curation.py tests/real2sim/test_source_partitions.py tests/real2sim/test_mujoco_workflow_ui.py tests/real2sim/test_workflow_view.py -q
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_parallel_sim_eval.py::test_evaluation_setting_and_curation_review -q
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python outputs/workflow_validation/functional_refactor/dataset_reader/benchmark.py before
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python outputs/workflow_validation/functional_refactor/dataset_reader/benchmark.py after
+PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python outputs/workflow_validation/functional_refactor/dataset_reader/audit.py
+```
+
+계약144PASS/Qt1skip(별도 GUI1PASS)·UI136PASS. 최종 group handle 재사용 뒤 Reader/RGB12PASS·Curation/평가 UI36PASS로 영향을 받는 경로를 다시 확인했다. 순차 측정7회·80프레임 open1520→1·중앙0.383→0.071초·프레임 배열880개 정확 일치. 합성 HDF5/Qt/MP4 fixture이며 사용자 데이터·실물·새 엔진 rollout·학습/GPU/전체 UI cold/warm 성능 검증이 아니다. OS page cache를 통제하지 않았다. 초기/최종 로그를 보존했고 suite를 합산하지 않는다. 의존성을 설치/변경하지 않았다.
+
+
+전체 리팩터링 완료 검사가 아니다. Control/Guard/Checkpoint 핵심/정규화/Workspace Task만 실제 이동했다.
+Registry/Group 정책/전용 MiniVLA 학습 연결은 남아 있다. 공식 ACT/SmolVLA Trainer는 바꾸지 않았다.
+상세 근거: `outputs/workflow_validation/functional_refactor/REPORT.md`, `behavior_audit.json`, `model_comparison.json`, `dependency_comparison.json`.
+
+기존 lerobot-arena Python3.11을 사용한다. 프로젝트 root에서 아래 명령을 실행한다. 실제 장치를 열지 않는 fixture 검사다.
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_parallel_annotation.py tests/real2sim/test_common_mimic.py -q
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/minivla/test_data_and_runtime.py tests/minivla/test_act_baseline.py tests/minivla/test_lerobot_direct.py tests/real2sim/test_training_resume.py tests/real2sim/test_architecture_contracts.py -q
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_mujoco_workflow_ui.py tests/real2sim/test_settings_form.py tests/real2sim/test_dataset_collections.py tests/real2sim/test_task_definitions.py tests/real2sim/test_presentation.py tests/real2sim/test_live_scene_selection.py tests/real2sim/test_artifact_storage.py -q
+QT_QPA_PLATFORM=offscreen PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest tests/real2sim/test_source_partitions.py -k test_curation_ -q
+```
+
+최초3단위 검사에서 모듈명/기존인수 충돌5개를 수정해28개 재통과했다. native 통합의188개는 통과했고,
+PyQt 없는6개 UI 검사는 위 마지막 명령으로6개 모두 통과했다. UI196개, 전처리/모델 CPU60개는 겹치는 suite이므로 합산하지 않는다.
+공통 Task의 MuJoCo 실제 before/after 비교는 같은 임시 Workspace의23배열/30step/hash·Scene이 정확히 같다.
+새 Isaac/실물/GPU 학습·실제 pretrained MiniVLA 추론·현재 UI 성능 수치는 측정하지 않았다.
+
+---
+
 # SO-101 Real2Sim Testing Guide
 
 ## Workflow UI 응답 지연 수정 — 2026-10-19
@@ -465,3 +599,27 @@ MuJoCo/Source/Replay 검사와 USD/Workspace 검사는 별도 프로세스에서
 정확한 명령/최종 결과/Isaac 렌더 범위/실패 이력은
 `outputs/workflow_validation/unified_joint_control/REPORT.md`를 따른다.
 공통 계약과 구동 heuristic의 한계는 [JOINT_CONTROL.md](JOINT_CONTROL.md)를 따른다.
+
+## 6c-2a 진행 상태 — 2026-10-20
+
+기록 Scene의 Isaac 생성만 `simulation/environment.py:create_isaac`로 이동하고 unified._native_isaac를 삭제했다. Worker가 identity 검사에 사용한 Workspace를 재사용한다. 105개 계약 회귀 통과, 설정/reset/close 본문은 입력 치환 외 AST 동일. 실제 Isaac baseline부터 GPU OOM으로 실패하여 native A/B 및 성능은 미검증이다. MuJoCo 생성, Source/평가의 별도 Isaac 경로, make_config의 기존 Presentation 간접 참조는 남아 있다. **6c-2 전체 완료 아님.** 근거: `outputs/workflow_validation/functional_refactor/environment/REPORT.md`.
+
+## 2026-10-21 — 6c-2a 실제 엔진 검증 완료
+
+동일 Isaac2환경/seed1047/Dataset4episode로 기준2회·현재1회 실행 완료. Workspace load2→1, 생성/reset/close1/5/1, 설정·초기/물체속도 포함29trace·148numeric·Annotation 순서 정확 일치. RGB3048frame PTS/count 동일, pixel 평균차 최대 기준0.83587/255·전후0.84249/255로 bitwise/통계적 비열등성 주장은 하지 않는다. GPU peak 전체약4.96GiB, OOM 없음. 예외 close는 별도13Fixture통과. Production/테스트 파일hash 불변, 사용자자료/설정·Commit/Push 변경 없음. 근거 `outputs/workflow_validation/functional_refactor/environment/verification_20261021/REPORT.md` 및 summary.json. **6c-2a 구현+실제 검증 완료; 6c-2 전체 미완료.** 이전 GPU OOM/검증 보류 문구는 역사 기록이다. 다음 구조 변경은 수행하지 않음.
+
+## 6c-2b — 명시 Preview/관측 설정
+
+근거: [보고서](../../outputs/workflow_validation/functional_refactor/presentation_config/REPORT.md). baseline은 직전6c-2a 최신 dirty tree이며 비교 tool은 해당 검증 폴더에만 있다. native와 기존 Qt/USD process를 분리한다. 의존성 설치는 없다.
+
+```sh
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_environment_factory.py tests/real2sim/test_common_mimic.py tests/real2sim/test_parallel_annotation.py tests/real2sim/test_playback.py tests/real2sim/test_mujoco_backend.py
+```
+
+이 suite는 초기122PASS였다. 명시 bool/fresh import/전달 검사 보강 뒤 test_environment_factory+test_common_mimic72PASS, 병렬평가 포함41PASS/Qt1skip도 확인했다. Qt/USD 기존 환경에서 presentation/workflow/mujoco_workflow_ui/environment_factory145PASS, runtime/workspaces42PASS, parallel_sim_eval16PASS. 겹치는 suite는 합산하지 않는다. 초기 native pxr 미지정 collection과 to_dict(partial) 검증도구 실패는 로그에 보존했다.
+
+실제2환경 Annotation A/B는 `presentation_config/verification/run.py <새 label>`을 별도 process에서 순서대로 실행한다. before로 시작하는 label은 해당 검증 폴더 baseline 모듈만 복원한다. 기존 before_b/before_c/after_a가 완료 근거다. 환경수·해상도·Physics 변경은 없다. `compare_native.py before_b after_a`, `compare_rgb.py`, 상위 summarize.py로 숫자/계측/RGB를 구분한다. 기존 결과 폴더는 덮어쓰지 않는다.
+
+`run_evaluation.py before_eval/after_eval`은 실제 Isaac2환경·6step·측정 자세 유지 검증 정책이며 성공률 검사가 아니다. Production 정책/학습모델을 변경하지 않는다. `config_invariance.py`는 실제 SDK 설정만32번 비교하고 native 환경을 생성하지 않는다. MuJoCo `mujoco_compare.py before/after`는 실제EGL/compiled20배열·30step·Side/Wrist/Overview RGB를 비교했다. 재현 시 고정 출력 이름 충돌을 피하도록 검증 폴더를 복사해 사용한다.
+
+새 Production 환경 생성/관측/read/render 호출은 없다. 픽셀 차이는 기준 반복에서도 발생했으며 PTS/count·숫자 동등성과 별도로 보고한다. 수동 developer 창의 실제 조작, 실물, Source 새수집/장시간DataGen·학습정책 품질은 이번 실검증 범위가 아니다.

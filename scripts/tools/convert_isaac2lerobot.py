@@ -292,7 +292,7 @@ with h5py.File(input_file, "r") as h5:
         definition = episode_definition(demo, source_env_args)
         if definition is None:
             import os
-            from soarm101_lab.workflow.tasks import TASK_ENV
+            from soarm101_lab.real2sim.workspaces.tasks import TASK_ENV
             if os.environ.get(TASK_ENV):
                 choices = json.loads(Path(os.environ[TASK_ENV]).read_text())['tasks']
                 if len(choices) != 1:

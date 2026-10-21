@@ -108,7 +108,7 @@ def test_real_policy_accepts_different_follower_hash_but_requires_full_model_evi
 def test_mujoco_model_residual_applied_once_without_target_adjustment(bound_workspace,tmp_path,active):
     from soarm101_lab.simulation.mujoco_backend import MujocoBackend
     from soarm101_lab.workflow.robot_preview import RobotPreview
-    from soarm101_lab.workflow.tasks import configured
+    from soarm101_lab.real2sim.workspaces.tasks import configured
     w,mappings=bound_workspace;w=configured(w,active_object_ids=active,backend='mujoco')
     c=precision.simulation_configuration(w,mappings=mappings,hardware_role='leader',backend='mujoco')
     env=MujocoBackend(w,render_backend='none',active_object_ids=active,simulation_configuration=c)

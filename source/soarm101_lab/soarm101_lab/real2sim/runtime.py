@@ -335,7 +335,7 @@ class Runtime:
         if self.live_workspace:
             from .workspaces.environment import make_config
             ec = make_config(self.live_workspace, self.args.device,
-                             task_definition=getattr(self, 'task_definition', None),simulation=getattr(self,'simulation_configuration',None))
+                             task_definition=getattr(self, 'task_definition', None),simulation=getattr(self,'simulation_configuration',None), overview_camera=False, grasp_observations=False)
         else:
             ec = SO101TeleopEnvCfg()
         ec.scene.num_envs = 1

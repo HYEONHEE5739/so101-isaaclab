@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ...so101_joint_mapping import JOINTS as MODEL_JOINTS, POLICY_UNITS
+from .policy import RobotPreprocessor
 
 JOINTS = list(MODEL_JOINTS)
 UNITS = list(POLICY_UNITS)
@@ -172,18 +173,6 @@ def fit_statistics(manifest, output, cameras=('side',)):
         stats[key+'_std'] = np.maximum(np.sqrt(m2/n), .01).tolist()
     Path(output).write_text(json.dumps(stats, indent=2))
     return stats
-
-class RobotPreprocessor:
-    def __init__(self, stats):
-        self.stats = stats
-        for key in ('state', 'action'):
-            mean=np.asarray(stats[key+'_mean']); std=np.asarray(stats[key+'_std'])
-            if mean.shape!=(6,) or std.shape!=(6,) or not np.isfinite(mean).all() or not np.isfinite(std).all() or np.any(std<=0):
-                raise ValueError('Invalid statistics')
-    def normalize(self, x, key):
-        return (np.asarray(x, np.float32)-np.asarray(self.stats[key+'_mean'], np.float32))/np.asarray(self.stats[key+'_std'], np.float32)
-    def denormalize(self, x, key='action'):
-        return np.asarray(x)*np.asarray(self.stats[key+'_std'])+np.asarray(self.stats[key+'_mean'])
 
 class Episodes(Dataset):
     def __init__(self, manifest, stats, cfg, split):
