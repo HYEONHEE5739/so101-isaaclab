@@ -114,4 +114,3 @@ def episode_arrays(e, cameras, hz, reader=None):
         if mask.dtype != np.bool_ or not np.isfinite(a).all() or np.any((a[mask] < 0) | (a[mask] > 1)):
             raise ValueError('Grounding must be finite normalized UV, with bool mask')
     return arrays
-
