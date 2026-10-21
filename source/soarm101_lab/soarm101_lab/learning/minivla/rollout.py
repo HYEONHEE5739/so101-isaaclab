@@ -9,7 +9,7 @@ from .policy import MiniVLA
 from ...workflow.policy import ActionGuard
 from ...simulation.mujoco_backend import MujocoSO101
 from .evaluate import summarize_episode, aggregate
-from .train import seed_all
+from lerobot.utils.random_utils import set_seed as seed_all
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--checkpoint',required=True)

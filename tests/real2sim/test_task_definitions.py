@@ -7,7 +7,7 @@ from soarm101_lab.real2sim.workspaces.package import load, metadata
 from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
 from soarm101_lab.workflow.tasks import stamp_file, episode_definition, evaluation_metrics
 from soarm101_lab.real2sim.workspaces.tasks import catalog, validate, configured
-from soarm101_lab.workflow.artifacts import Registry
+from soarm101_lab.workflow.dataset import inspect_dataset
 from soarm101_lab.workflow.operations import Operations
 
 
@@ -29,7 +29,7 @@ def make_source(tmp_path, w, definitions):
     import h5py
     file = tmp_path / 'source.hdf5'
     with h5py.File(file, 'w') as h:
-        data = h.create_group('data'); data.attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': coordinate_contract(w)})
+        data = h.create_group('data'); data.attrs['env_args'] = json.dumps({'workspace':metadata(w),'so101_coordinates':coordinate_contract(w),'control_dt':1/30,**({'scene_configuration':configured(w,definitions[0])['scene_configuration']} if len(definitions)==1 and definitions[0] else {})})
         for i, definition in enumerate(definitions):
             e = data.create_group('demo_' + str(i))
             for name in w['task']['dynamic']:e.create_group('initial_state/rigid_object/'+name)
@@ -44,25 +44,25 @@ def make_source(tmp_path, w, definitions):
 
 def test_episode_tasks_inherit_and_cannot_relabel(published, tmp_path):
     w = load(published[3]); definition = catalog(w)[3]; definition['language_instruction'] = 'My custom instruction'
-    file = make_source(tmp_path, w, [definition]); r = Registry(tmp_path / 'registry')
-    artifact = r.register('source', file)
+    file=make_source(tmp_path,w,[definition]);r=tmp_path/'workflow'
+    artifact=inspect_dataset('source',file)
     assert artifact['tasks'] == [definition]
-    op = Operations(r)
-    plan = op.plan('annotate', artifact, str(w['root']), {}, run_dir=tmp_path)
+    op=Operations(root=r)
+    plan = op.plan('annotate',str(file),str(w['root']),{'storage_name':'annotated'}, run_dir=tmp_path)
     assert plan['options']['tasks'] == [definition] and plan['options']['headless']
     assert plan['argv'][2:4]==['scripts/real2sim/workflow.py','worker']
-    with pytest.raises(ValueError, match='relabel'):
-        op.plan('annotate', artifact, str(w['root']), {'tasks': [catalog(w)[0]]}, run_dir=tmp_path)
-    convert = op.plan('convert', artifact, str(w['root']), {'repo_id': 'test/task', 'task': 'ignored'}, run_dir=tmp_path)
+    with pytest.raises(ValueError, match='inherit'):
+        op.plan('annotate',str(file), str(w['root']), {'tasks':[catalog(w)[0]],'storage_name':'bad'}, run_dir=tmp_path)
+    convert = op.plan('convert',str(file),str(w['root']),{'repo_id':'test/task','task':'ignored','storage_name':'converted'}, run_dir=tmp_path)
     assert convert['options']['task'] == 'My custom instruction'
 
 
 def test_no_silent_task_guess_and_mixed_datagen_rejected(published, tmp_path):
-    w = load(published[3]); r = Registry(tmp_path / 'registry')
-    file = make_source(tmp_path, w, [None]); a = r.register('source', file)
-    assert Operations(r).readiness('annotate', a, str(w['root']))[0] == 'NOT_READY'
-    file.unlink(); file = make_source(tmp_path, w, catalog(w)[:2]); a = r.register('source', file)
-    assert Operations(r).readiness('annotate', a, str(w['root']))[0] == 'NOT_READY'
+    w=load(published[3]);r=tmp_path/'workflow'
+    file = make_source(tmp_path, w, [None]); a=str(file)
+    assert Operations(root=r).readiness('annotate', a, str(w['root']))[0] == 'NOT_READY'
+    file.unlink(); file = make_source(tmp_path, w, catalog(w)[:2]); a=str(file)
+    assert Operations(root=r).readiness('annotate', a, str(w['root']))[0] == 'NOT_READY'
 
 
 def test_generated_episode_metadata_and_metrics(published, tmp_path):
@@ -108,12 +108,12 @@ def test_shared_selector_presets_editing_and_evaluation_scope(published):
 
 
 def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatch):
-    from soarm101_lab.workflow.policy import train
+    from soarm101_lab.learning.training import train
     from soarm101_lab.so101_dataset_contract import JOINT_SPACE
     w = load(published[3]); definitions = catalog(w)[:2]
     definitions[1]['language_instruction'] = 'User-edited training instruction'
-    dataset = tmp_path / 'dataset'; (dataset / 'meta').mkdir(parents=True)
-    (dataset / 'meta/info.json').write_text(json.dumps({'repo_id':'local/test','features':{'observation.images.side_cam':{},'observation.images.wrist_cam':{}}}))
+    from test_learning_interfaces import dataset as make_dataset
+    dataset=make_dataset(tmp_path/'dataset',task_definitions=definitions,workspace=metadata(w))
     output = tmp_path / 'training'; checkpoint = output / 'checkpoints/last/pretrained_model'
     def fake_train(*args, **kwargs):
         assert '--policy.path=lerobot/smolvla_base' in args[0]
@@ -124,7 +124,10 @@ def test_training_checkpoint_keeps_task_metadata(published, tmp_path, monkeypatc
     monkeypatch.setattr('subprocess.run', fake_train)
     artifact = {'path': str(dataset), 'coordinates': {**coordinate_contract(w), 'action_space': JOINT_SPACE},
                 'workspace': metadata(w), 'tasks': definitions,'provenance':{'episode_review':{'0':{'annotation':{'grasp':1,'place':3},'recorded_success':True}}}}
-    train(artifact, {'architecture': 'smolvla', 'steps': 1}, output)
+    from soarm101_lab.so101_dataset_contract import write_contract
+    write_contract(dataset,artifact['coordinates'])
+    (dataset/'workflow_provenance.json').write_text(json.dumps({**artifact['provenance'],'task_definitions':definitions,'workspace':metadata(w)}))
+    train(dataset, {'architecture': 'smolvla', 'steps': 1}, output)
     provenance = json.loads((checkpoint / 'workflow_provenance.json').read_text())
     assert provenance['task_definitions'] == definitions
     assert provenance['episode_review']==artifact['provenance']['episode_review']

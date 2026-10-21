@@ -32,8 +32,8 @@ def test_export_preserves_source_and_full_episode(tmp_path):
     assert read_contract(src)==read_contract(out)
     with h5py.File(out) as f:
         assert len(f['data'])==2 and f['data'].attrs['total']==4
-        assert f['data/demo_0/actions'][0,0]==2
-        assert f['data/demo_0'].attrs['curation_source_episode']=='demo_2'
+        assert f['data/demo_0/actions'][0,0]==0
+        assert f['data/demo_0'].attrs['curation_source_episode']=='demo_0'
         assert 'obs/camera' in f['data/demo_0']
     with pytest.raises(ValueError):export_subset(src,out,['demo_0'])
 
@@ -41,9 +41,8 @@ def test_export_preserves_source_and_full_episode(tmp_path):
 def test_ui_select_exclude_and_restore(tmp_path):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
-    d=CurationDialog(Registry(tmp_path))
+    d=CurationDialog(tmp_path)
     d.rows=[dict(name='demo_0',task_id='a',xy=[0,0],flags=['長'],duration=1,stop_fraction=.2,jitter=1,gripper_jitter=1,
                  ee=[[0,0,0],[.01,0,.01]],actions=[[0]*6,[1]*6])]
     d.scatter.rows=d.rows;d.select(0);d.toggle()
@@ -242,10 +241,9 @@ def test_synchronized_ui_rgb_events_seek_and_responsive_worker(tmp_path,motion_w
     from PyQt6.QtCore import QTimer
     from soarm101_lab.workflow.curation import analyze
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
     writer=motion_canonical(tmp_path,motion_workspace,motion_workspace['task']['dynamic']);rows=analyze(writer.root)
-    d=CurationDialog(Registry(tmp_path/'registry'));d.error=lambda error:pytest.fail(str(error));d.loaded(str(writer.root),rows);d.show()
+    d=CurationDialog(tmp_path/'workflow');d.error=lambda error:pytest.fail(str(error));d.loaded(str(writer.root),rows);d.show()
     wait_qt(lambda:d.reader is not None and d.frame_job is None and d.job is None)
     assert set(d.trajectory.row['object_paths'])==set(motion_workspace['task']['dynamic'])
     assert d.trajectory.robot is not None and not d.rgb.pixmap().isNull()
@@ -283,10 +281,9 @@ def test_ui_reader_release_waits_for_inflight_frame(tmp_path,motion_workspace,mo
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.curation import analyze
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
     writer=motion_canonical(tmp_path,motion_workspace,['cube_red'])
-    rows=analyze(writer.root);d=CurationDialog(Registry(tmp_path/'registry'))
+    rows=analyze(writer.root);d=CurationDialog(tmp_path/'workflow')
     d.error=lambda error:pytest.fail(str(error));d.loaded(str(writer.root),rows);d.show()
     wait_qt(lambda:d.reader is not None and d.frame_job is None and d.job is None)
     old=d.reader;entered=threading.Event();release=threading.Event();original=old.frame
@@ -313,14 +310,13 @@ def test_ui_reader_release_waits_for_inflight_frame(tmp_path,motion_workspace,mo
         release.set();wait_qt(lambda:d.frame_job is None and d.job is None);d.close()
 
 def test_export_registry_convert_review_and_immutable_input(tmp_path,motion_workspace,monkeypatch):
-    from soarm101_lab.workflow.artifacts import Registry,fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
     from soarm101_lab.workflow import episodes
     from soarm101_lab.workflow.operations import Operations
     from soarm101_lab.real2sim.workspaces import package
     writer=motion_canonical(tmp_path,motion_workspace,['cube_red','cube_blue']);before=fingerprint(writer.root)
-    curated=export_subset(writer.root,tmp_path/'curated',['episode_0000']);r=Registry(tmp_path/'registry')
-    artifact=r.register('annotated',curated)
-    plan=Operations(r).plan('convert',artifact,str(motion_workspace['root']),{'backend':'mujoco','repo_id':'local/review'},run_dir=tmp_path/'run')
+    curated=export_subset(writer.root,tmp_path/'curated',['episode_0000'])
+    plan=Operations(root=tmp_path/'workflow').plan('convert',str(curated),str(motion_workspace['root']),{'backend':'mujoco','repo_id':'local/review','storage_name':'review'},run_dir=tmp_path/'run')
     assert plan['options']['repo_id']=='local/review'
     def converter(argv,**kwargs):
         source=argv[argv.index('--input_file')+1];root=Path(argv[argv.index('--root')+1]);root.mkdir()
@@ -408,26 +404,6 @@ def test_distribution_boundary_matches_reset_and_robot_view(tmp_path,motion_work
     plot.close()
 
 
-@pytest.mark.parametrize('latest_kind',['source','annotated','datagen'])
-def test_open_latest_uses_latest_completed_data_in_current_workspace(tmp_path,monkeypatch,latest_kind):
-    from PyQt6.QtWidgets import QApplication
-    from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
-    app=QApplication.instance() or QApplication([])
-    registry=Registry(tmp_path/'registry');workspace={'workspace_id':'current','version':2};artifacts=[]
-    for i,(kind,status,ws,exists) in enumerate([
-        ('source','SUCCEEDED',workspace,True),('annotated','SUCCEEDED',workspace,True),
-        ('datagen','SUCCEEDED',workspace,True),(latest_kind,'SUCCEEDED',workspace,True),
-        ('datagen','SUCCEEDED',{'workspace_id':'other'},True),('annotated','FAILED',workspace,True),
-        ('datagen','SUPERSEDED',workspace,True),('source','SUCCEEDED',workspace,False)]):
-        path=tmp_path/str(i)
-        if exists:path.mkdir()
-        artifacts.append(dict(type=kind,status=status,workspace=ws,path=str(path),created_at=i))
-    monkeypatch.setattr(registry,'all',lambda:artifacts)
-    d=CurationDialog(registry,workspace=workspace);opened=[];monkeypatch.setattr(d,'load_data',opened.append)
-    d.open_latest();assert opened==[str(tmp_path/'3')]
-    d.workspace={'workspace_id':'empty'};d.open_latest();assert len(opened)==1
-    d.close()
 
 
 def test_unified_picker_accepts_file_and_dataset_folder(tmp_path):
@@ -436,41 +412,15 @@ def test_unified_picker_accepts_file_and_dataset_folder(tmp_path):
     app=QApplication.instance() or QApplication([])
     folder=tmp_path/'canonical';folder.mkdir()
     for name in ('manifest.json','project_provenance.json'):(folder/name).write_text('{}')
-    file=tmp_path/'source.hdf5';file.touch()
+    import h5py
+    file=tmp_path/'source.hdf5'
+    with h5py.File(file,'x') as h:h.create_group('data')
     for path in (folder,file):
         picker=DatasetPicker(None,str(tmp_path));picker.selectFile(str(path));picker.accept()
         assert picker.result()==QDialog.DialogCode.Accepted and picker.selectedFiles()==[str(path)]
         picker.close()
 
 
-@pytest.mark.parametrize('latest_kind',['annotated','datagen'])
-def test_workflow_entry_opens_latest_stage_and_labels_artifact(tmp_path,motion_workspace,monkeypatch,latest_kind):
-    from PyQt6.QtWidgets import QApplication
-    from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
-    app=QApplication.instance() or QApplication([])
-    writer=motion_canonical(tmp_path,motion_workspace,['cube_red']);registry=Registry(tmp_path/'registry')
-    registry.register('source',writer.root)
-    selected=export_subset(writer.root,tmp_path/'annotated',['episode_0000'])
-    registry.register('annotated',selected)
-    if latest_kind=='datagen':
-        selected=export_subset(selected,tmp_path/'generated',['episode_0000'])
-        registry.register('datagen',selected)
-    monkeypatch.setattr(ui,'Registry',lambda:registry)
-    panel=ui.WorkflowPanel(lambda *args:None)
-    panel.task_selector.configure(motion_workspace,'source',active_object_ids=['cube_red'])
-    opened=[]
-    def inspect_dialog(dialog):
-        # Process the entry point's queued automatic load, including both frame decoders.
-        wait_qt(lambda:dialog.path is not None and dialog.reader is not None and dialog.job is None and dialog.frame_job is None)
-        assert dialog.path==str(selected) and dialog.workspace==panel.task_selector.workspace_identity
-        assert dialog.kind==latest_kind and dialog.dataset_label.text().startswith('Annotation' if latest_kind=='annotated' else 'DataGen')
-        assert set(dialog.trajectory.payload['rgb_frames'])=={'side','wrist'}
-        opened.append(dialog.path);dialog.close();return 0
-    monkeypatch.setattr(CurationDialog,'exec',inspect_dialog)
-    panel.open_curation();assert opened==[str(selected)]
-    panel.timer.stop();panel.close()
 
 
 @pytest.mark.parametrize('storage',['canonical','hdf5'])
@@ -480,7 +430,7 @@ def test_annotation_markers_jump_to_exact_observation_and_clear(tmp_path,motion_
     from PyQt6.QtTest import QTest
     from soarm101_lab.workflow.curation import analyze
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry,fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
     app=QApplication.instance() or QApplication([])
     if storage=='canonical':
         path=motion_canonical(tmp_path,motion_workspace,['cube_red']).root
@@ -496,7 +446,7 @@ def test_annotation_markers_jump_to_exact_observation_and_clear(tmp_path,motion_
             h['data/demo_0/obs/timestamp'][:,0]=times
             h['data/demo_0'].attrs['annotation']=json.dumps({'transport':6})
     before=fingerprint(path);rows=analyze(path)
-    d=CurationDialog(Registry(tmp_path/'registry'));d.error=lambda error:pytest.fail(str(error));d.show();d.loaded(str(path),rows)
+    d=CurationDialog(tmp_path/'workflow');d.error=lambda error:pytest.fail(str(error));d.show();d.loaded(str(path),rows)
     wait_qt(lambda:d.job is None and d.frame_job is None and d.reader is not None)
     assert not d.analysis_panel.isVisible() and set(d.event_buttons)==set(events)
     assert [m['time'] for m in d.timeline.markers]==pytest.approx([times[i]-times[0] for i in events.values()])
@@ -572,3 +522,17 @@ def test_scatter_split_colors_keep_flag_outline_and_exclusion():
     assert any(picture.pixelColor(round(points[1].x())+dx,round(points[1].y())+dy).name()=='#efb467'
                for dx in range(-6,7) for dy in range(-6,7))
     plot.close()
+
+
+def test_legacy_copy_failure_rolls_back_manifest(tmp_path,motion_workspace,monkeypatch):
+    import shutil
+    from soarm101_lab.utils.artifact_identity import fingerprint
+    writer=motion_canonical(tmp_path,motion_workspace,['cube_red']);before=fingerprint(writer.root)
+    target=tmp_path/'failed';copy=shutil.copytree
+    def fail(source,dest,*args,**kwargs):
+        copy(source,dest,*args,**kwargs)
+        raise OSError('copy interrupted')
+    monkeypatch.setattr(shutil,'copytree',fail)
+    with pytest.raises(OSError,match='copy interrupted'):export_subset(writer.root,target,['episode_0000'])
+    assert not target.exists() and not list(tmp_path.glob('.failed*'))
+    assert fingerprint(writer.root)==before

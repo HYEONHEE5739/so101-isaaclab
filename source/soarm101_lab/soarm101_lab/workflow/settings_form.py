@@ -54,13 +54,6 @@ class SettingsForm(QWidget):
         if getattr(self, 'allowed_keys', None) is not None:
             keys = [k for k in keys if k in self.allowed_keys]
         self.extra = {k: v for k, v in values.items() if k not in keys}
-        advanced_layout=None
-        if getattr(self,'minivla',False):
-            from ..learning.minivla.config import MODEL_ROOT
-            note=QLabel('기본 모델 설정: '+str(MODEL_ROOT/'configs/default.json')+'\n체크한 학습 값 > 선택한 JSON > 기본 JSON. 체크를 해제하면 JSON 값을 사용합니다.\nValidation: episode당 최대 8개 고정 시점 평균. 실제 loss만 기록합니다.');note.setWordWrap(True);self.layout_.addWidget(note)
-            toggle=QToolButton();toggle.setText('고급 모델 설정 / Legacy 호환');toggle.setCheckable(True)
-            advanced=QWidget();advanced_layout=QVBoxLayout(advanced);advanced.hide();toggle.toggled.connect(advanced.setVisible)
-            self.layout_.addWidget(toggle);self.layout_.addWidget(advanced)
         for key in keys:
             kind, default, description = FIELDS[key]
             if self.stage=='annotate' and key=='num_envs':
@@ -69,14 +62,11 @@ class SettingsForm(QWidget):
                 description='동시 평가 환경 수: 1, 2, 4, 8. Task당 평가 에피소드 수를 이 환경들이 나눠 실행합니다. 성공·실패 모두 저장합니다.'
             if self.stage=='sim_eval' and key=='episodes':
                 description='선택한 Task마다 모든 환경을 합쳐 완료할 전체 평가 에피소드 수입니다. 성공 수를 목표로 재시도하지 않습니다.'
-            if key=='batch_size' and getattr(self,'minivla',False):
-                default=8
-                description='한 번의 Forward/Backward와 optimizer 업데이트에 묶는 샘플 수. 신규 학습 기본 8, Accumulation 1입니다. Resume은 저장된 Batch/Accumulation을 유지합니다. OOM이면 실패하며 자동 축소·재시도하지 않습니다.'
             card = QWidget(); card.setObjectName('settingCard'); card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             box = QVBoxLayout(card)
             row = QHBoxLayout(); box.addLayout(row)
             label=('동시 주석 환경 수' if self.stage=='annotate' else '동시 평가 환경 수') if self.stage in ('annotate','sim_eval') and key=='num_envs' else LABELS.get(key,key)
-            enabled = QCheckBox('Batch Size' if key=='batch_size' and getattr(self,'minivla',False) else label)
+            enabled = QCheckBox(label)
             enabled.setToolTip(key)
             enabled.setChecked(key in values)
             row.addWidget(enabled, 1)
@@ -131,17 +121,11 @@ class SettingsForm(QWidget):
                 if value is None:
                     editor.setPlaceholderText('자동 기본값 사용 · 지정하려면 위 항목 체크')
                 editor.textChanged.connect(self.textChanged)
-            if key=='model_config':
-                browse=QPushButton('설정 JSON 선택');box.addWidget(browse)
-                def select_config(_,e=editor,c=enabled):
-                    path=QFileDialog.getOpenFileName(self,'MiniVLA 설정 JSON','','JSON (*.json)')[0]
-                    if path:c.setChecked(True);e.setText(path)
-                browse.clicked.connect(select_config)
             editor.setEnabled(enabled.isChecked())
             enabled.toggled.connect(editor.setEnabled)
             enabled.toggled.connect(self.textChanged)
             box.addWidget(editor); box.addWidget(help_label)
-            (advanced_layout if advanced_layout is not None and key in ('model_config','patience','legacy_group_split') else self.layout_).addWidget(card)
+            self.layout_.addWidget(card)
             self.editors[key] = enabled, editor, kind
         self.textChanged.emit()
 

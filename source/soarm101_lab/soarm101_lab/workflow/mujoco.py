@@ -8,66 +8,13 @@ import time
 
 import numpy as np
 
-from ..simulation.mujoco_backend import PolicyEnvironment
-from .episodes import grasp_tracker, subtask_signals, validate_training_inputs, training_coordinates
-from .worker_request import mujoco_request
+from ..simulation import environment as simulation_environment
+from .dataset import recording_provenance
+from .episodes import grasp_tracker, subtask_signals, training_coordinates
+from .worker_request import mujoco_request, prepare_mujoco
 from ..learning.minivla.config import MODEL_ROOT
 from ..real2sim.storage import atomic
 from ..real2sim.workspaces.package import ROOT, load, metadata
-from ..simulation.mjcf import RGB_WIDTH, RGB_HEIGHT
-
-
-def _environment(request, output, coordinates=None, hz=None):
-    options = request['options']
-    from ..real2sim.precision import simulation_configuration,calibration_status
-    recorded_contract = None
-    source = options.get('resume_data') or request.get('input') or request.get('checkpoint')
-    if isinstance(source, (str, Path)):
-        path = Path(source)
-        if path.is_file() and path.suffix in ('.hdf5','.h5'):
-            from ..so101_dataset_contract import read_contract
-            recorded_contract=read_contract(path)
-        elif (path/'project_provenance.json').is_file():
-            recorded_contract = _provenance(path).get('coordinate_contract')
-        elif (path/'so101_coordinates.json').is_file():
-            from ..so101_dataset_contract import read_contract
-            recorded_contract = read_contract(path)
-    w=load(request['workspace'])
-    from ..real2sim.workspaces.tasks import configured
-    w=configured(w,options.get('task_definition'),options.get('active_object_ids'),backend='mujoco')
-    if request.get('stage')=='source':
-        from ..real2sim.workspaces.reset import source_workspace
-        w=source_workspace(w,options.get('resume_data'))
-    elif recorded_contract and recorded_contract.get('simulation_model'):
-        w=configured(w,reset=recorded_contract['simulation_model'].get('scene_configuration',{}).get('reset'))
-    simulation=simulation_configuration(w,coordinates=recorded_contract,
-        mappings=options.get('_collection_mappings'),identity=options.get('identity_sim_for_validation',False),
-        backend='mujoco',scene_configuration=w['scene_configuration'],hardware_role='leader' if '_collection_mappings' in options else None)
-    print('[WORKFLOW] '+calibration_status(simulation),flush=True)
-    coords = coordinates or {}
-    physics_profile = options.get('physics_profile', 'isaac_matched')
-    if options.get('resume_data'):
-        previous_scene = _provenance(options['resume_data'])['scene']
-        physics_profile = previous_scene.get('physics_profile', 'legacy_urdf')
-    return PolicyEnvironment(workspace=request['workspace'], renderer=request['renderer'],
-                              control_hz=hz or options.get('control_hz', 30),
-                              width=options.get('width', RGB_WIDTH), height=options.get('height', RGB_HEIGHT),
-                              closed_rad=coords.get('gripper_closed_rad', options.get('gripper_closed_rad')),
-                              open_rad=coords.get('gripper_open_rad', options.get('gripper_open_rad')),
-                              measured_gripper_limits=coords.get('measured_gripper_limits_rad'),
-                              task_definition=options.get('task_definition'),
-                              full_workspace=options.get('full_workspace', True),
-                              viewer=options.get('mode') == 'developer', physics_profile=physics_profile,
-                              simulation_configuration=simulation,
-                              active_object_ids=options.get('active_object_ids'))
-
-
-def _provenance(dataset):
-    if Path(dataset).is_file():
-        from .dataset import EpisodeDataset
-        reader=EpisodeDataset(dataset)
-        return reader.args.get('legacy_provenance') or reader.args
-    return json.loads((Path(dataset) / 'project_provenance.json').read_text())
 
 
 def _preview(env, request, publish):
@@ -101,7 +48,7 @@ def _forbidden():
 
 def environment(request, output, publish, bridge):
     import psutil
-    with _environment(request, output) as env:
+    with simulation_environment.create_mujoco(**prepare_mujoco(request)) as env:
         publish = _preview(env, request, publish)
         physics_rss_mib = psutil.Process().memory_info().rss / 2**20
         env.reset(request['options'].get('seed', 0))
@@ -141,7 +88,7 @@ def source(request, output, publish, bridge):
     duration = float(options.get('episode_time_s', 20))
     if count < 1 or not np.isfinite(duration) or duration <= 0:
         raise ValueError('Positive episode count/duration required')
-    with _environment(request, output) as env:
+    with simulation_environment.create_mujoco(**prepare_mujoco(request)) as env:
         publish = _preview(env, request, publish)
         leader = Leader(None, options['port'], options.get('calibration_file_name', 'so101_leader.json'),
                         model_hash=selected_precision['urdf_sha256'] if selected_precision else None)
@@ -162,7 +109,7 @@ def source(request, output, publish, bridge):
             contract = coordinate_contract(request['workspace']) if request.get('workspace') else current_contract(MIMIC_SPACE)
             provenance['coordinate_contract'] = collection_coordinates(contract, mapper if selected_precision else None,env.backend.metadata.get('simulation_configuration'))
             if options.get('resume_data'):
-                previous=_provenance(options['resume_data']).get('coordinate_contract',{})
+                previous=recording_provenance(options['resume_data']).get('coordinate_contract',{})
                 if previous and 'simulation_model' not in previous:
                     # Keep a verified historical identity/legacy-mode contract unchanged.
                     provenance['coordinate_contract'].pop('simulation_model',None)
@@ -271,212 +218,6 @@ def source(request, output, publish, bridge):
                     finally:log_say('stop recording',blocking=False)
 
 
-def train(request, output):
-    from ..learning.minivla.config import MiniVLAConfig
-    from ..learning.minivla.data import Episodes
-    from ..utils.artifact_identity import fingerprint
-    dataset = Path(request['input'])
-    provenance = _provenance(dataset)
-    if request['options'].get('architecture', 'minivla') != 'minivla':
-        from .artifacts import inspect_artifact
-        from .policy import train as train_lerobot
-        child = dataset / 'lerobot'
-        artifact = dict(inspect_artifact('dataset', child), path=str(child), id='canonical-conversion')
-        model = Path(request['options'].get('resume_output', output / 'policy'))
-        train_lerobot(artifact, request['options'], model)
-        return {'passed': True, 'checkpoint': str(model / 'checkpoints/last/pretrained_model')}
-    from ..learning.minivla.config import training_config
-    cfg=training_config(request['config'],request['options'])
-    stats_path = dataset / 'statistics.json'
-    stats = json.loads(stats_path.read_text())
-    manifest = json.loads((dataset / 'manifest.json').read_text())
-    if not manifest.get('storage'):
-        for entry in manifest['episodes']:
-            outcome = json.loads((dataset / entry['path'] / 'outcome.json').read_text())
-            if outcome.get('validation_only'):
-                raise ValueError('Synthetic smoke data cannot be trained')
-    Episodes(dataset / 'manifest.json', stats, cfg, 'train')
-    Episodes(dataset / 'manifest.json', stats, cfg, 'val')
-    identity = fingerprint(dataset)
-    model = Path(request['options'].get('resume_output', output / 'policy'))
-    cfg.save(output / 'training_config.json')
-    argv = [sys.executable, '-m', 'soarm101_lab.learning.minivla.train', '--config', str(output / 'training_config.json'),
-            '--manifest', str(dataset / 'manifest.json'), '--stats', str(stats_path), '--out', str(model)]
-    if request['options'].get('resume_checkpoint'):
-        # Let the model's exact config/statistics guard enforce resume compatibility.
-        resume = Path(request['options']['resume_checkpoint'])
-        if resume.is_dir(): resume = resume / 'last.pt'
-        argv += ['--resume', str(resume)]
-    from ..real2sim.launcher import worker_environment
-    # The process group sends SIGINT to both this worker and its trainer. Let the
-    # trainer complete its atomic step/save before attaching policy provenance.
-    previous_sigint=signal.signal(signal.SIGINT,lambda signum,frame:None)
-    try:
-        subprocess.run(argv, cwd=ROOT, env=worker_environment(ROOT), check=True)
-    finally:
-        signal.signal(signal.SIGINT,previous_sigint)
-    if fingerprint(dataset) != identity:
-        raise ValueError('Training dataset changed during the run')
-    from ..learning.minivla.data import lerobot_storages
-    if any(fingerprint(st['root'])!=st['sha256'] for st in lerobot_storages(manifest)):
-        raise ValueError('LeRobot dataset changed during the run')
-    if not (model / 'last.pt').is_file():
-        raise ValueError('Model trainer did not produce complete checkpoints')
-    import xml.etree.ElementTree as ET
-    from ..so101_joint_mapping import JOINTS
-    workspace = load(request['workspace'])
-    urdf = ET.parse(workspace['root'] / 'assets/SO101/urdf/so101_isaaclab.urdf').getroot()
-    limits = {j.get('name'): [float(j.find('limit').get('lower')), float(j.find('limit').get('upper'))]
-              for j in urdf.findall('joint') if j.get('type') == 'revolute'}
-    atomic(model / 'project_provenance.json', {**provenance, 'source_dataset': str(dataset.resolve()),
-                                               'joint_limits_rad': [limits[n] for n in JOINTS],
-                                               'dataset_sha256': identity,
-                                               'trained_config': json.loads((model / 'config.json').read_text())})
-    from ..so101_dataset_contract import write_contract, JOINT_SPACE
-    from ..real2sim.workspaces.demo import coordinate_contract
-    write_contract(model, {**provenance.get('coordinate_contract', coordinate_contract(workspace)), 'action_space': JOINT_SPACE})
-    return {'passed': True, 'checkpoint': str(model / ('best.pt' if (model/'best.pt').is_file() else 'last.pt')), 'model': 'custom_so101_minivla',
-            'stopped':json.loads((model/'training_status.json').read_text()).get('stopped',False) if (model/'training_status.json').is_file() else False}
-
-
-def _lerobot_index(artifact,options,prefix=''):
-    from ..so101_joint_mapping import RobotCoordinates
-    from ..utils.artifact_identity import fingerprint
-    root=Path(artifact['path'])
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    info = json.loads((root / 'meta/info.json').read_text())
-    ds = LeRobotDataset(options.get('dataset_repo_id', info.get('repo_id', 'local/so101')), root=root)
-    provenance = artifact.get('provenance', {})
-    coordinate_contract=artifact['coordinates']
-    from ..representation import describe
-    from ..so101_dataset_contract import JOINT_SPACE,read_contract
-    describe(coordinate_contract)
-    if coordinate_contract!=read_contract(root) or coordinate_contract['action_space']!=JOINT_SPACE:
-        raise ValueError('LeRobot training requires unchanged model-radian coordinates')
-    endpoints=provenance.get('canonical_coordinates') or {}
-    coords = training_coordinates(artifact,options.get('workspace'))
-    manifest = {'schema_version': 1, 'joint_names': list(coords.metadata()['joint_order']),
-        'units': ['rad'] * 5 + ['fraction'], 'control_hz': info['fps'],
-        'action_semantics': 'absolute_target_after_observation', 'episodes': [],
-        'cameras':[k.removeprefix('observation.images.').removesuffix('_cam') for k in info['features'] if k.startswith('observation.images.')]}
-    source_identity=fingerprint(root)
-    manifest['storage']={'format':'lerobot','root':str(root.resolve()),'repo_id':options.get('dataset_repo_id',info.get('repo_id','local/so101')),
-        'sha256':source_identity,'coordinate_contract':coordinate_contract,'canonical_coordinates':coords.metadata(),
-        'action_source':coordinate_contract.get('action_source') or provenance.get('action_source'),
-        'camera_keys':{k.removeprefix('observation.images.').removesuffix('_cam'):k for k in info['features'] if k.startswith('observation.images.')},
-        'decode':'torchcodec_cpu_exact','num_workers':0,'decoder_cache_limit':2,'rgb_cache_frames':8,'rgb_cache_bytes':16*2**20}
-    # Converted generated variants need explicit source groups, never random frame splitting.
-    source_groups = provenance.get('source_groups', {})
-    if options.get('source_groups') and options['source_groups']!=source_groups:
-        raise ValueError('수동 Source Group은 기록된 원본 계보를 대체할 수 없습니다. 근거 없는 Group 매핑은 거부합니다.')
-    source_tasks = {str(e['episode_index']):e.get('task_definition') for e in provenance.get('episodes',[])}
-    partition=provenance.get('source_partition')
-    if partition:
-        from .episodes import validate_partition
-        validate_partition(partition)
-    if not partition and (not source_groups or any(str(g).startswith('UNKNOWN:') for g in source_groups.values())):
-        raise ValueError('MiniVLA Direct split requires verified source_groups; unknown generated lineage cannot be split independently')
-    for meta in ds.meta.episodes:
-        index=int(meta['episode_index']);start,end=int(meta['dataset_from_index']),int(meta['dataset_to_index'])
-        if source_groups and str(index) not in source_groups:
-            raise ValueError('Source group mapping must cover every episode')
-        row=ds.hf_dataset[start];instruction=str(ds.meta.tasks.iloc[int(row['task_index'])].name)
-        name = prefix+f'episode_{index:04d}'
-        review=provenance.get('episode_review',{}).get(str(index),{})
-        if review.get('validation_only') or provenance.get('source_env_args',{}).get('validation_only'):
-            raise ValueError('Synthetic smoke data cannot be trained')
-        scene_configuration=provenance.get('episode_scene_configurations',{}).get(str(index),provenance.get('scene_configuration'))
-        from .episodes import partition_evidence
-        episode_partition, input_proof = partition_evidence(provenance, index)
-        manifest['episodes'].append({'id': name,'dataset_episode_index':index,'from_index':start,'to_index':end,'frames':end-start,
-            'split': 'train', 'instruction': instruction,
-            'group_id': source_groups.get(str(index),'UNKNOWN'),
-            'task_definition':source_tasks.get(str(index)) or (scene_configuration or {}).get('task_definition'),
-            'scene_configuration':scene_configuration,'recorded_review':review,
-            'source_lineage':provenance.get('episode_source_lineage',{}).get(str(index)),
-            **({'source_partition':episode_partition,
-                'source_partition_input':input_proof} if episode_partition else {})})
-    return manifest,coords
-
-
-def train_from_lerobot(artifact, options, output):
-    """Publish small index/statistics only; Episodes reads original Parquet/MP4 lazily."""
-    from .episodes import split_episodes
-    from ..learning.minivla.data import fit_statistics
-    from ..utils.artifact_identity import fingerprint
-    root = Path(artifact['path'])
-    if options.get('resume_checkpoint'):
-        from .policy import resume_output
-        model = resume_output(options['resume_checkpoint'], 'minivla')
-        previous = _provenance(model)
-        prepared = Path(previous['source_dataset'])
-        original = previous.get('lerobot_source_dataset') or _provenance(prepared).get('source_dataset')
-        if not original or Path(original).resolve() != root.resolve() or previous.get('source_sha256') != fingerprint(root):
-            raise ValueError('MiniVLA resume requires the original unchanged LeRobot dataset')
-        validation=options.get('validation_artifact');saved=previous.get('validation_source')
-        if validation and (not saved or Path(validation['path']).resolve()!=Path(saved['path']).resolve() or fingerprint(validation['path'])!=saved['sha256']):
-            raise ValueError('Resume Validation dataset differs from the original Source Partition')
-        output.mkdir(parents=True,exist_ok=False)
-        destination=output/'policy'
-        request = {'input': str(prepared), 'workspace': options['workspace'],
-                   'config': str(model / 'config.json'), 'options': {**options, 'resume_output': str(destination)}}
-        result = train(request, output)
-        atomic(destination / 'project_provenance.json', {**_provenance(destination), 'lerobot_source_dataset': str(root.resolve())})
-        return result
-    validate_training_inputs(artifact,options)
-    manifest,coords=_lerobot_index(artifact,options)
-    provenance=artifact.get('provenance',{});source_identity=fingerprint(root)
-    validation=options.get('validation_artifact')
-    if validation:
-        other,_=_lerobot_index(validation,options,prefix='validation_')
-        from ..representation import require_compatible
-        from ..so101_dataset_contract import JOINT_SPACE
-        require_compatible(other['storage']['coordinate_contract'],manifest['storage']['coordinate_contract'],JOINT_SPACE)
-        def calibration(c):
-            model=c.get('simulation_model')
-            return {k:c.get(k) for k in ('hardware_mapping','simulation_joint_frame')}, ({k:model.get(k) for k in ('workspace','robot_urdf_sha256','precision_mappings','simulation_residual','model_mode','robot_model')} if model else None)
-        if (artifact.get('workspace')!=validation.get('workspace')
-                or calibration(other['storage']['coordinate_contract'])!=calibration(manifest['storage']['coordinate_contract'])
-                or other['control_hz']!=manifest['control_hz'] or other['cameras']!=manifest['cameras']
-                or any(other['storage']['canonical_coordinates'][k]!=manifest['storage']['canonical_coordinates'][k] for k in ('gripper_closed_rad','gripper_open_rad'))):
-            raise ValueError('Train/Validation Workspace, calibration, camera, frequency or gripper contract differs')
-        if (provenance.get('source_partition') or {}).get('split')!='train' or (validation.get('provenance',{}).get('source_partition') or {}).get('split')!='val':
-            raise ValueError('Separate validation artifact requires verified train and val Source Partitions')
-        storages=[manifest['storage'],other['storage']]
-        for e in other['episodes']:e['source_index']=1
-        manifest['episodes']+=other['episodes']
-        from ..real2sim.precision import fingerprint as contract_hash
-        manifest['storage']={'format':'lerobot','sources':storages,'sha256':contract_hash(storages)}
-    manifest['episodes'],_=split_episodes(manifest['episodes'])
-    counts={s:sum(e['split']==s for e in manifest['episodes']) for s in ('train','val')}
-    if any(e.get('source_partition') for e in manifest['episodes']):
-        pools={s:{key for e in manifest['episodes'] if e['split']==s for key in e['source_partition']['source_ids']} for s in ('train','val')}
-        print(f'[WORKFLOW] Source lineage verified · Train Source {len(pools["train"])} / Validation Source {len(pools["val"])} · episodes {counts} · leakage NONE',flush=True)
-    output.mkdir(parents=True, exist_ok=False)
-    prepared = output / 'dataset';prepared.mkdir()
-    atomic(prepared / 'manifest.json', manifest)
-    atomic(prepared / 'project_provenance.json', {'schema': 'so101.minivla-dataset/1',
-        'workspace': artifact['workspace'], 'backend': artifact.get('backend', 'isaac'),
-        'coordinates': coords.metadata(), 'task_definitions': artifact.get('tasks', []),
-        'coordinate_contract': artifact['coordinates'],
-        'source_dataset': str(root.resolve()), 'source_sha256': source_identity,'loader':'lerobot_direct',
-        'source_groups':{e['id']:e['group_id'] for e in manifest['episodes']},
-        'source_partitions':{e['source_partition']['sha256']:e['source_partition'] for e in manifest['episodes'] if e.get('source_partition')},
-        'validation_source':{'path':validation['path'],'sha256':fingerprint(validation['path'])} if validation else None,
-        'scene_configuration':provenance.get('scene_configuration'),
-        'scene_configurations':provenance.get('scene_configurations',[]),
-        'episode_scene_configurations':provenance.get('episode_scene_configurations',{}),
-        'episode_review':provenance.get('episode_review',{}), 'outcomes': 'unknown; preserving selected training data'})
-    fit_statistics(prepared/'manifest.json',prepared/'statistics.json',manifest['cameras'])
-    workspace = options['workspace']
-    request = {'input': str(prepared), 'workspace': workspace,
-        'config': options.get('model_config', str(MODEL_ROOT / 'configs/default.json')), 'options': options}
-    result = train(request, output)
-    model = output / 'policy'
-    atomic(model / 'project_provenance.json', {**_provenance(model), 'lerobot_source_dataset': str(root.resolve())})
-    return result
-
-
 def rollout(request, output, publish, bridge, policy_factory=None):
     from ..learning.minivla.policy import MiniVLA
     from .policy import ActionGuard
@@ -484,7 +225,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
     if checkpoint.is_dir():
         return rollout_lerobot(request, output, publish, bridge)
     from .policy import minivla_root
-    provenance = _provenance(minivla_root(checkpoint))
+    provenance = recording_provenance(minivla_root(checkpoint))
     _verify_workspace(request, provenance)
     policy = (policy_factory or MiniVLA)(checkpoint)
     rows = []
@@ -495,7 +236,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
         raise ValueError('Positive rollout episodes/max_steps required')
     from contextlib import ExitStack
     from .evaluation import evaluation_recorder
-    with _environment(request, output, provenance['coordinates'], policy.control_hz) as env, ExitStack() as recordings:
+    with simulation_environment.create_mujoco(**prepare_mujoco(request,coordinates=provenance['coordinates'],hz=policy.control_hz)) as env, ExitStack() as recordings:
         cameras = tuple(env.backend.workspace['task'].get('observation_cameras', ['side']))
         if not set(policy.cfg.cameras).issubset(cameras):
             raise ValueError('Checkpoint camera contract differs from workspace: '+str(policy.cfg.cameras)+' vs '+str(cameras))
@@ -569,7 +310,7 @@ def rollout_lerobot(request, output, publish, bridge):
     rows = []
     from contextlib import ExitStack
     from .evaluation import evaluation_recorder
-    with _environment(request, output) as env, ExitStack() as recordings:
+    with simulation_environment.create_mujoco(**prepare_mujoco(request)) as env, ExitStack() as recordings:
         emit = _preview(env, request, publish)
         guard = ActionGuard(env.backend.limits[:, 0], env.backend.limits[:, 1], [2.] * 6, env.hz)
         for episode in range(int(options.get('episodes', 1))):
@@ -637,7 +378,7 @@ def execute(request):
     output = Path(request['output']).resolve()
     if request.get('workspace') and output.is_relative_to(Path(request['workspace']).resolve()):
         raise ValueError('Output must be outside immutable workspace')
-    from .artifacts import resumes_in_place
+    from .paths import resumes_in_place
     output.mkdir(parents=True, exist_ok=resumes_in_place(request['stage'],request['options'],output))
     from .presentation import current
     bridge = current()
@@ -661,10 +402,6 @@ def execute(request):
         elif stage == 'convert':
             from .episodes import convert_dataset
             result = {'passed': True, **convert_dataset(request['input'], output, {**request['options'], 'workspace': request['workspace']})}
-        elif stage == 'prepare':
-            from .episodes import prepare_dataset
-            result = {'passed': True, **prepare_dataset(request['input'], output / 'dataset',
-                                                        request['options'].get('splits'), request['options'].get('include_failed', False))}
         elif stage == 'import':
             from .episodes import convert_hdf5
             recipe = json.loads(Path(request['input']).read_text())
@@ -679,8 +416,6 @@ def execute(request):
                  'workspace': metadata(load(request['workspace'])), 'coordinates': coordinates.metadata(),
                  'backend': 'explicit_import', 'recipe': recipe, 'source': request['input']})
             result = {'passed': True, 'dataset': str(output / 'dataset'), 'replay_available': False}
-        elif stage == 'train':
-            result = train(request, output)
         elif stage == 'rollout':
             from .evaluation import evaluate_sim
             from ..real2sim.workspaces.tasks import configured

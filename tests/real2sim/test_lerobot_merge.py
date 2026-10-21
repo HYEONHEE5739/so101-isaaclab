@@ -10,7 +10,9 @@ from soarm101_lab.real2sim.precision import fingerprint as evidence_hash
 from soarm101_lab.real2sim.storage import atomic
 from soarm101_lab.so101_dataset_contract import JOINT_SPACE, current_contract, write_contract
 from soarm101_lab.so101_joint_mapping import JOINTS, RobotCoordinates
-from soarm101_lab.workflow.artifacts import Registry, output_location
+from soarm101_lab.workflow.paths import output_location
+from soarm101_lab.workflow.worker_request import stage_input
+from soarm101_lab.utils.artifact_identity import fingerprint
 from soarm101_lab.workflow.lerobot_merge import combine_partitions, merged_provenance, validate_inputs, merge
 
 
@@ -163,22 +165,20 @@ def write_video_dataset(record, value):
 
 def test_real_video_merge_worker_registration_and_training_reader(tmp_path):
     from soarm101_lab.workflow.operations import Operations
-    from soarm101_lab.workflow.episodes import split_episodes
-    from soarm101_lab.workflow.mujoco import _lerobot_index
-    from soarm101_lab.learning.minivla.data import episode_arrays, lerobot_reader
+    from soarm101_lab.data.legacy import episode_arrays, lerobot_reader
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    registry = Registry(tmp_path / 'workflow')
+    root=tmp_path/'workflow'
     records, expected = [], []
     for i, name in enumerate(('a', 'b')):
         r = converted_record(tmp_path, name)
         expected.append(write_video_dataset(r, .03 + .06 * i))
-        records.append(registry.register('dataset', r['path']))
-    opts = dict(merge_datasets=[r['id'] for r in records], storage_name='test_merge')
-    assert Operations(registry).readiness('merge', records[0], options=opts) == ('READY', '')
-    result = Operations(registry).run('merge', records[0], options=opts)
-    assert result['parents'] == opts['merge_datasets']
-    assert Path(result['path']) == registry.root / 'datasets/test_merge'
-    for r in records:registry.verify(r)
+        records.append(stage_input('train',r['path']))
+    opts = dict(merge_datasets=[r['path'] for r in records], storage_name='test_merge')
+    assert Operations(root=root).readiness('merge',records[0]['path'], options=opts) == ('READY', '')
+    result = Operations(root=root).run('merge',records[0]['path'], options=opts)
+    assert not (root/'artifacts').exists()
+    assert Path(result['path']) == root / 'datasets/test_merge'
+    for r in records:assert stage_input('train',r['path'])['format']['total_episodes']==1
     ds = LeRobotDataset('local/so101_merged', root=result['path'], video_backend='torchcodec')
     assert ds.meta.total_episodes == 2 and ds.meta.total_frames == 10
     np.testing.assert_allclose(ds.meta.stats['observation.state']['mean'], np.concatenate(expected).mean(axis=0), atol=1e-7)
@@ -193,55 +193,47 @@ def test_real_video_merge_worker_registration_and_training_reader(tmp_path):
         frame = ds[5*i]
         assert abs(float(frame['observation.images.side_cam'].mean()) * 255 - (30 + 60*i)) < 3
         assert abs(float(frame['observation.images.wrist_cam'].mean()) * 255 - (50 + 60*i)) < 3
-    manifest, _ = _lerobot_index(result, {})
-    split_episodes(manifest['episodes'], require_validation=False)
-    reader = lerobot_reader(manifest['storage'])
-    for e in manifest['episodes']:
-        e['_storage'] = manifest['storage']
-        arrays = episode_arrays(e, ['side','wrist'], 30, reader)
-        assert arrays['state'].shape == (5,6)
-    with pytest.raises(FileExistsError):merge(records, result['path'])
+    from soarm101_lab.learning.datasets import inspect_dataset
+    assert inspect_dataset(result['path'])['format']['total_episodes']==2
+    with pytest.raises(FileExistsError):merge([r['path'] for r in records],result['path'])
     assert json.loads((Path(result['path']) / 'merge_report.json').read_text())['passed']
 
 
 def test_failure_keeps_inputs_and_does_not_publish_partial_output(tmp_path, monkeypatch):
     from soarm101_lab.workflow import lerobot_merge
     from lerobot.datasets import aggregate
-    registry = Registry(tmp_path / 'workflow')
+    root=tmp_path/'workflow'
     records = []
     for i, name in enumerate(('a','b')):
         r = converted_record(tmp_path, name)
         write_video_dataset(r, .03 + .06*i)
-        records.append(registry.register('dataset', r['path']))
+        records.append(stage_input('train',r['path']))
     def interrupted(**kwargs):
         kwargs['aggr_root'].mkdir()
         (kwargs['aggr_root'] / 'partial').write_text('partial')
         raise KeyboardInterrupt()
     monkeypatch.setattr(aggregate, 'aggregate_datasets', interrupted)
-    with pytest.raises(KeyboardInterrupt):lerobot_merge.merge(records, tmp_path / 'result')
+    with pytest.raises(KeyboardInterrupt):lerobot_merge.merge([r['path'] for r in records],tmp_path/'result')
     assert not (tmp_path / 'result').exists() and not list(tmp_path.glob('.*.merge-*'))
-    for r in records:registry.verify(r)
+    for r in records:assert stage_input('train',r['path'])['format']['total_episodes']==1
 
 
 def test_real_unpartitioned_multitask_merge_uses_shared_coordinates_and_task_indices(tmp_path):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    from soarm101_lab.workflow.mujoco import _lerobot_index
-    from soarm101_lab.workflow.episodes import split_episodes
-    registry = Registry(tmp_path/'workflow')
+    root=tmp_path/'workflow'
     records = []
     for i, name in enumerate(('a','b','c')):
         r = unpartitioned_record(tmp_path, name)
         write_video_dataset(r, .03 + .06*i)
-        records.append(registry.register('dataset',r['path']))
-    output = merge(records, tmp_path/'merged')
-    result = registry.register('dataset', output, parents=[r['id'] for r in records])
+        records.append(stage_input('train',r['path']))
+    output=merge([r['path'] for r in records],tmp_path/'merged')
+    result=stage_input('train',output)
     assert result['provenance']['source_partition'] is None and len(result['tasks']) == 3
     ds = LeRobotDataset('local/so101_merged',root=output,video_backend='torchcodec')
     assert ds.meta.total_episodes == 3 and ds.meta.total_frames == 15
     for i, record in enumerate(records):
         task_index = ds.hf_dataset[i*5]['task_index'].item()
         assert ds.meta.tasks.iloc[task_index].name == record['tasks'][0]['language_instruction']
-    manifest, _ = _lerobot_index(result,{})
-    episodes, _ = split_episodes(manifest['episodes'])
-    assert {e['split'] for e in episodes} == {'train','val','test'}
-    for record in records:registry.verify(record)
+    from soarm101_lab.learning.datasets import inspect_dataset
+    assert inspect_dataset(output)['format']['total_episodes']==3
+    for record in records:assert stage_input('train',record['path'])['format']['total_episodes']==1

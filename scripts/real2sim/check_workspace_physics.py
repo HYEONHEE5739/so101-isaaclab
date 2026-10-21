@@ -19,7 +19,7 @@ try:
     from soarm101_lab.real2sim.workspaces.environment import make_config, task_success
     from soarm101_lab.real2sim.workspaces.mimic import make_mimic_config
     w = load(args.workspace); output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=True)
-    env = ManagerBasedEnv(cfg=make_config(w['root'], args.device, overview_camera=False, grasp_observations=False)); obs, _ = env.reset()
+    env = ManagerBasedEnv(cfg=make_config(w, args.device, overview_camera=False, grasp_observations=False)); obs, _ = env.reset()
     picked = env.scene[w['task']['pick']]; target = env.scene[w['task']['place']]
     height = w['profile']['objects'][w['task']['targets'][w['task']['place']]]['dimensions_m'][2]
     q = env.scene['robot'].data.joint_pos.clone()
@@ -38,7 +38,7 @@ try:
         images[name] = list(image.shape)
         assert name + '_cam' in obs['policy'], 'Missing named policy camera'
     masses = {name: float(env.scene[name].root_physx_view.get_masses()[0,0]) for name in w['task']['dynamic']}
-    mimic = make_mimic_config(w['root'], args.device)
+    mimic = make_mimic_config(w, args.device)
     binding = [s.object_ref for s in mimic.subtask_configs['tool0']]
     assert binding == [w['task']['pick'], w['task']['place']], binding
     result = {'passed': success, 'success_relation': w['task']['success']['relation'],

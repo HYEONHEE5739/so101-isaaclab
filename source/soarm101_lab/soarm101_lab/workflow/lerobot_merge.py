@@ -15,7 +15,7 @@ from ..real2sim.storage import atomic
 from ..representation import require_compatible
 from ..so101_dataset_contract import JOINT_SPACE, write_contract
 from ..utils.artifact_identity import fingerprint
-from .artifacts import inspect_artifact
+from .dataset import inspect_dataset
 from .episodes import partition_evidence, validate_partition, validate_partition_episode
 
 
@@ -121,7 +121,7 @@ def validate_inputs(records):
     if len(records) < 2:
         raise ValueError('변환된 LeRobot 데이터셋을 2개 이상 선택하세요.')
     paths = [Path(r['path']).resolve() for r in records]
-    if len(set(paths)) != len(paths) or len({r['id'] for r in records}) != len(records):
+    if len(set(paths)) != len(paths):
         raise ValueError('같은 데이터셋을 중복 선택할 수 없습니다.')
     base = records[0]
     seen, tasks, partitions, source_identities = set(), {}, [], {}
@@ -194,8 +194,7 @@ def merged_provenance(records, summary):
     result = {k: copy.deepcopy(base.get(k)) for k in ('workspace', 'backend', 'canonical_coordinates', 'action_source', 'representation')}
     result.update(source_partition=summary['partition'], task_definitions=summary['tasks'], episodes=[],
                   source_env_args={'validation_only': any(r['provenance'].get('source_env_args', {}).get('validation_only', False) for r in records)},
-                  merge_inputs=[dict(id=r['id'], path=r['path'], sha256=r['sha256'], coordinates=r['coordinates'],
-                                     provenance=r['provenance']) for r in records])
+                  merge_inputs=[dict(path=r['path'],sha256=r['sha256'],coordinates=r['coordinates']) for r in records])
     result['workspace_path'] = base.get('workspace_path') or base.get('source_env_args', {}).get('workspace_path')
     maps = ('source_groups', 'episode_source_lineage', 'episode_review', 'episode_scene_configurations')
     for key in (*maps, 'episode_source_partitions', 'episode_source_partition_inputs', 'merge_episode_origins'):
@@ -227,18 +226,17 @@ def merged_provenance(records, summary):
     return result
 
 
-def merge(records, output, repo_id='local/so101_merged'):
+def merge(paths, output, repo_id='local/so101_merged'):
     """Worker-only local aggregation. Publish only after contracts/counts pass."""
     from lerobot.datasets.aggregate import aggregate_datasets
     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
     started = time.monotonic()
     output = Path(output).expanduser().resolve()
     verified = []
-    for record in records:
-        actual = inspect_artifact('dataset', record['path'])
+    for path in paths:
+        record={'path':str(Path(path).expanduser().resolve()),'type':'dataset'}
+        actual = inspect_dataset('dataset', record['path'])
         identity = fingerprint(record['path'])
-        if identity != record['sha256']:
-            raise ValueError('등록 후 변경된 입력 데이터셋입니다: ' + record['path'])
         verified.append({**record, **actual, 'sha256': identity})
         if output.is_relative_to(Path(record['path']).resolve()):
             raise ValueError('병합 결과는 원본 데이터셋 밖에 저장하세요.')
@@ -248,7 +246,7 @@ def merge(records, output, repo_id='local/so101_merged'):
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = output.with_name('.' + output.name + '.merge-' + uuid.uuid4().hex)
     try:
-        print(f"[WORKFLOW] LeRobot 병합 시작 · 데이터셋 {len(records)}개 · {summary['episodes']} episodes", flush=True)
+        print(f"[WORKFLOW] LeRobot 병합 시작 · 데이터셋 {len(verified)}개 · {summary['episodes']} episodes", flush=True)
         aggregate_datasets(repo_ids=[repo_id] * len(verified), roots=[Path(r['path']) for r in verified],
                            aggr_repo_id=repo_id, aggr_root=staging)
         meta = LeRobotDatasetMetadata(repo_id, root=staging)
@@ -261,7 +259,7 @@ def merge(records, output, repo_id='local/so101_merged'):
                 raise ValueError('병합 중 원본이 변경되었습니다: ' + record['path'])
         atomic(staging / 'merge_report.json', dict(schema='so101.lerobot-merge/1', passed=True,
                repo_id=repo_id, episodes=summary['episodes'], frames=summary['frames'], split=(summary['partition'] or {}).get('split'),
-               seconds=time.monotonic() - started, inputs=[{k: r[k] for k in ('id', 'path', 'sha256')} for r in verified]))
+               seconds=time.monotonic() - started, inputs=[{k: r[k] for k in ('path','sha256')} for r in verified]))
         if output.exists():
             raise FileExistsError(str(output))
         staging.rename(output)

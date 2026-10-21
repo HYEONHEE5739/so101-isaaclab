@@ -302,9 +302,6 @@ def main():
 
     if args_cli.workspace:
         from soarm101_lab.real2sim.workspaces.environment import make_config
-        from soarm101_lab.real2sim.workspaces.package import load as load_workspace
-        from soarm101_lab.real2sim.workspaces.tasks import configured
-        workspace = source_workspace(configured(load_workspace(args_cli.workspace)),args_cli.resume_data)
         env_cfg = make_config(workspace, args_cli.device, args_cli.num_envs,
                               simulation=simulation, overview_camera=False, grasp_observations=False)
         workspace = env_cfg.workflow_workspace

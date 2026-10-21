@@ -223,10 +223,10 @@ def record_fixture(path,w,ids,episodes=1):
 def test_legacy_episode_stages_use_only_common_import_boundary(workspace,tmp_path,monkeypatch):
     from soarm101_lab.workflow.operations import execute_request
     from soarm101_lab.workflow import mujoco
-    from soarm101_lab.workflow.artifacts import fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
     writer=record_fixture(tmp_path/'source',workspace,['cube_red'])
     before=fingerprint(writer.root)
-    monkeypatch.setattr(mujoco,'_environment',lambda *args,**kwargs:pytest.fail('Invalid input must fail before engine creation'))
+    monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',lambda *args,**kwargs:pytest.fail('Invalid input must fail before engine creation'))
     for stage in ('replay','annotate','datagen'):
         request={'backend':'mujoco','stage':stage,'workspace':str(workspace['root']),
             'input':str(writer.root),'renderer':'none','output':str(tmp_path/stage),
@@ -239,11 +239,10 @@ def test_legacy_episode_stages_use_only_common_import_boundary(workspace,tmp_pat
 def test_resume_and_curated_mixed_compositions(workspace,tmp_path):
     import shutil
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment
-    from soarm101_lab.workflow.episodes import prepare_dataset
     from soarm101_lab.data.episodes import LegacyEpisodeWriter
     from soarm101_lab.workflow.source import metadata,resume_legacy
     from soarm101_lab.workflow.curation import export_subset
-    from soarm101_lab.workflow.artifacts import inspect_artifact
+    from soarm101_lab.workflow.dataset import inspect_dataset
     a=record_fixture(tmp_path/'single',workspace,['cube_red'],2)
     b=record_fixture(tmp_path/'double',workspace,['cube_red','cube_blue'])
     with PolicyEnvironment(workspace['root'],'none',task_definition=definition(workspace),active_object_ids=['cube_red','cube_blue']) as env:
@@ -254,13 +253,13 @@ def test_resume_and_curated_mixed_compositions(workspace,tmp_path):
     entry=copy.deepcopy(b.manifest['episodes'][0]);shutil.copytree(b.root/entry['path'],mixed/'episode_0002')
     entry.update(id='episode_0002',path='episode_0002');manifest=copy.deepcopy(a.manifest);manifest['episodes'].append(entry)
     (mixed/'manifest.json').write_text(json.dumps(manifest))
-    prepared=tmp_path/'prepared';prepare_dataset(mixed,prepared)
+    prepared=export_subset(mixed,tmp_path/'prepared',[e['id'] for e in manifest['episodes']])
     prov=json.loads((prepared/'project_provenance.json').read_text())
-    assert len(prov['scene_configurations'])==2
-    assert inspect_artifact('dataset',prepared)['provenance']['scene_configurations']==prov['scene_configurations']
+    assert prov.get('scene_configurations')==json.loads((mixed/'project_provenance.json').read_text()).get('scene_configurations')
+    assert inspect_dataset('dataset',prepared)['provenance']['scene_configurations']==prov['scene_configurations']
     assert [e['scene_configuration']['active_object_ids'] for e in json.loads((prepared/'manifest.json').read_text())['episodes']]==[['cube_red'],['cube_red'],['cube_red','cube_blue']]
     selected=export_subset(prepared,tmp_path/'curated',['episode_0002'])
-    assert json.loads((selected/'project_provenance.json').read_text())['scene_configurations']==[entry['scene_configuration']]
+    assert json.loads((selected/'manifest.json').read_text())['episodes'][0]['scene_configuration']==entry['scene_configuration']
     from soarm101_lab.learning.minivla.config import MiniVLAConfig
     cfg=MiniVLAConfig();assert cfg.horizon==40 and cfg.layers==4
 

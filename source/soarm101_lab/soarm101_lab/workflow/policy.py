@@ -6,6 +6,32 @@ import numpy as np
 from ..representation import require_policy
 
 
+def checkpoint_metadata(path) -> dict:
+    """Small native configuration for a selected path, never load weights/state.
+
+    UI callers must run this in their existing worker. This is display/setup
+    metadata; resume_checkpoint/require_policy still own execution validation.
+    """
+    def read(p):
+        with p.open('rb') as stream:raw=stream.read(1024*1024+1)
+        if len(raw)>1024*1024:raise ValueError('Checkpoint configuration exceeds display limit: '+str(p))
+        value=json.loads(raw)
+        if not isinstance(value,dict):raise ValueError('Checkpoint configuration must be an object')
+        return value
+    path=Path(path).expanduser().resolve()
+    if path.suffix=='.pt':
+        folder=minivla_root(path);config=folder/'config.json'
+        saved=read(config) if config.is_file() else {}
+        return dict(path=str(path),architecture='minivla',steps=saved.get('steps'),
+                    batch_size=saved.get('batch_size',1),model_config=str(config) if config.is_file() else None)
+    model=path/'pretrained_model' if (path/'pretrained_model').is_dir() else path
+    config=read(model/'config.json')
+    train=read(model/'train_config.json') if (model/'train_config.json').is_file() else {}
+    architecture=config.get('type') or train.get('policy',{}).get('type')
+    if architecture not in ('act','smolvla'):raise ValueError('Unsupported checkpoint policy type')
+    return dict(path=str(model),architecture=architecture,steps=train.get('steps'))
+
+
 class ActionGuard:
     def __init__(self, lower, upper, max_velocity, hz):
         self.low=np.asarray(lower,float); self.high=np.asarray(upper,float)
@@ -92,171 +118,41 @@ def batch_actions(policy, pre, post, states, images, task, device):
 
 
 
-def resume_checkpoint(path, artifact, options):
-    """Resolve a full LeRobot checkpoint without modifying its saved state."""
-    root = Path(path).expanduser().resolve()
-    if root.name == 'train_config.json':
-        root = root.parent
-    if root.name == 'pretrained_model':
-        root = root.parent
-    model = root / 'pretrained_model'
-    state = root / 'training_state'
-    required = [model / 'train_config.json', model / 'config.json', model / 'model.safetensors']
-    required += [state / name for name in (
-        'training_step.json', 'optimizer_param_groups.json', 'optimizer_state.safetensors',
-        'rng_state.safetensors', 'scheduler_state.json')]
-    missing = [str(p) for p in required if not p.is_file()]
-    if missing:
-        raise ValueError('불완전한 resume checkpoint: ' + ', '.join(missing))
-    config = json.loads((model / 'train_config.json').read_text())
-    step = int(json.loads((state / 'training_step.json').read_text())['step'])
-    if Path(config['dataset']['root']).expanduser().resolve() != Path(artifact['path']).resolve():
-        raise ValueError('Resume은 원래 학습에 사용한 dataset을 선택해야 합니다.')
-    if config['policy']['type'] != options.get('architecture', 'smolvla'):
-        raise ValueError('선택한 모델과 checkpoint 모델이 다릅니다.')
-    if int(options.get('steps', config['steps'])) <= step:
-        raise ValueError(f'총 목표 steps는 checkpoint step {step}보다 커야 합니다.')
-    return model / 'train_config.json', config, step
+def inspect_checkpoint(path):
+    """Read native Checkpoint contracts without writing or borrowing a registry.
 
-
-def resume_output(path, architecture='smolvla'):
-    """Resolve the source training directory for resume contract checks."""
-    root = Path(path).expanduser().resolve()
-    if architecture == 'minivla':
-        folder=minivla_root(root)
-        selected_minivla_checkpoint(folder,root if root.is_file() else folder/'last.pt')
-        if not (folder/'config.json').is_file():raise ValueError('MiniVLA config.json missing')
-        return folder
-    if root.name == 'train_config.json': root = root.parent
-    if root.name == 'pretrained_model': root = root.parent
-    config = json.loads((root / 'pretrained_model/train_config.json').read_text())
-    if root.parent.name != 'checkpoints':
-        raise ValueError('Resume checkpoint must be under the original output/checkpoints directory')
-    output = root.parent.parent
-    if config.get('output_dir') and Path(config['output_dir']).expanduser().resolve() != output:
-        raise ValueError('Saved training output differs from checkpoint location')
-    return output
-
-
-def train(artifact, options, output):
-    import subprocess
-    import sys
-    from ..so101_dataset_contract import write_contract, JOINT_SPACE
+    Discovery is separate: missing coordinates/provenance is an actionable
+    compatibility failure here, never repaired from another checkpoint or run.
+    """
+    from ..so101_dataset_contract import read_contract, JOINT_SPACE
     from ..representation import describe
-    if options.get('architecture') == 'minivla':
-        from .mujoco import train_from_lerobot
-        return train_from_lerobot(artifact, options, Path(output))
-    coordinates = artifact['coordinates']
-    if coordinates['action_space'] != JOINT_SPACE:
-        raise ValueError('Training requires joint-radian targets')
-    from ..real2sim.storage import atomic
-    dataset = Path(artifact['path'])
-    info = json.loads((dataset / 'meta/info.json').read_text())
-    config = {'dataset': {'repo_id': options.get('dataset_repo_id', info.get('repo_id', 'local/so101')),
-                          'root': str(dataset)},
-              'policy': {'type': options.get('architecture', 'smolvla'), 'push_to_hub': False,
-                         'device': options.get('device', 'cuda')},
-              'output_dir': str(output), 'steps': int(options.get('steps', 10000)),
-              'batch_size': int(options.get('batch_size', 8)), 'num_workers': int(options.get('num_workers', 0)),
-              'save_checkpoint': True, 'save_freq': int(options.get('save_freq', 1000)), 'wandb': {'enable': False}, 'eval_freq': 0}
-    if config['policy']['type'] not in ('act', 'smolvla'):
-        raise ValueError('Choose act or smolvla')
-    overrides = options.get('policy_options', {})
-    if not isinstance(overrides, dict) or any(k in overrides for k in ('type', 'push_to_hub', 'repo_id', 'device', 'pretrained_path')):
-        raise ValueError('Invalid policy_options; workflow owns type/device/publication')
-    config['policy'].update(overrides)
-    base_model = options.get('base_model') or (
-        'lerobot/smolvla_base' if config['policy']['type'] == 'smolvla' else None)
-    camera_keys = [k for k in info.get('features', {}) if k.startswith('observation.images.')]
-    default_map = {key:'observation.images.camera'+str(i+1) for i,key in enumerate(camera_keys)}
-    config['rename_map'] = options.get('rename_map', default_map if config['policy']['type'] == 'smolvla' else {})
-    if not isinstance(config['rename_map'], dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in config['rename_map'].items()):
-        raise ValueError('rename_map must map observation key strings to strings')
-    if base_model:
-        config['policy']['pretrained_path'] = base_model
-    cfg_path = Path(output).with_name(Path(output).name + '.train_config.json')
-    atomic(cfg_path, config)
-    argv = [sys.executable, '-m', 'lerobot.scripts.lerobot_train', '--config_path=' + str(cfg_path)]
-    if base_model:
-        # Load checkpoint configuration as well as weights; validate reloads it.
-        argv.append('--policy.path=' + str(base_model))
-        for key, value in config['policy'].items():
-            if key not in ('type', 'pretrained_path'):
-                argv.append('--policy.' + key + '=' + json.dumps(value))
-    if options.get('resume_checkpoint'):
-        saved_path, config, step = resume_checkpoint(options['resume_checkpoint'], artifact, options)
-        config = {**config, 'output_dir': str(output), 'resume': True,
-                  'steps': int(options.get('steps', config['steps']))}
-        # Keep config_path at the original checkpoint: LeRobot derives optimizer/
-        # scheduler and processor locations from its parent directories.
-        argv = [sys.executable, '-m', 'lerobot.scripts.lerobot_train',
-                '--config_path=' + str(saved_path), '--resume=true',
-                '--output_dir=' + str(output), '--steps=' + str(config['steps'])]
-        atomic(cfg_path, config)
-        print(f"[WORKFLOW] 이어서 학습: step {step} → {config['steps']} · {saved_path.parent}", flush=True)
-    subprocess.run(argv, check=True)
-    checkpoint = Path(output) / 'checkpoints/last/pretrained_model'
-    if not (checkpoint / 'config.json').exists() or not list(checkpoint.glob('*.safetensors')):
-        raise ValueError('Training did not produce a complete checkpoint')
-    write_contract(checkpoint, coordinates)
-    atomic(checkpoint / 'workflow_provenance.json', {'workspace': artifact.get('workspace'),
-           'source_dataset_artifact': artifact, 'backend': options.get('backend', artifact.get('backend', 'isaac')), 'training': config, 'representation': describe(coordinates),
-           'task_definitions': artifact.get('tasks') or options.get('tasks', []),
-           'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
-           'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
-           'episode_review':artifact.get('provenance',{}).get('episode_review',{}),
-           'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{})})
-
-
-def import_checkpoint(path, registry):
-    """Attach recorded training provenance to an intermediate workflow checkpoint."""
-    from ..so101_dataset_contract import write_contract
-    from ..real2sim.storage import atomic
-    model = Path(path).expanduser().resolve()
-    if (model / 'pretrained_model').is_dir():
-        model = model / 'pretrained_model'
-    for name in ('config.json', 'model.safetensors', 'policy_preprocessor.json',
-                 'policy_postprocessor.json', 'train_config.json'):
-        if not (model / name).is_file():
-            raise ValueError('Incomplete policy checkpoint: ' + name)
-    if (model / 'workflow_provenance.json').exists():
-        return registry.register('policy', model)
-    request_path = next((p / 'request.json' for p in model.parents
-                         if (p / 'request.json').is_file()), None)
-    if request_path is None and hasattr(registry,'root'):
-        for candidate in sorted((registry.root/'runs').glob('*/request.json'),reverse=True):
-            try:
-                recorded=json.loads(candidate.read_text())
-                if recorded.get('stage')=='train' and model.is_relative_to(Path(recorded['output']).resolve()/'checkpoints'):
-                    request_path=candidate;break
-            except (OSError,ValueError,KeyError):continue
-    if request_path is None:
-        raise ValueError('Workflow training provenance missing; cannot infer checkpoint workspace/coordinates')
-    request = json.loads(request_path.read_text())
-    if request.get('stage') != 'train':
-        raise ValueError('Not a workflow training checkpoint')
-    output = Path(request['output']).resolve()
-    if not model.is_relative_to(output / 'checkpoints'):
-        raise ValueError('Checkpoint is outside the recorded training output')
-    artifact = request['input']
-    registry.verify(artifact)
-    config = json.loads((model / 'train_config.json').read_text())
-    if Path(config['dataset']['root']).resolve() != Path(artifact['path']).resolve():
-        raise ValueError('Checkpoint dataset differs from training provenance')
-    from ..so101_dataset_contract import JOINT_SPACE
-    if artifact['coordinates'].get('action_space') != JOINT_SPACE:
-        raise ValueError('Checkpoint requires joint-radian training data')
-    write_contract(model, artifact['coordinates'])
-    atomic(model / 'workflow_provenance.json', {
-        'workspace': artifact.get('workspace'), 'source_dataset_artifact': artifact,
-        'training': config, 'task_definitions': artifact.get('tasks', []),
-        'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
-        'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),
-        'episode_review':artifact.get('provenance',{}).get('episode_review',{}),
-        'episode_scene_configurations':artifact.get('provenance',{}).get('episode_scene_configurations',{}),
-        'checkpoint_import': True})
-    return registry.register('policy', model, parents=[artifact['id']],display_name=request.get('options',{}).get('storage_name'))
+    path=Path(path).expanduser().resolve()
+    mini=path.suffix=='.pt' or (path/'best.pt').is_file() or (path/'last.pt').is_file()
+    if mini:
+        root=minivla_root(path)
+        selected=selected_minivla_checkpoint(path)
+        provenance_path=root/'project_provenance.json'
+        config_path=root/'config.json'
+    else:
+        root=path/'pretrained_model' if (path/'pretrained_model').is_dir() else path
+        selected=None;provenance_path=root/'workflow_provenance.json';config_path=root/'config.json'
+        for name in ('model.safetensors','policy_preprocessor.json','policy_postprocessor.json'):
+            if not (root/name).is_file():raise ValueError('Incomplete policy Checkpoint: '+name)
+    if not provenance_path.is_file():
+        raise ValueError('Checkpoint provenance missing: '+str(provenance_path)+' · 발견 가능하지만 평가 계약은 확인할 수 없습니다.')
+    try:coordinates=read_contract(root)
+    except (OSError,ValueError) as exc:raise ValueError('Checkpoint Coordinate contract missing/invalid: '+str(root)) from exc
+    if not coordinates or coordinates.get('action_space')!=JOINT_SPACE:
+        raise ValueError('Policy requires an explicit joint-radian Coordinate contract: '+str(root))
+    provenance=json.loads(provenance_path.read_text());config=json.loads(config_path.read_text())
+    result=dict(path=str(root),type='policy',format='so101.minivla-policy/1' if mini else config,
+                coordinates=coordinates,representation=describe(coordinates),provenance=provenance,
+                workspace=provenance.get('workspace'),tasks=provenance.get('task_definitions',[]),
+                backend=provenance.get('backend'))
+    if mini:result.update(model_config=config,checkpoint_file=str(selected))
+    else:
+        result['processors']={name:json.loads((root/(name+'.json')).read_text()) for name in ('policy_preprocessor','policy_postprocessor')}
+    return result
 
 
 class MiniVLAJointPolicy:

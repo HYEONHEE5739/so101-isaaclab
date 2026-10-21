@@ -151,6 +151,8 @@ def evaluation_inputs(path):
 
 def analyze(path):
     path=Path(path).resolve();canonical=path.is_dir();rows=[]
+    if any(p.name and p.with_name('.'+p.name+'.workflow-lock').exists() for p in (path,*path.parents)):
+        raise ValueError('Dataset 저장 중에는 Curation을 열 수 없습니다.')
     inputs=evaluation_inputs(path) if canonical else None
     if inputs is not None:
         if not inputs:raise ValueError('평가에 저장된 완료 episode가 없습니다.')
@@ -161,6 +163,7 @@ def analyze(path):
                 row['evaluation_run']=str(path);row['flags']=[];row['flag_details']=[]
                 rows.append(row)
         return flag_outliers(rows)
+    if canonical and not (path/'manifest.json').is_file():raise ValueError('Curation 편집 지원: Common HDF5 / Legacy NPY·MP4. LeRobot Dataset 편집은 지원하지 않습니다.')
     if canonical:
         manifest=json.loads((path/'manifest.json').read_text());prov=json.loads((path/'project_provenance.json').read_text())
         entries=manifest['episodes'];args=prov;scene=prov.get('scene',{});dt=1/float(manifest['control_hz']);w=_workspace(args)
@@ -255,7 +258,7 @@ def analyze(path):
         kind=(row.get('source_lineage') or {}).get('kind')
         lineage_status=('Verified Source Partition / exact subtask Source' if kind=='mimic_segments' else
             'Verified Source Partition / exact subtask lineage UNKNOWN' if kind!='source_episode' else 'Verified Source Partition') if partition else 'Not partitioned'
-        row.update(split=partition['split'] if partition else None,lineage_status=lineage_status,leakage_status='checked at training' if partition else 'UNKNOWN')
+        row.update(split=None,historical_split=partition['split'] if partition else None,lineage_status=lineage_status,leakage_status='historical evidence only')
         if row['frames']<3 and not args.get('evaluation_schema'):raise ValueError('At least three frames required for motion quality metrics')
         ids=(composition or {}).get('active_object_ids',scene.get('dynamic_objects') if canonical else active_ids)
         geometry_ids=ids or list(telemetry)
@@ -334,78 +337,172 @@ def select_distribution(rows,count):
     return chosen
 
 
-def export_subset(source, destination, names, *, partition=None, source_records=None):
-    import h5py, os, uuid
-    from ..so101_dataset_contract import read_contract, write_contract
-    from ..utils.artifact_identity import fingerprint
-    source=Path(source); destination=Path(destination)
-    from .episodes import validate_partition,validate_partition_episode,source_catalog
-    if partition:validate_partition(partition)
-    if source_records is None:
-        source_records,inherited=source_catalog(source,allow_unknown=True)
-        if inherited and source_records:
-            ids=sorted({source_records[n]['source_id'] for n in names})
-            if ids!=inherited['source_ids']:
-                from ..real2sim.precision import fingerprint as contract_hash
-                payload={k:v for k,v in inherited.items() if k!='sha256'}
-                payload.update(source_ids=ids,parent_partition_sha256=inherited['sha256'])
-                partition=validate_partition({**payload,'sha256':contract_hash(payload)})
-    if partition:
-        for name in names:validate_partition_episode(partition,source_records.get(name))
-    if destination.exists(): raise ValueError('기존 파일은 덮어쓰지 않습니다.')
-    if not names or len(set(names))!=len(names): raise ValueError('선택 목록이 비었거나 중복입니다.')
+def _selection(source, names=None):
+    """Read episode headers in stored order; historical proofs remain authoritative history."""
+    import h5py
+    from .episodes import validate_partition, validate_partition_episode
+    source=Path(source).resolve()
+    if any(p.name and p.with_name('.'+p.name+'.workflow-lock').exists() for p in (source,*source.parents)):
+        raise ValueError('Dataset 저장 중에는 Curation을 실행할 수 없습니다.')
     if source.is_dir():
-        import shutil
-        from ..real2sim.storage import atomic
-        manifest = json.loads((source / 'manifest.json').read_text())
-        entries = {e['id']: e for e in manifest['episodes']}
-        if not set(names).issubset(entries): raise ValueError('알 수 없는 episode입니다.')
-        destination.mkdir(parents=True, exist_ok=False)
-        for name in names:
-            folder = (source / entries[name]['path']).resolve()
-            if not folder.is_relative_to(source.resolve()): raise ValueError('Episode outside dataset')
-            shutil.copytree(folder, destination / entries[name]['path'])
-        selected=[]
-        for name in names:
-            entry=dict(entries[name])
-            if source_records.get(name):entry['source_lineage']=source_records[name]
-            if partition:entry.update(split=partition['split'],source_partition=partition)
-            selected.append(entry)
-        atomic(destination / 'manifest.json', {**manifest, 'episodes': selected})
-        provenance = json.loads((source / 'project_provenance.json').read_text())
-        scenes=[entries[n].get('scene_configuration') or provenance.get('scene_configuration') for n in names]
-        scenes=list({s['sha256']:s for s in scenes if s}.values())
-        if partition:provenance['source_partition']=partition
-        atomic(destination / 'project_provenance.json', {**provenance, 'scene_configurations':scenes, 'curation': {
-            'source': str(source.resolve()), 'source_sha256': fingerprint(source), 'selected_episodes': names}})
-        return destination
+        if not (source/'manifest.json').is_file():
+            raise ValueError('Curation 저장은 Common HDF5 / Legacy NPY·MP4만 지원합니다. 평가 묶음은 개별 HDF5를 선택하세요. LeRobot 편집은 지원하지 않습니다.')
+        manifest=json.loads((source/'manifest.json').read_text())
+        args=json.loads((source/'project_provenance.json').read_text())
+        entries=[(e['id'],e) for e in manifest['episodes']]
+    else:
+        with h5py.File(source,'r') as h:
+            args=_json(h['data'].attrs.get('env_args'),{})
+            entries=[(n,dict(h['data'][n].attrs)) for n in sorted((n for n in h['data'] if n.startswith('demo_')),key=lambda n:int(n[5:]))]
+    if names is not None and (not names or len(set(names))!=len(names) or not set(names).issubset({n for n,_ in entries})):
+        raise ValueError('선택 목록이 비었거나 중복/알 수 없는 Episode입니다.')
+    selected=[]
+    for name,entry in entries:
+        partition=_json(entry.get('source_partition'),None) or args.get('source_partition')
+        lineage=_json(entry.get('source_lineage'),None)
+        if partition:validate_partition_episode(validate_partition(partition),lineage,args.get('source_partition_input'))
+        if names is None or name in names:
+            selected.append((name,lineage or {'source_id':entry.get('curation_origin')},entry.get('source_group',entry.get('group_id')) or args.get('source_groups',{}).get(name)))
+    return selected
+
+
+def split_dataset(source,train_fraction=.8,seed=0,assignments=None,names=None):
+    """Explicit episode allocation, independent of historical training roles."""
+    if not 0<float(train_fraction)<1 or type(seed) is not int or seed<0:raise ValueError('Invalid split ratio/seed')
+    rows=_selection(source,names);names=[r[0] for r in rows]
+    if len(names)<2:raise ValueError('Train/Val에는 각각 최소 한 Episode가 필요합니다.')
+    if assignments is None:
+        count=max(1,min(len(names)-1,int(len(names)*train_fraction+.5)))
+        train=set(np.random.default_rng(seed).choice(names,count,replace=False))
+        assignments={n:'train' if n in train else 'val' for n in names}
+    if set(assignments)!=set(names) or set(assignments.values())!={'train','val'}:raise ValueError('Assignments must cover selected episodes with train and val')
+    def origins(value):
+        if not isinstance(value,dict):return set()
+        keys={str(value[k]) for k in ('source_id','partition_sha256') if value.get(k)}
+        for item in value.values():
+            if isinstance(item,dict):keys|=origins(item)
+            elif isinstance(item,list):
+                for child in item:keys|=origins(child)
+        return keys
+    pools={'train':set(),'val':set()}
+    for name,lineage,group in rows:
+        keys=origins(lineage)
+        if group and not str(group).startswith('UNKNOWN'):keys.add('group:'+str(group))
+        pools[assignments[name]]|=keys
+    shared=sorted(pools['train']&pools['val'])
+    return dict(schema='so101.curation-split/1',source=str(Path(source).resolve()),seed=seed,train_fraction=float(train_fraction),
+        assignments={n:assignments[n] for n in names},counts={s:sum(v==s for v in assignments.values()) for s in ('train','val')},
+        warnings=['Train/Val에 같은 Group 또는 알려진 원본 계보가 포함됩니다. 누수 위험을 확인하세요.'] if shared else [],
+        shared_origins=shared,lineage_coverage='Known metadata only; absence of a warning does not prove independence')
+
+
+def _check_cancel(cancel):
+    if cancel is not None and cancel():raise InterruptedError('Curation 취소됨 · 결과를 게시하지 않았습니다.')
+
+
+def export_splits(source,destination,train_fraction=.8,seed=0,assignments=None,names=None,*,cancel=None):
+    import os,shutil,tempfile
+    from ..real2sim.storage import atomic
+    plan=split_dataset(source,train_fraction,seed,assignments,names);destination=Path(destination).resolve()
+    if destination.exists() or destination.is_relative_to(Path(source).resolve()):raise ValueError('기존 입력/출력은 덮어쓰지 않습니다.')
     destination.parent.mkdir(parents=True,exist_ok=True)
-    temp=destination.with_name(destination.name+'.'+uuid.uuid4().hex+'.tmp')
+    lock=destination.with_name('.'+destination.name+'.workflow-lock')
+    with lock.open('x'):pass
+    temp=None
     try:
-        with h5py.File(source,'r') as src,h5py.File(temp,'w') as out:
-            for k,v in src.attrs.items():out.attrs[k]=v
-            data=out.create_group('data')
-            for k,v in src['data'].attrs.items():data.attrs[k]=v
-            total=0
-            args=_json(src['data'].attrs.get('env_args'),{})
-            if partition:
-                args['source_partition']=partition
-                data.attrs['env_args']=json.dumps(args)
-            for i,name in enumerate(names):
-                src.copy(src['data'][name],data,name=f'demo_{i}')
-                from ..utils.async_video_writer import copy_hdf5_videos
-                copy_hdf5_videos(src['data'][name],data[f'demo_{i}'],destination)
-                data[f'demo_{i}'].attrs['curation_source_episode']=name
-                data[f'demo_{i}'].attrs['source_group']=_group_id(source,name,src['data'][name].attrs,args)
-                if source_records.get(name):data[f'demo_{i}'].attrs['source_lineage']=json.dumps(source_records[name])
-                if partition:data[f'demo_{i}'].attrs['split']=partition['split']
-                total+=len(data[f'demo_{i}/actions'])
-            data.attrs['total']=total
-            data.attrs['curation']=json.dumps({'source':str(source.resolve()),'source_sha256':fingerprint(source),
-                'selected_episodes':names,'selection':'user-reviewed subset; quality flags are diagnostics'})
-            out.flush()
-        # Exclusive publication: never replace an existing destination.
-        os.link(temp,destination)
-        write_contract(destination,read_contract(source))
-    finally:temp.unlink(missing_ok=True)
+        temp=Path(tempfile.mkdtemp(prefix='.'+destination.name+'.',dir=destination.parent))
+        outputs={}
+        for role in ('train','val'):
+            _check_cancel(cancel)
+            relative=Path(role) if Path(source).is_dir() else Path(role)/'dataset.hdf5'
+            chosen=[n for n,v in plan['assignments'].items() if v==role]
+            export_subset(source,temp/relative,chosen,cancel=cancel,role=role)
+            outputs[role]=str(destination/relative)
+        atomic(temp/'curation_split.json',plan)
+        _check_cancel(cancel)
+        if destination.exists():raise FileExistsError(destination)
+        destination.mkdir(exist_ok=False)
+        try:os.rename(temp,destination)
+        except BaseException:destination.rmdir();raise
+        return {**plan,'outputs':outputs,'folder':str(destination)}
+    finally:
+        if temp is not None:shutil.rmtree(temp,ignore_errors=True)
+        lock.unlink(missing_ok=True)
+
+
+def export_subset(source,destination,names,*,cancel=None,role=None):
+    """Copy selected episodes, publish payload last, roll back only owned outputs."""
+    import h5py,os,shutil,tempfile
+    from ..real2sim.storage import atomic
+    from ..so101_dataset_contract import read_contract,write_contract,sidecar
+    from ..utils.artifact_identity import fingerprint
+    from ..utils.async_video_writer import copy_hdf5_videos
+    source=Path(source).resolve();destination=Path(destination).resolve()
+    names=[r[0] for r in _selection(source,names)]
+    if not names:raise ValueError('선택 목록이 비었습니다.')
+    if destination.exists() or destination.is_relative_to(source):raise ValueError('기존 입력/출력은 덮어쓰지 않습니다.')
+    _check_cancel(cancel)
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    lock=destination.with_name('.'+destination.name+'.workflow-lock')
+    with lock.open('x'):pass
+    temp=None;published=[]
+    try:
+        temp=Path(tempfile.mkdtemp(prefix='.'+destination.name+'.',dir=destination.parent))
+        record={'source':str(source),'source_sha256':fingerprint(source),'selected_episodes':names,'role':role,
+                'selection':'explicit episode selection; source_partition is historical, not this allocation'}
+        _check_cancel(cancel)
+        if source.is_dir():
+            manifest=json.loads((source/'manifest.json').read_text());entries={e['id']:e for e in manifest['episodes']}
+            for name in names:
+                _check_cancel(cancel)
+                folder=(source/entries[name]['path']).resolve();target=(temp/entries[name]['path']).resolve()
+                if not folder.is_relative_to(source) or not target.is_relative_to(temp):raise ValueError('Episode outside dataset')
+                shutil.copytree(folder,target)
+            provenance=json.loads((source/'project_provenance.json').read_text())
+            if provenance.get('curation'):record['previous']=provenance['curation']
+            atomic(temp/'project_provenance.json',{**provenance,'curation':record})
+            if sidecar(source).is_file():shutil.copyfile(sidecar(source),temp/sidecar(source).name)
+            atomic(temp/'manifest.json',{**manifest,'episodes':[{**entries[n],'curation_origin':entries[n].get('curation_origin',str(source)+'#'+n)} for n in names]})
+            _check_cancel(cancel)
+            if destination.exists():raise FileExistsError(destination)
+            destination.mkdir(exist_ok=False)
+            try:os.rename(temp,destination)
+            except BaseException:destination.rmdir();raise
+        else:
+            payload=temp/destination.name
+            with h5py.File(source,'r') as src,h5py.File(payload,'w') as out:
+                for k,v in src.attrs.items():out.attrs[k]=v
+                data=out.create_group('data')
+                for k,v in src['data'].attrs.items():data.attrs[k]=v
+                if 'curation' in data.attrs:record['previous']=_json(data.attrs['curation'])
+                total=0
+                for i,name in enumerate(names):
+                    _check_cancel(cancel)
+                    src.copy(src['data'][name],data,name=f'demo_{i}')
+                    copy_hdf5_videos(src['data'][name],data[f'demo_{i}'],payload)
+                    if 'curation_source_episode' not in data[f'demo_{i}'].attrs:data[f'demo_{i}'].attrs['curation_source_episode']=name
+                    if 'curation_origin' not in data[f'demo_{i}'].attrs:data[f'demo_{i}'].attrs['curation_origin']=str(source)+'#'+name
+                    total+=len(data[f'demo_{i}/actions'])
+                data.attrs['total']=total;data.attrs['curation']=json.dumps(record);out.flush()
+            write_contract(payload,read_contract(source))
+            _check_cancel(cancel)
+            # The lock hides the final path until sidecar/videos and HDF5 are complete.
+            for item in (temp/(destination.stem+'.videos'),sidecar(payload),payload):
+                if not item.exists():continue
+                target=destination.parent/item.name
+                if target.exists():raise FileExistsError(target)
+                if item.is_dir():
+                    target.mkdir(exist_ok=False)
+                    try:os.rename(item,target)
+                    except BaseException:target.rmdir();raise
+                else:os.link(item,target)
+                published.append(target)
+    except BaseException:
+        for item in reversed(published):
+            if item.is_dir():shutil.rmtree(item)
+            else:item.unlink(missing_ok=True)
+        raise
+    finally:
+        if temp is not None:shutil.rmtree(temp,ignore_errors=True)
+        lock.unlink(missing_ok=True)
     return destination

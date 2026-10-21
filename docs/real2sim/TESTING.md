@@ -1,5 +1,50 @@
 # 기능 단위 리팩터링 검증 — 2026-10-19 (완료 경계별 기록)
 
+## 2026-10-21 단위7b-1 — Replay/Annotation Path 실행
+
+보고서: [path_execution/REPORT](../../outputs/workflow_validation/functional_refactor/path_execution/REPORT.md).
+최신7a dirty baseline을 보존했다. 기존 GUI227PASS, 최종 Path/Window 인터페이스 별도, native180PASS/Qt1skip, 기존7a/Curation/Source64PASS는 중복 합산하지 않는다. native의 Qt 평가/Curation 검사는 qt_excluded_verified.log에서 따로 실행했다. 모든 새 Payload·Registry·Run은 임시 root/evidence에만 생성했다.
+
+Repository root, 기존 Python/Qt/USD 환경의 Path·Window 계약:
+
+```sh
+env PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages:/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 LD_LIBRARY_PATH=/home/hyeonhee/miniconda3/envs/lerobot-arena/lib/python3.11/site-packages/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin QT_QPA_PLATFORM=offscreen OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_episode_paths.py tests/real2sim/test_episode_path_ui.py tests/real2sim/test_live_scene_selection.py
+```
+
+MuJoCo/Curation/Source I/O 검사는 USD 경로를 섞지 않은 별도 process에서 기존 Qt 경로만 사용한다. import·목록만으로 App/GPU/모델이 초기화되지 않는7a 검사도 재실행했다. No Registry·stale 결과·한글/공백 Path·READY/Run·잘못된 header/asset/Scene·partial·출력 symlink/충돌/Worker 결과 이탈·Cancel/Interrupt cleanup을 검사한다.
+
+실제 CLI 검증은 기존4episode fixture를 읽고 별도 `path_execution/CLI root 한글`에 저장했다. 다음은 같은 종류의 재현 예시이며 output 충돌을 피하려면 새 root/이름을 사용한다. options JSON은 backend=mujoco, mode=operator, episode=demo_0, renderer=egl, generation_seed=1047, realtime=false다.
+
+```sh
+env PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python scripts/real2sim/workflow.py run --stage replay --input outputs/workflow_validation/annotation_throughput/verified_mujoco1_timed/dataset.hdf5 --workspace outputs/real2sim/environments/scene2_builder/v8 --root /tmp/so101-path-check --storage-name 검증_한글 --options outputs/workflow_validation/functional_refactor/path_execution/cli_options.json
+```
+
+Native A/B 도구: `path_execution/native_run.py before|after replay|annotate <새 label> [mujoco|isaac]`. 기준은 저장한7a Operations/unified를 검증 process 안에서만 읽고 임시 Registry를 사용한다. after는 Registry 없는 root이며 child에서 Registry 메서드를 금지한다. 실제 SDK·Workspace·Dataset·카메라·seed는 유지한다. `SO101_VALIDATION_SOURCE`는 검증 도구만의 명시 입력 경로 선택, `SO101_VALIDATION_CANCEL=1`은 첫 완성 episode 진행 파일 뒤 **소유 child만** 중지하는 검증 옵션이다. Production 설정/새 launcher가 아니다. 각각 독립 process로 실행하고 GPU 부족 시 조건을 바꿔 무리하게 재실행하지 않는다.
+
+`compare_native.py <기준 label> <현재 label>`은 control tick trace·주석·배열·metadata·MuJoCo 영상 bytes를 비교한다. `compare_rgb.py`는 Isaac 기준 반복과 전후3048frame씩 streaming decode하여 PTS와 RGB 변동을 구분한다. `summary.json`은 실제5쌍·Cancel/CLI 근거다. CPU 검사 병행·계측이 포함된 단일 실행시간을 일반 성능 향상으로 해석하지 않는다. 실제 장치/학습·Isaac Replay/4·8환경/장시간은 미검증이다.
+
+`actual_gui_benchmark.py`는 사용자 Registry를 읽기만 하며 UI 저장을 양쪽에서 비활성화한 목록 비교다. `gui_benchmark.py`는 evidence의100/1000개 marker fixture와 임시 UI 설정만 쓴다. 선택 header READY 시간/전체 Window 처리량과 목록 완료시간을 구분한다. `audit.py`는 보호 package139파일, unified 실행/정리 try·CurationDialog AST·기존 untracked 로그와 HEAD를 확인한다. 사용자 원본 전수 Hash 감사는 아니다.
+
+## 2026-10-21 단위7a — Path 탐색/선택 (완료)
+
+보고서: [path_discovery/REPORT](../../outputs/workflow_validation/functional_refactor/path_discovery/REPORT.md).
+6c-2d까지 반영한 dirty baseline을 보존했다. 신규17PASS, 기존UI202PASS, Curation/Qt49PASS, 엔진/저장 경계203PASS/1제외는 겹치는 suite이므로 합산하지 않는다. 실제 저장소는 read-only marker/선택 config/별도 offline Registry 비교만 수행했다. 이번에 Isaac/GPU·학습 정책 실행·실물을 검증한 것이 아니다.
+
+Repository root에서 Qt-only 검사(USD 경로를 넣지 않음):
+
+```sh
+env PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages QT_QPA_PLATFORM=offscreen OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_path_discovery.py tests/real2sim/test_path_discovery_ui.py
+env PYTHONPATH=source/soarm101_lab:.venv-real2sim-ui/lib/python3.11/site-packages QT_QPA_PLATFORM=offscreen OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_curation.py
+PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python scripts/real2sim/workflow.py discover --path outputs/workflow/models --category policy
+PYTHONPATH=source/soarm101_lab /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python scripts/real2sim/workflow.py discover --details --path outputs/workflow/models/model_colorblock_cup_a_150ep/checkpoints/150000/pretrained_model
+```
+
+기존 Registry/Workspace GUI suite는 필요한 기존 USD/Qt 환경에서 **별도 process**로 실행했다. MuJoCo를 쓰는 Curation suite에 USD 경로를 섞지 않는다. 로그는 new_verified/registry_ui_verified/curation_native_qt/engine_contracts.log에 분리했다. 초기 혼합 환경 실패 로그도 남겼다.
+
+성능 재현 도구는 `outputs/workflow_validation/functional_refactor/path_discovery/benchmark.py`와 `gui_benchmark.py`다. 전자는 처음 실행 시 이 evidence 안에 fixture_100/fixture_1000을 새로 만들며 기존 경로가 있으면 충돌로 중단한다. 재측정은 benchmark의 measure/stats를 import해 기존 fixture를 읽는다. GUI 도구는 evidence 안의 fixture Registry만 생성/갱신하며 실제 Registry/모델에는 쓰지 않는다. gui_benchmark.json은 교체한 Resume 목록만 비교한다. 전체 Workflow refresh 속도나 checkpoint 실행 가능 인증으로 해석하지 않는다. 초기화되지 않은 앱/모델·영상·HDF5 open 금지 검사는 fresh subprocess와 monkeypatch로 별도 확인했다.
+
+필수 metadata 부족 사례/7b 처리는 [REGISTRY_RESPONSIBILITIES](../../outputs/workflow_validation/functional_refactor/path_discovery/REGISTRY_RESPONSIBILITIES.md). audit.py는 원래6c-2 본문/기존 I/O·Policy AST·남은 Registry 메서드/HEAD 보존을 검사한다. 저장 marker 크기 보존은 전체 payload byte Hash 감사가 아니다.
+
 ## 2026-10-19 단위6c-1 — Replay/Annotation 공통 물리 재생
 
 보고서: `outputs/workflow_validation/functional_refactor/playback/REPORT.md`. 최신6b-3 이후 dirty tree를 baseline_files.json과 before/에 보존했다. Source/Reader/Writer·DataGen/평가·물리·IK·보정·학습·UI의 보호 package140파일 bytes와 Annotation scheduler/수동 출력 AST를 확인했다. API/기존 callback 연결만 교체했고 engine/공식 Mimic 알고리즘은 변경하지 않았다.
@@ -623,3 +668,51 @@ PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hy
 `run_evaluation.py before_eval/after_eval`은 실제 Isaac2환경·6step·측정 자세 유지 검증 정책이며 성공률 검사가 아니다. Production 정책/학습모델을 변경하지 않는다. `config_invariance.py`는 실제 SDK 설정만32번 비교하고 native 환경을 생성하지 않는다. MuJoCo `mujoco_compare.py before/after`는 실제EGL/compiled20배열·30step·Side/Wrist/Overview RGB를 비교했다. 재현 시 고정 출력 이름 충돌을 피하도록 검증 폴더를 복사해 사용한다.
 
 새 Production 환경 생성/관측/read/render 호출은 없다. 픽셀 차이는 기준 반복에서도 발생했으며 PTS/count·숫자 동등성과 별도로 보고한다. 수동 developer 창의 실제 조작, 실물, Source 새수집/장시간DataGen·학습정책 품질은 이번 실검증 범위가 아니다.
+
+## 6c-2c — MuJoCo 생성 책임
+
+[보고서](../../outputs/workflow_validation/functional_refactor/mujoco_environment/REPORT.md), 기준 dd935a6. 실제 payload/runner는 검증 폴더에만 존재한다. 새 의존성·장치 연결은 없다. Native와 기존 Qt/USD process를 분리한다.
+
+```sh
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_mujoco_preparation.py tests/real2sim/test_common_mimic.py tests/real2sim/test_source_recording.py tests/real2sim/test_simulation_calibration.py tests/real2sim/test_minivla_integration.py tests/real2sim/test_active_objects.py -k 'not ui_filters_objects'
+```
+
+최종 core126PASS/Qt1제외. 기존 Qt/USD 환경에서 해당1개 PASS, Workflow/Presentation/평가UI110PASS. 계약 suite(parallel_annotation/parallel_sim_eval/data_resume/mujoco_backend/playback/training_resume)는95PASS/Qt1skip이며 그Qt는UI suite에서PASS. 초기정책분리34PASS/새준비12PASS, 생성이동43PASS. suite중복합산 금지.
+
+`mujoco_environment/native_compare.py <새 label> mujoco 2 annotate`는 실제EGL/기존4episode·seed1047 A/B, `... mujoco 1 replay`는 실제Replay와접촉digest를 기록한다. before 접두사는 검증 폴더 baseline 모듈만 process안에서 읽는다. Root가 아닌 해당 cwd에서 실행하고 PYTHONPATH는 Repository/source/soarm101_lab 절대 경로를 사용한다. 기존출력폴더 덮어쓰기 금지.
+
+Source source_compare.py는 **가상 Leader+실제 MuJoCo/EGL**이며 source/resume label은 고정 검증입력을 사용한다. 실물에 연결하지 않는다. datagen_compare.py의 controlled label은 검증용 Condition으로 첫 claim만 env1→env0 순서로 맞춘다. Production scheduler 수정이 아니며 자유 병렬 실행 bitwise 재현성을 검증한 것이 아니다. 초기 자유실행 결과차이도 보고서/로그에 보존했다. controlled_resume은 Parent 없이 직접 생성/이어 실행을 검사했다. 목표 성공2개 미달은 기존domain 실패로 남겼다.
+
+실제 평가 evaluation_compare.py는2환경/3episode×6step의 측정자세 유지 정책이며 학습모델 성능평가가 아니다. before/after payload는 compare_payload.py(새 Source UUID/private video 경로/실측 timing 제외), physics/model은 compare_runs.py·resource_comparison.json으로 비교했다. DataGen의 실측 ik_duration_ms 배열은 shape/dtype만 비교한다. None준비3회 benchmark_prepare.py의 단일median을전체Workflow속도보장으로 해석하지 않는다.
+
+기존 CLI smoke는 scripts/real2sim/workflow.py worker --backend mujoco --stage environment --workspace <원본v8> --renderer egl --output <새검증경로> --options '{"steps":3,"seed":1047,"realtime":false}'로3step 성공했다. 기존 check_env의 직접Backend 인터페이스는 바꾸지 않았다. Stage/Worker금지engineimport·무부작용import·close계약은유지했다. 실물/장시간/학습정책품질/4·8환경actual/OSMesa·softwareEGL/새LegacyEGL A/B는이번에실행하지않았다.
+
+
+## 6c-2d Isaac 생성 경계·Workspace 재사용
+
+[보고서](../../outputs/workflow_validation/functional_refactor/isaac_boundaries/REPORT.md)와 [호출자 계약](../../outputs/workflow_validation/functional_refactor/isaac_boundaries/CALLERS.md). 기존 conda Python3.11 및 Qt/USD 경로를 사용하며 의존성을 설치하지 않는다.
+
+```sh
+PYTHONPATH=source/soarm101_lab OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 /home/hyeonhee/miniconda3/envs/lerobot-arena/bin/python -m pytest -q tests/real2sim/test_isaac_boundaries.py tests/real2sim/test_environment_factory.py tests/real2sim/test_mujoco_preparation.py tests/real2sim/test_mujoco_backend.py tests/real2sim/test_common_mimic.py tests/real2sim/test_playback.py tests/real2sim/test_parallel_annotation.py tests/real2sim/test_parallel_sim_eval.py -k 'not evaluation_setting_and_curation_review and not source_partition_evaluation_review'
+```
+
+core_complete.log는 최종 Native 회귀, gui_complete.log는 기존 Qt/USD 환경에서 Runtime/launcher/Live Scene/평가/Presentation/Calibration/새입력137PASS, adjacent.log는 Source 녹화/보정/학습Resume/구조57PASS다. 입력6개와 suite를 합산하지 않는다. Native에서 제외한 평가 UI는 GUI suite에서 검사한다.
+
+실제 Isaac은 `outputs/workflow_validation/functional_refactor/isaac_boundaries/run.py <새 label> <eval|runtime|runtime_connect|source|check>`를 Repository root에서 conda Python으로 실행한다. before 접두사는 이 폴더의 시작시점 baseline 코드만 프로세스 안에서 사용한다. 다른 process와 GPU 상태를 먼저 읽고 각 process 종료 후 순차 실행하며 기존 label은 덮어쓰지 않는다. run.py가 1초 간격 GPU전체/RSS를 기록하고, success JSON·정상 close와 비교 파일로 성공을 판단한다. Kit exit0만으로 성공 처리하지 않는다.
+
+Source 모드는 가상 Leader+실제 엔진의 **생성 경계까지만** 실행한다. Recorder/전체 수집/실물 검사가 아니다. eval은 측정자세 유지 정책2환경×6step, runtime_connect는 preview_only로 로봇/카메라 장치를 열지 않는다. check는 기존 물리CLI120step이며 로봇 집기 성공 검사가 아니다. 원본 Workspace/카메라/Physics는 그대로다. compare.py는 정확한 cfg/trace/numeric/PTS와 렌더 RGB 변동을 구분한다. config_invariance.py는 실제 SDK cfg만32회 구성하고 Environment를 생성하지 않는다. 최초 fixture/GUI파일명/검증 helper import 실패 로그도 보존했다.
+
+## Registry 제거 검증 (2026-10-21)
+
+로그는 `outputs/workflow_validation/functional_refactor/registry_removal/`에 있다. `integrated.log`는 관련 Path/저장/Resume/모델/병합/Curation 통합 검사이며, `ui_connections.log`는 Source/Live/비동기 연결 검사다. USD가 로드되는 Workspace Fixture와 실제 MuJoCo/TorchCodec 검사는 별도 process로 실행한다. 환경 충돌 뒤 해당 영역만 다시 검사하며 기존 DataGen/Conversion/Evaluation 실행을 반복하지 않는다. `native_*.log`는 실제 CLI 결과다. 실물 Real Evaluation·Hub 업로드·새 학습은 실행하지 않았다.
+
+기존 CLI는 `workflow.py discover <path>`, `ready/run --stage <stage> --input <path> --workspace <path> --storage-name <name> --options <json-file>`을 사용한다. `register/--artifact/--registry`는 제거됐다.
+
+## Curation 독립화 (2026-10-21)
+
+`tests/real2sim/test_source_partitions.py`, `test_curation.py`, `test_dataset_collections.py`가 자유 배정/역사 증명·저장/취소·Preview를 확인한다. 실제 MuJoCo를 사용하는 Legacy Preview fixture는 USD가 import되지 않은 Qt process에서 실행한다. `tests/minivla/test_partition_training.py`는 기존 Training 계약을 고정 역사 fixture로 유지한다. 결과는 `outputs/workflow_validation/functional_refactor/curation_independent/REPORT.md`에 있다. 이번에는 시뮬레이션 A/B를 반복하지 않았다.
+
+
+## Training / Offline Validation 구조 개편
+
+공식 Trainer config/Resume·optional Val·형식/누수·취소/충돌 검사는 `tests/real2sim/test_learning_interfaces.py`, `test_training_resume.py`를 사용한다. Qt 연결은 `test_learning_ui.py`와 기존 Workflow UI의 학습 선택 검사를 사용하며 기존 Qt/USD 환경이 필요하다. 실제 ACT/SmolVLA 로컬 Checkpoint CPU 1batch 실행·사용한 입력·수치/미검증 사항은 [보고서](../../outputs/workflow_validation/functional_refactor/training_validation/REPORT.md)에 있다. 새 학습/장시간 Resume·대형 모델 다운로드·시뮬레이션을 회귀 확인만을 위해 시작하지 않는다.

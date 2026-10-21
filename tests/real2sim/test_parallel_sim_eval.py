@@ -123,7 +123,7 @@ def test_evaluation_manifest_cannot_escape_run(evaluated_dataset,tmp_path):
 
 def test_legacy_evaluation_folder_is_discovered_without_rewriting(evaluated_dataset):
     from soarm101_lab.workflow.curation import analyze
-    from soarm101_lab.workflow.artifacts import fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
     path=evaluated_dataset/'failure';before=fingerprint(path)
     rows=analyze(path)
     assert len(rows)==1 and not rows[0]['recorded_success']
@@ -173,13 +173,12 @@ def test_evaluation_setting_and_curation_review(evaluated_dataset,tmp_path,monke
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.settings_form import SettingsForm
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.workflow.curation import analyze
     app=QApplication.instance() or QApplication([])
     form=SettingsForm();form.set_stage('sim_eval');form.setPlainText('{"num_envs":4,"episodes":5}')
     assert json.loads(form.toPlainText())['num_envs']==4
     assert form.editors['num_envs'][0].text()=='동시 평가 환경 수'
-    dialog=CurationDialog(Registry(tmp_path/'registry'));dialog.select=lambda *a:None
+    dialog=CurationDialog(tmp_path/'workflow');dialog.select=lambda *a:None
     dialog.loaded(str(evaluated_dataset),analyze(evaluated_dataset))
     assert dialog.kind=='evaluation_dataset' and dialog.filters['failure_reason'].count()==3
     assert not dialog.train_ratio.isEnabled() and not dialog.export_button.isEnabled()

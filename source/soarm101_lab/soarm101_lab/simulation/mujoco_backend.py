@@ -416,19 +416,22 @@ class PolicyEnvironment:
                                      task_definition=task_definition, full_workspace=full_workspace,
                                      physics_profile=physics_profile, identity_sim=identity_sim, active_object_ids=active_object_ids,
                                      simulation_configuration=simulation_configuration)
-        limits = self.backend.limits.copy()
-        if self.coordinates.closed < limits[5, 0] or self.coordinates.open > limits[5, 1] + 1e-5:
+        try:
+            limits = self.backend.limits.copy()
+            if self.coordinates.closed < limits[5, 0] or self.coordinates.open > limits[5, 1] + 1e-5:
+                raise ValueError('Canonical gripper endpoints exceed robot model limits')
+            self.lower = np.r_[limits[:5, 0], 0.]
+            self.upper = np.r_[limits[:5, 1], 1.]
+            if viewer:
+                # GLFW viewer startup can invalidate a lazily initialized EGL display.
+                # Create the offscreen context first; both contexts then coexist.
+                if renderer != 'none':
+                    self.backend.get_rgb()
+                import mujoco.viewer
+                self.backend.viewer = mujoco.viewer.launch_passive(self.backend.model, self.backend.data)
+        except BaseException:
             self.backend.close()
-            raise ValueError('Canonical gripper endpoints exceed robot model limits')
-        self.lower = np.r_[limits[:5, 0], 0.]
-        self.upper = np.r_[limits[:5, 1], 1.]
-        if viewer:
-            # GLFW viewer startup can invalidate a lazily initialized EGL display.
-            # Create the offscreen context first; both contexts then coexist.
-            if renderer != 'none':
-                self.backend.get_rgb()
-            import mujoco.viewer
-            self.backend.viewer = mujoco.viewer.launch_passive(self.backend.model, self.backend.data)
+            raise
 
     def observe(self):
         state = self.backend.get_state()

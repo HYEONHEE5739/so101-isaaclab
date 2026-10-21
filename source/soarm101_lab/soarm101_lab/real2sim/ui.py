@@ -201,12 +201,13 @@ class Window(QMainWindow):
     def refresh_live_scenes(self):
         """List the existing registry; selecting a Scene never starts a worker."""
         path=self.workflow_panel.workspace_path.strip()
+        from ..workflow.paths import discover_inputs
+        scenes=[item['path'] for item in discover_inputs(ROOT/'outputs/real2sim/environments',category='workspace')]
         self.live_scene.blockSignals(True);self.live_scene.clear()
         self.live_scene.addItem('Scene을 선택하세요', '')
         seen=set()
-        for artifact in self.workflow_panel.registry.all(metadata_only=True):
-            scene=artifact['path']
-            if artifact['type']!='workspace' or artifact.get('status','SUCCEEDED')!='SUCCEEDED' or not Path(scene).exists() or scene in seen:continue
+        for scene in scenes:
+            if not Path(scene).exists() or scene in seen:continue
             seen.add(scene)
             folder=Path(scene)
             self.live_scene.addItem(folder.parent.name+'/'+folder.name,scene)
@@ -220,7 +221,7 @@ class Window(QMainWindow):
 
     def browse_scene(self):
         """Live Scene import belongs here; Workflow selects a published version."""
-        from ..workflow.artifacts import browse_directory
+        from ..workflow.paths import browse_directory
         panel=self.workflow_panel
         if panel.busy:raise ValueError('Workflow 실행이 끝난 뒤 Scene을 선택하세요.')
         path=QFileDialog.getExistingDirectory(self,'Workspace 또는 Builder export 폴더 선택',
@@ -232,7 +233,7 @@ class Window(QMainWindow):
                 'import-builder',path],capture_output=True,text=True,timeout=180)
             if result.returncode:raise RuntimeError('Builder 가져오기 실패: '+result.stderr[-3000:])
             path=result.stdout.strip().splitlines()[-1]
-        panel.registry.register('workspace',path);panel.select_workspace(path)
+        panel.select_workspace(path)
 
     def select_live_scene(self):
         path=self.live_scene.currentData()
@@ -261,8 +262,9 @@ class Window(QMainWindow):
         path = self.workflow_panel.workspace_path.strip()
         if not path or path == getattr(self,'_live_scene_path',None): return
         from .workspaces.package import load as load_workspace
-        try: workspace = load_workspace(path)
-        except (ValueError,OSError,KeyError): return
+        workspace=self.workflow_panel._display_workspace
+        if not workspace or str(workspace['root'])!=path:
+            return
         if 'profile' not in workspace: return
         names = list(workspace['profile']['cameras'])
         self._live_scene_path = path
@@ -300,7 +302,7 @@ class Window(QMainWindow):
         load(path);self.fields['profile'].setText(str(Path(path).resolve()))
 
     def open_profile(self):
-        from ..workflow.artifacts import browse_directory
+        from ..workflow.paths import browse_directory
         path,_=QFileDialog.getOpenFileName(self,'Profile / camera calibration',browse_directory('profile'),'JSON (*.json)')
         if path:self.selected(path)
 

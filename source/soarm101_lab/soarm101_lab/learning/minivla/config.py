@@ -86,19 +86,3 @@ class MiniVLAConfig:
             values['batch_size']=1
             values.setdefault('accumulation',8)
         return cls(**values)
-
-
-def training_config(path, options):
-    """Explicit training options override JSON; omitted values retain JSON settings."""
-    try:
-        cfg=MiniVLAConfig.load(path)
-        if not options.get('resume_checkpoint'):cfg.accumulation=1
-        elif 'batch_size' in options and options['batch_size']!=cfg.batch_size:
-            raise ValueError(f'Resume Batch Size는 저장된 {cfg.batch_size}을 유지해야 합니다. 새 Batch Size는 신규 학습에서 설정하세요.')
-        for key in ('steps','val_every','save_freq','early_stopping','patience','batch_size'):
-            if key in options:setattr(cfg,key,options[key])
-        cfg.__post_init__()
-        cfg.validate_architecture()
-    except (TypeError,AssertionError,ZeroDivisionError) as exc:
-        raise ValueError(f'MiniVLA 설정 JSON을 확인하세요: {path} ({exc})') from exc
-    return cfg

@@ -167,7 +167,7 @@ def test_source_replay_contract_and_fake_hardware_preserve_bound_geometry(bound_
     import threading
     values,attrs,_=reader.episode(reader.names[0])
     request={'workspace':str(w['root']),'input':str(reader.path),'renderer':'none','options':{'active_object_ids':reader.args['scene_configuration']['active_object_ids']}}
-    with worker._environment(request,tmp_path/'replay',hz=reader.hz) as env:
+    with worker.simulation_environment.create_mujoco(**worker.prepare_mujoco(request,hz=reader.hz)) as env:
         adapter=MujocoAdapter(env.backend,reader.hz,tmp_path/'replay',1,threading.Event())
         adapter.restore(values,attrs)
         for index,target in enumerate(values['joint_targets']):

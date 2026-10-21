@@ -44,7 +44,7 @@ def test_canonical_video_writer_numeric_loader_curation_and_legacy(tmp_path):
     from soarm101_lab.simulation.mujoco_backend import PolicyEnvironment,configure_rendering
     from soarm101_lab.workflow.curation import analyze
     from soarm101_lab.data.episodes import EpisodeReader
-    from soarm101_lab.learning.minivla.data import load_manifest,episode_arrays
+    from soarm101_lab.data.legacy import load_manifest,episode_arrays
     configure_rendering('none')
     root=Path(__file__).resolve().parents[2]
     profile=json.loads((root/'tests/real2sim/fixtures/scene_profile.json').read_text())
@@ -74,7 +74,7 @@ def test_external_hdf5_curation_subset_resume_and_identity(tmp_path):
     from soarm101_lab.workflow.curation import analyze,export_subset
     from soarm101_lab.data.episodes import EpisodeReader
     from soarm101_lab.workflow.data_resume import combine
-    from soarm101_lab.workflow.artifacts import fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
     from soarm101_lab.workflow.episodes import source_catalog
     source=tmp_path/'source.hdf5';source_fixture(source,4)
     with h5py.File(source,'a') as h:

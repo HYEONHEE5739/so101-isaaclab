@@ -1,6 +1,6 @@
 import json
 import pytest
-from soarm101_lab.workflow.policy import resume_checkpoint, train
+from soarm101_lab.learning.training import resume_checkpoint, train
 from soarm101_lab.so101_dataset_contract import JOINT_SPACE
 
 
@@ -11,13 +11,17 @@ def checkpoint(tmp_path):
     model.mkdir(parents=True)
     state.mkdir()
     dataset = tmp_path / 'dataset'
-    (dataset / 'meta').mkdir(parents=True)
-    (dataset / 'meta/info.json').write_text('{}')
+    from test_learning_interfaces import dataset as make_dataset
+    make_dataset(dataset)
     config = {'dataset': {'root': str(dataset)}, 'policy': {'type': 'smolvla'},
               'steps': 100000, 'rename_map': {'side': 'camera1'}}
     (model / 'train_config.json').write_text(json.dumps(config))
-    (model / 'config.json').write_text('{}')
+    (model / 'config.json').write_text('{"type":"smolvla"}')
+    from soarm101_lab.so101_dataset_contract import current_contract,write_contract
+    write_contract(model,current_contract(JOINT_SPACE))
+    (model/'workflow_provenance.json').write_text((dataset/'workflow_provenance.json').read_text())
     (model / 'model.safetensors').write_bytes(b'test')
+    for name in ('policy_preprocessor.json','policy_postprocessor.json'):(model/name).write_text('{"steps":[]}')
     for name in ('optimizer_param_groups.json', 'optimizer_state.safetensors',
                  'rng_state.safetensors', 'scheduler_state.json'):
         (state / name).write_text('{}')
@@ -52,48 +56,18 @@ def test_resume_uses_original_state_and_new_output(tmp_path, monkeypatch):
         raise RuntimeError('stop before GPU')
     monkeypatch.setattr('subprocess.run', run)
     with pytest.raises(RuntimeError, match='stop before GPU'):
-        train(artifact, {'resume_checkpoint': str(root), 'steps': 100000}, output)
+        train(artifact['path'], {'resume_checkpoint': str(root), 'steps': 100000}, output)
     assert (root / 'pretrained_model/train_config.json').read_bytes() == original
     saved = json.loads((tmp_path / 'resumed.train_config.json').read_text())
     assert saved['resume'] is True
     assert saved['rename_map'] == {'side': 'camera1'}
 
 
-def test_intermediate_checkpoint_import_uses_training_provenance(tmp_path):
-    from soarm101_lab.workflow.policy import import_checkpoint
-    root, artifact = checkpoint(tmp_path)
-    run = tmp_path
-    # Fixture checkpoint must be under the training output's checkpoints.
-    import shutil
-    dest = run / 'policy/checkpoints/040000'
-    dest.parent.mkdir(parents=True)
-    shutil.move(str(root), dest)
-    review={'0':{'recorded_success':True,'success_source':'operator_saved_unverified','pose_reference':{'episode':'demo_0','source_dataset':'recorded.hdf5'}}}
-    artifact.update(id='dataset-id', tasks=[{'task_id': 'pick'}], workspace={'id': 'w'},provenance={'episode_review':review})
-    model = dest / 'pretrained_model'
-    for name in ('policy_preprocessor.json', 'policy_postprocessor.json'):
-        (model / name).write_text('{}')
-    (run / 'request.json').write_text(json.dumps({
-        'stage': 'train', 'input': artifact, 'output': str(run / 'policy')}))
-    class Registry:
-        def verify(self, item):
-            assert item == artifact
-        def register(self, kind, path, **kwargs):
-            assert kind == 'policy'
-            return {'path': str(path)}
-    result = import_checkpoint(dest, Registry())
-    assert result['path'] == str(model)
-    assert json.loads((model / 'workflow_provenance.json').read_text())['workspace'] == {'id': 'w'}
-    assert json.loads((model / 'workflow_provenance.json').read_text())['episode_review']==review
-    (model / 'workflow_provenance.json').unlink()
-    (run / 'request.json').unlink()
-    with pytest.raises(ValueError, match='provenance missing'):
-        import_checkpoint(dest, Registry())
 
 
 def test_resume_output_is_original_folder(tmp_path):
     import shutil
-    from soarm101_lab.workflow.policy import resume_output
+    from soarm101_lab.learning.training import resume_output
     root, artifact = checkpoint(tmp_path)
     dest = tmp_path / 'policy/checkpoints/040000'
     dest.parent.mkdir(parents=True)
@@ -103,57 +77,37 @@ def test_resume_output_is_original_folder(tmp_path):
     (tmp_path / 'mini').mkdir()
     for name in ('last.pt', 'best.pt'): (tmp_path / 'mini' / name).touch()
     (tmp_path/'mini/config.json').write_text('{}')
-    assert resume_output(tmp_path / 'mini/last.pt', 'minivla') == tmp_path / 'mini'
+    with pytest.raises(ValueError,match='비활성화'):resume_output(tmp_path/'mini/last.pt','minivla')
 
 
-def test_minivla_resume_can_extend_steps_but_not_change_model():
-    from dataclasses import asdict
-    from soarm101_lab.learning.minivla.config import MiniVLAConfig
-    from soarm101_lab.learning.minivla.train import validate_resume
-    cfg = MiniVLAConfig()
-    saved = {'architecture_schema': cfg.architecture_schema, 'config': asdict(cfg), 'statistics': {'mean': [0.]}, 'control_hz': 30, 'step': cfg.steps}
-    cfg.steps += 100
-    validate_resume(saved, cfg, saved['statistics'], 30)
-    cfg.horizon += 1
-    with pytest.raises(ValueError, match='config/stats'): validate_resume(saved, cfg, saved['statistics'], 30)
 
 
 @pytest.mark.parametrize('backend', ['isaac', 'mujoco'])
 def test_workflow_resume_plan_reuses_training_output(tmp_path, monkeypatch, backend):
     import shutil
     from soarm101_lab.workflow.operations import Operations
-    from soarm101_lab.workflow.artifacts import Registry
     root, artifact = checkpoint(tmp_path)
     dest = tmp_path / 'policy/checkpoints/040000'
     dest.parent.mkdir(parents=True); shutil.move(root, dest)
     artifact.update(type='dataset', id='dataset', tasks=[{'task_id': 'pick', 'language_instruction': 'Pick the cube'}])
-    registry = Registry(tmp_path / 'registry')
-    monkeypatch.setattr(registry, 'verify', lambda *args: None)
+    registry=tmp_path/'workflow'
+    monkeypatch.setattr('soarm101_lab.workflow.worker_request.stage_input',lambda *a,**kw:artifact)
     run = tmp_path / 'resume_run'; run.mkdir()
-    plan = Operations(registry).plan('train', artifact, '',
+    plan = Operations(root=registry).plan('train',artifact['path'],'',
         {'resume_checkpoint': str(dest), 'steps': 100000, 'backend': backend}, run_dir=run)
     assert plan['output'] == str(tmp_path / 'policy')
     assert json.loads((run / 'request.json').read_text())['output'] == str(tmp_path / 'policy')
 
 
-def test_minivla_train_only_requires_validation_before_worker(tmp_path,monkeypatch):
-    from soarm101_lab.workflow import operations
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(operations,'inspect_artifact',lambda *a:{})
-    service=operations.Operations(Registry(tmp_path/'registry'))
-    artifact={'type':'dataset','path':str(tmp_path),'provenance':{'source_partition':{'split':'train'}}}
-    state,reason=service.readiness('train',artifact,options={'architecture':'minivla'})
-    assert state=='NOT_READY' and 'TRAIN 전용' in reason and 'Validation Dataset' in reason
-    state,reason=service.readiness('train',artifact,options={'architecture':'minivla','save_freq':0})
-    assert state=='NOT_READY' and '저장 간격' in reason
 
 
 def test_periodic_minivla_checkpoint_is_not_replaced(tmp_path):
-    from soarm101_lab.workflow.policy import selected_minivla_checkpoint,resume_output
+    from soarm101_lab.workflow.policy import selected_minivla_checkpoint
+    from soarm101_lab.learning.training import resume_output
     root=tmp_path/'policy';(root/'checkpoints').mkdir(parents=True)
     for name in ('best.pt','last.pt','checkpoints/step_000002.pt'):(root/name).touch()
     (root/'config.json').write_text('{}')
     chosen=root/'checkpoints/step_000002.pt'
     assert selected_minivla_checkpoint(root,str(chosen))==chosen
-    assert resume_output(chosen,'minivla')==root
+    with pytest.raises(ValueError,match='비활성화'):resume_output(chosen,'minivla')
     with pytest.raises(ValueError):selected_minivla_checkpoint(root,str(tmp_path/'outside.pt'))

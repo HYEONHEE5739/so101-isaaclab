@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from .policy import MiniVLA
-from .data import load_manifest, episode_arrays
+from ...data.legacy import load_manifest, episode_arrays
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--checkpoint'); p.add_argument('--vlm-question'); p.add_argument('--expected-answer'); p.add_argument('--manifest',required=True)

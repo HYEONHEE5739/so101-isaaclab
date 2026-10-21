@@ -99,28 +99,25 @@ def test_failure_policy_choices_roundtrip():
 def test_minivla_checkpoint_frequency_is_editable():
     from soarm101_lab.workflow.option_help import TRAIN_KEYS
     app=QApplication.instance() or QApplication([])
-    form=SettingsForm();form.allowed_keys=TRAIN_KEYS['minivla'];form.set_stage('train');form.setPlainText('{}')
+    form=SettingsForm();form.allowed_keys=TRAIN_KEYS['act'];form.set_stage('train');form.setPlainText('{}')
     check,editor,_=form.editors['save_freq'];check.setChecked(True);editor.setValue(250)
     assert json.loads(form.toPlainText())['save_freq']==250
     form.close()
 
 
-def test_minivla_schedule_and_advanced_config_ui():
+def test_training_has_no_minivla_preparation_options():
     from soarm101_lab.workflow.option_help import TRAIN_KEYS
     app=QApplication.instance() or QApplication([])
-    f=SettingsForm();f.minivla=True;f.allowed_keys=TRAIN_KEYS['minivla'];f.set_stage('train')
-    f.setPlainText(json.dumps(dict(steps=50000,val_every=1000,save_freq=2500,early_stopping=False)))
-    assert 'source_groups' not in f.editors
-    assert f.editors['steps'][1].value()==50000 and not f.editors['early_stopping'][1].isChecked()
-    assert not f.editors['model_config'][1].isVisible()
-    assert json.loads(f.toPlainText())['val_every']==1000
+    f=SettingsForm();f.allowed_keys=TRAIN_KEYS['act'];f.set_stage('train');f.setPlainText('{}')
+    assert not {'source_groups','val_every','model_config','legacy_group_split'} & set(f.editors)
+    assert 'minivla' not in TRAIN_KEYS
     f.close()
 
 
 def test_minivla_batch_size_numeric_control_keeps_other_models_default():
     from soarm101_lab.workflow.option_help import TRAIN_KEYS
     app=QApplication.instance() or QApplication([])
-    f=SettingsForm();f.set_stage('train');f.minivla=True;f.allowed_keys=TRAIN_KEYS['minivla']
+    f=SettingsForm();f.set_stage('train');f.minivla=True;f.allowed_keys=TRAIN_KEYS['act']
     f.setPlainText('{}');enabled,editor,_=f.editors['batch_size']
     assert editor.value()==8 and 'accumulation' not in f.editors
     enabled.setChecked(True);editor.setValue(4)

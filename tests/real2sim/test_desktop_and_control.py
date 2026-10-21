@@ -12,8 +12,7 @@ from soarm101_lab.real2sim.runtime import Runtime
 @pytest.fixture(autouse=True)
 def isolated_workflow_registry(tmp_path,monkeypatch):
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'workflow_registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
 
 
 def test_qt_startup_layout_and_heartbeat(tmp_path):
@@ -51,8 +50,7 @@ def test_removed_guard_settings_are_not_loaded_sent_or_saved(tmp_path,monkeypatc
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.real2sim.ui import Window, ROOT
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     (tmp_path/'ui_settings.json').write_text(json.dumps({'leader_port':'/fake/leader',
         'motion_guard':{'startup_deg':1,'velocity_deg_s':2,'tracking_deg':3}}))
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path)
@@ -260,8 +258,7 @@ def test_capture_and_real_sim_share_scrollable_right_settings(tmp_path, monkeypa
     from PyQt6.QtCore import QPoint
     from soarm101_lab.real2sim.ui import Window
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     app = QApplication.instance() or QApplication([])
     w = Window(tmp_path / 'live')
     w.resize(1280, 720); w.show(); app.processEvents()

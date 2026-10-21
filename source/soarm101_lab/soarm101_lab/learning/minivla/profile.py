@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from .config import MiniVLAConfig
 from .head import ActionHead
-from .train import seed_all
+from lerobot.utils.random_utils import set_seed as seed_all
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--config',required=True); p.add_argument('--adaptation',choices=['frozen','qlora']); p.add_argument('--out'); a=p.parse_args()

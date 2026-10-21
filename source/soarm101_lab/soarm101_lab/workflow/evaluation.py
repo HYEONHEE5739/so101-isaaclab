@@ -248,12 +248,13 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
             scene_root=root if len(definitions)==1 else root/'tasks'/definition['task_id']
             try:
                 if backend=='mujoco':
-                    from .mujoco import _environment
+                    from .worker_request import prepare_mujoco
+                    from ..simulation.environment import create_mujoco
                     from ..simulation.mujoco_backend import MujocoBackend
                     env_request={**request,'checkpoint':str(path),'options':{**opts,'task_definition':definition,
                         'instruction':definition['language_instruction'],'active_object_ids':active}}
                     hz=getattr(getattr(policy,'policy',None),'control_hz',None)
-                    parent=_environment(env_request,scene_root,hz=hz)
+                    parent=create_mujoco(**prepare_mujoco(env_request,hz=hz,workspace=workspace))
                     backends=[parent.backend]+[MujocoBackend(render_backend=parent.backend.render_backend,
                         shared_backend=parent.backend) for _ in range(count-1)]
                     hz=parent.hz
@@ -263,7 +264,7 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                     import torch
                     from isaaclab.envs import ManagerBasedEnv
                     from ..real2sim.workspaces.environment import make_config
-                    cfg=make_config(w['root'],device,count,task_definition=definition,
+                    cfg=make_config(w,device,count,task_definition=definition,
                                     coordinates=read_contract(minivla_root(path)),active_object_ids=active,
                                     overview_camera=bridge is not None,grasp_observations=bridge is not None)
                     cfg.seed=seed;cfg.events.reset_episode.params['randomization_seed']=seed
@@ -521,7 +522,7 @@ def evaluate(request):
                'scene_configuration':configured(w,definitions[0],active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'],
                'simulation_configuration':cfg.simulation_configuration if stage=='sim_eval' else read_contract(minivla_root(path)).get('simulation_model'),
                'scene_configurations':[configured(w,d,active, 'isaac' if stage=='sim_eval' else 'real')['scene_configuration'] for d in definitions],
-               **evaluation_distribution(artifact,w,active), 'policy_artifact': artifact['id'], 'checkpoint_path': str(path),
+               **evaluation_distribution(artifact,w,active), 'policy_path': artifact['path'], 'checkpoint_path': str(path),
                'checkpoint_step': getattr(getattr(policy,'policy',None),'checkpoint_step',None), 'task_definitions': definitions, 'evaluation_seed': used_seed,
                'hardware_mapping': follower.metadata.get('precision_mapping') if stage == 'real_eval' else None,
                'metrics_per_task': evaluation_metrics(definitions, rows, stage == 'sim_eval'), 'episodes' if stage == 'sim_eval' else 'steps': rows,

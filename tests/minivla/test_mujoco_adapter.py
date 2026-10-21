@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 from soarm101_lab.simulation.mujoco_backend import MujocoSO101
-from soarm101_lab.learning.minivla.data import JOINTS, UNITS
+from soarm101_lab.data.legacy import JOINTS, UNITS
 
 def test_position_mapping_reset_render_step(tmp_path):
     if importlib.util.find_spec('mujoco') is None:

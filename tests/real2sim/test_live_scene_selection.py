@@ -11,16 +11,17 @@ from PyQt6.QtWidgets import QApplication
 def scenes(tmp_path, monkeypatch):
     from test_builder_workspace import make_export, fruit_export
     from soarm101_lab.real2sim.workspaces.builder import import_scene
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.workflow import ui
     from soarm101_lab.real2sim.ui import Window
-    registry=Registry(tmp_path/'workflow')
+    registry=tmp_path/'workflow'
     blocks=tmp_path/'blocks';blocks.mkdir()
     fruit=tmp_path/'fruit';fruit.mkdir()
-    first=import_scene(make_export(blocks),'blocks',registry=tmp_path/'environments')
-    second=import_scene(fruit_export.__wrapped__(fruit),'fruit',registry=tmp_path/'environments')
-    artifacts=[registry.register('workspace',path) for path in (first,second)]
-    monkeypatch.setattr(ui,'Registry',lambda:registry)
+    first=import_scene(make_export(blocks),'blocks',registry=tmp_path/'outputs/real2sim/environments')
+    second=import_scene(fruit_export.__wrapped__(fruit),'fruit',registry=tmp_path/'outputs/real2sim/environments')
+    artifacts=[{'path':str(path)} for path in (first,second)]
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
+    import soarm101_lab.real2sim.ui as desktop
+    monkeypatch.setattr(desktop,'ROOT',tmp_path)
     app=QApplication.instance() or QApplication([])
     window=Window(tmp_path/'live')
     window.runtime_launcher.connect=Mock(return_value=None)
@@ -35,14 +36,19 @@ def scenes(tmp_path, monkeypatch):
 def test_scene_selection_shares_workflow_camera_ids_and_task(scenes):
     app,w,first,second,artifacts=scenes
     w.live_scene.setCurrentIndex(w.live_scene.findData(str(first)))
+    from test_episode_path_ui import until
+    until(lambda:w.workflow_panel.task_selector.workspace is not None and w.workflow_panel.workspace_path==str(first))
     assert w.workflow_panel.workspace_path==str(first)
-    assert w.workflow_panel.inputs.currentData()==artifacts[0]['id']
+    assert w.workflow_panel.inputs.currentData()==str(first)
     assert len(w.workflow_panel.task_selector.definitions)==6
     assert not w.live_tiles['sim_wrist'].isHidden()
     # Source dropdown can select another Workspace despite the old Scene filter.
     panel=w.workflow_panel
-    index=panel.inputs.findData(artifacts[1]['id']);assert index>=0
+    panel.input_folders.pop('source',None);panel.refresh()
+    until(lambda:panel.inputs.findData(str(second))>=0)
+    index=panel.inputs.findData(str(second));assert index>=0
     panel.inputs.setCurrentIndex(index)
+    until(lambda:panel.workspace_path==str(second) and panel.scene_cameras==('front',))
     assert panel.workspace_path==str(second)
     assert w.live_scene.currentData()==str(second)
     assert panel.scene_cameras==('front',)
@@ -50,7 +56,7 @@ def test_scene_selection_shares_workflow_camera_ids_and_task(scenes):
     assert not w.live_tiles['sim_front'].isHidden()
     assert panel.task_selector.selection()[0]['task_id']=='fruit_sort'
     assert 'front_camera' in w.fields
-    saved=json.loads((panel.registry.root/'ui.json').read_text())
+    saved=json.loads((panel.root/'ui.json').read_text())
     assert saved['workspace']==str(second)
     w.runtime_launcher.connect.assert_not_called()
     w.runtime_launcher.disconnect.assert_not_called();w.bus.send.assert_not_called()
@@ -59,6 +65,8 @@ def test_scene_selection_shares_workflow_camera_ids_and_task(scenes):
 def test_settings_visible_without_capture_tab_and_connect_payload(scenes):
     app,w,first,second,_=scenes
     w.live_scene.setCurrentIndex(w.live_scene.findData(str(second)))
+    from test_episode_path_ui import until
+    until(lambda:w.workflow_panel.workspace_path==str(second) and w.workflow_panel.scene_cameras==('front',))
     assert w.scene_controls.isVisible() and w.scene_options.isVisible()
     assert w.use_precision.isVisible() and w.identity_sim.isVisible()
     assert w.capture_options.isVisible()

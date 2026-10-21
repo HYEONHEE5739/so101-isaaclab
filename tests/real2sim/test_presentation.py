@@ -5,7 +5,6 @@ import pytest
 from soarm101_lab.workflow import presentation as module
 from soarm101_lab.workflow.presentation import Presentation, RecorderControls, attach, send
 from soarm101_lab.workflow.operations import Operations
-from soarm101_lab.workflow.artifacts import Registry
 from soarm101_lab.real2sim.storage import atomic
 from test_workspaces import published
 
@@ -19,7 +18,7 @@ def session(tmp_path, monkeypatch, stage='replay'):
 
 
 def test_modes_same_source_environment(published, tmp_path):
-    r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
+    a=str(published[3]);op=Operations(root=tmp_path/'workflow')
     operator = op.plan('source', a, '', {'port': 'test', 'mode': 'operator','storage_name':'mode_check'}, run_dir=tmp_path)
     developer = op.plan('source', a, '', {'port': 'test', 'mode': 'developer','storage_name':'mode_check'}, run_dir=tmp_path)
     assert '--headless' in operator['argv']
@@ -77,7 +76,7 @@ def test_ui_operator_default_frames_and_controls(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert panel.mode.currentData() == 'operator'
     root = session(tmp_path, monkeypatch); bridge = module.current()
@@ -111,7 +110,7 @@ def test_stage_specific_ui(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert not panel.episode_time.isHidden()
     assert not panel.controls['save'].isHidden()
@@ -137,7 +136,7 @@ def test_annotation_job_view_never_reads_preview_files(tmp_path,monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel=ui.WorkflowPanel(lambda *a:None)
     panel.stage.setCurrentIndex(panel.stage.findData('annotate'))
     root=session(tmp_path,monkeypatch,'annotate');now=module.time.time()
@@ -229,7 +228,7 @@ def test_datagen_ui_uses_identical_progress_for_both_backends(tmp_path,monkeypat
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel=ui.WorkflowPanel(lambda *args:None);panel.save_backend_settings=lambda:None
     panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
     panel.backend.setCurrentIndex(panel.backend.findData(backend))

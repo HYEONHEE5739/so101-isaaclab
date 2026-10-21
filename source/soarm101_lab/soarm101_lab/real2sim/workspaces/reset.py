@@ -8,8 +8,8 @@ def source_workspace(workspace, resume=None):
     from ...workflow.tasks import recorded_scene
     from .tasks import configured
     if resume:
-        from ...workflow.artifacts import inspect_artifact
-        reset = recorded_scene(inspect_artifact('source',resume),workspace)['reset']
+        from ...workflow.dataset import inspect_dataset
+        reset = recorded_scene(inspect_dataset('source',resume),workspace)['reset']
     else:
         reset = {**workspace['task']['reset'],'mode':'uniform','yaw_rad':[0.,0.],'xy_jitter_m':0.,'margin_m':0.}
     return configured(workspace,reset=reset)

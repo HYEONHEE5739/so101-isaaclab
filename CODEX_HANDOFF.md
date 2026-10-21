@@ -1,3 +1,63 @@
+## 최신 완료 — Training / Offline Validation
+
+공식 ACT/SmolVLA Trainer 설정·native Resume는 `learning/training.py`, LeRobot 입력/누수 검사는 `learning/datasets.py`, 독립 평가와 저장 processor/공식 loss는 `learning/validation.py`가 소유한다. Train 전체·선택 Val Path를 사용하며 자동 Split/과거 Partition 역할 강제는 없다. UI/Worker의 독립 `validate`와 학습 후 별도 평가 process를 연결했다. MiniVLA 전용 train/data·prepared Dataset·학습 UI는 삭제했고 모델/Checkpoint 추론 및 실제 legacy Reader는 보존했다.
+
+실제 ACT/SmolVLA CPU1batch 평가·ACT Worker와 관련 Resume/UI/core 검사를 통과했다. ACT VAE는 posterior/KL을 보존한 train/no_grad objective이며 SmolVLA Flow loss와 직접 비교하지 않는다. 실제 SmolVLA 입력의 공유 계보 경고를 기록했다. 장시간 학습·실제 optimizer Resume·GPU/전체 통합은 미검증이다. 사용자 원본·Commit/Push 변경 없음. 아래 과거 기록은 당시 상태다.
+
+상세: [Training/Validation 보고서](outputs/workflow_validation/functional_refactor/training_validation/REPORT.md).
+
+## 2026-10-21 — Curation 자유 선별·분할 완료
+
+`workflow.curation.split_dataset/export_splits/export_subset`가 Episode 단위 선택·선택적 Train/Val 배정·재선별을 소유한다. 기존 `episodes.source_split/export_source_splits` 강제 Group 연결 성분 분할은 삭제했다. 과거 Partition/Lineage는 변경 없이 검증·보존하며 새 배정은 `curation_split.json`/`curation.role`로 분리한다. UI에 전체 제외·출력 폴더 선택·저장 취소를 연결했다. 지원 편집 형식은 기존 HDF5와 Legacy NPY/MP4이며 LeRobot 직접 편집·평가 묶음 전체 편집은 지원하지 않는다. 기존 Training/LeRobot Merge 정책은 후속이다. [검증/지원 범위](outputs/workflow_validation/functional_refactor/curation_independent/REPORT.md). 아래 이전 완료 기록은 당시 상태다.
+
+## 2026-10-21 — Registry 제거 / 전체 Stage Path 실행
+
+현재 모든 Workflow Stage의 공개 입력은 Path다. `workflow/artifacts.py`와 Registry 등록·조회·promote·ID CLI는 삭제했다. 기존 `artifacts/*.json`은 사용자 과거 자료로 그대로 남지만 실행에서 읽지 않는다. 아래 이전 단계 기록은 당시 상태이며 현재 경계는 이 절을 따른다.
+
+- `workflow/paths.py`: native marker 탐색·저장 이름·출력 경계. 목록에서 payload/모델을 읽지 않는다.
+- `worker_request.stage_input/episode_context`: Path에서 Dataset/Checkpoint/Workspace 계약을 읽고 기존 Stage 실행에 전달한다. `dataset.inspect_dataset`와 `policy.inspect_checkpoint`가 형식별 검사를 소유한다.
+- `Operations`: Path 요청·출력 예약/Lock·process/Cancel·runs 로그·완료 결과 Path. UI의 선택/상세/READY는 기존 executor에서 처리한다.
+- Curation은 원본 Path를 직접 열어 새 결과를 저장한다. 과거 Group/Partition 정책과 MiniVLA 학습/Val 정책은 이번에 바꾸지 않았다. 공식 ACT/SmolVLA Trainer/Resume도 유지한다.
+- 필수 provenance/좌표가 없는 Checkpoint는 발견되더라도 평가 불가 오류를 낸다. Registry·다른 Checkpoint로부터 정보를 복원하거나 원본을 고치지 않는다.
+
+상세 결과와 검증 한계: [Registry 제거 보고서](outputs/workflow_validation/functional_refactor/registry_removal/REPORT.md).
+
+## 2026-10-21 — 7b-1 Replay/Annotation Path 실행 완료
+
+Replay/Annotation의 UI·CLI·Operations·Worker 입력은 Dataset Path다. Registry 없이 marker 탐색→선택 header 비동기 확인→Worker native/full 검증→기존 물리 실행/Writer→Path 결과로 완료한다. Operations(root=…)는 기존 process/예약/Cancel/로그를 공유하며 두 Stage에서 get/verify/register/promote·입력 ID·자동 접두사 이름을 제거했다. Run token은 실행 이력으로 유지한다. 다른 Stage는 아직 기존 Artifact 인터페이스다.
+
+실제 MuJoCo Common/Legacy Replay·Annotation, Isaac2환경 Annotation A/B에서 초기/명령/물리·관측/판정·Numeric이 같다. MuJoCo MP4 bytes, 양 엔진 Frame/PTS 일치; Isaac RGB는 기준 반복부터 달라 별도 비교했다. 실제 Cancel은 완료2episode만 보존·STOPPED, 실제 CLI와 Registry 사용을 금지한 child Legacy 실행도 완료했다. 기존7a·I/O·수치·Curation 정책·환경 실행/정리 try AST를 보호했다. Report/호출자/한계는 `outputs/workflow_validation/functional_refactor/path_execution/REPORT.md` 및 CALLERS.md를 따른다.
+
+목록의 실제32JSON/190,761,190byte sync 읽기를 제거했지만 전체 Workflow 처리량 개선을 주장하지 않는다. 선택 header와 full 검사를 구분하며, UI Stage 전환/늦은 결과/종료를 검증했다. asset scope 설명 문구만 다를 때 파일/digest·Mapping은 정확 비교한다. 사용자 자료·설정·의존성·Commit/Push 변경 없음. **7b-1 완료, 전체 Registry 제거는 미완료**다. 다음은 DataGen Path/Hash/Resume 경계(7b-2)다. Source/Conversion/Merge/Training/Evaluation/Hub·Curation 정책·MiniVLA/Validation은 남는다.
+
+## 2026-10-21 — 7a Path 탐색 완료 / ID 실행 전환은 후속
+
+`workflow.paths`의 순수 scandir/stat 탐색을 Resume 모델 목록·Curation 파일 선택기·기존 CLI discover에 연결했다. Resume 후보는 Path identity/상대 라벨이며 선택 checkpoint config는 기존 executor에서 읽는다. Registry.input_directory와 standalone artifacts.browse_directory 본문/옛 호출은 삭제했다. 기존 Reader/Writer·Policy 기존 함수와 6c-2 환경/물리 본문은 유지했다.
+
+실제 Dataset 후보29개·Checkpoint16개(9 native LeRobot/7 MiniVLA)를 발견했다. 탐색은 등록·파일 복사·모델/HDF5/video/Hash 읽기를 하지 않는다. 실행 허가가 아닌 형식 후보이며 full 검사와 기존 native Resume 조건은 worker에 남는다. 일반 Stage ID 선택/실행·Curation.open_latest/loaded/save·Registry 결과 등록은 아직 남아 있다. 중간 native checkpoint7개의 좌표/provenance 누락, 오래된 payload 없는 Artifact1개, Sim 평가 Policy/payload action space 차이는 원본 보완 없이 7b 조건으로 기록했다.
+
+신규17PASS, 기존UI202PASS, Curation/Qt49PASS, 엔진/저장 경계203PASS/1제외(겹침 합산 금지). 교체한 Resume 목록의 실제 자료 첫 조회 read190,761,190→0byte·heartbeat 최대약1.100초→0.0104초. 전체 Workflow refresh 측정은 아니다. 사용자 자료/설정·Commit/Push 변경 없음. 전체 Registry 제거·무Registry 실행 완료가 아니다. 보고서: `outputs/workflow_validation/functional_refactor/path_discovery/REPORT.md`, 세부 책임/7b 대상: 같은 폴더 `REGISTRY_RESPONSIBILITIES.md`.
+
+## 2026-10-21 — 6c-2d 완료 / 6c-2 환경 생성 경계 완료
+
+Isaac 설정/생성 호출35곳과 Gym 경로를 점검했다. Recorded Scene의 create_isaac, Source/Teleop, Sim 평가, Live Runtime, 독립 검사/고정 Scene CLI는 센서·Reset·수명이 달라 별도 진입을 유지한다. 공통 cfg는 기존 make_config이며 새 Factory/Manager/Wrapper를 추가하지 않았다. Source/평가/Runtime/물리 CLI는 이미 준비한 Workspace dict를 재사용한다. Runtime.build_environment(p, *, workspace=None)는 connect의 검증 snapshot을 빌리며 standalone 호출은 필요 시 현재 파일을1회 읽는다. Runtime profile 적용에는 파생 Task copy가 아닌 원본 Workspace를 사용한다. Source는 장치 연결 뒤 실제 mapping Hash 검사를 유지했다.
+
+실제 Isaac A/B: 평가2환경×6step의 설정·3trace/72numeric·24frame/PTS·Preview3파일, Runtime/Source 생성 경계6step과 물리CLI120step의 설정·초기/명령/관절·물체속도 trace가 같다. Source는 가상 Leader이며 Recorder 전 경계만 검증했다. load는 평가생성1→0(상위1회 별도), Runtime connect3→1/standalone build2→1, Source2→1, 물리CLI3→1이다. 평가 baseline 반복과 전후 RGB 차이는 따로 기록했으며 pixel/통계적 동등성·보편적 속도향상은 주장하지 않는다. GUI/Runtime137PASS·인접57PASS·입력6PASS, core 완료 로그는 보고서 참조(중복합산 금지). 설정32회 UI독립 비교도 통과했다.
+
+환경 생성·실제 reset event·Camera/framing에는 Workflow/UI/Registry import가 없다. 기존 workspaces.reset.source_workspace/demo.verify_dataset의 상위 입력 정책 역참조와 Task 생략 시 요청 파일 fallback은 남으며 전체 Workspace/Registry 정리 완료가 아니다. 사용자자료/설정·UI·의존성·Commit/Push 변경 없음. 실제 Source 전체 수집·실물·장시간·새 Annotation/DataGen actual·4/8환경 actual은 이번에 재검증하지 않았다. **6c-2a/b/c/d 경계는 완료, 전체 기능 단위 리팩터링은 미완료**다. 상세 호출자/검증/한계는 `outputs/workflow_validation/functional_refactor/isaac_boundaries/REPORT.md`와 해당 CALLERS.md를 따른다.
+
+
+
+## 2026-10-21 — 6c-2c MuJoCo 입력/생성 분리 완료
+
+기준 HEAD dd935a6. _environment/unused output/export 삭제. worker_request.prepare_mujoco가 기존 Dataset/Resume/Calibration/Physics 선택을 소유하고, simulation.environment.create_mujoco는 검증한 원본 Workspace+명시 kwargs로 기존 PolicyEnvironment를 생성한다. Dataset Legacy provenance 본문은 workflow.dataset.recording_provenance로 이동하고 실제 모든 caller 교체. Unified/평가는 이미 읽은 Workspace 재사용. DataGen Parent 제공/직접 생성 소유권 및 초기화/Writer 종료 실패 close 보강. PolicyEnvironment viewer/limits 생성 실패는 Backend close. Model/IK/Physics/Playback/Recording/UI/학습 본문은 보호했다.
+
+실제 MuJoCo/EGL: Source/Discard/Resume37·74numeric/MP4일치, Replay432step(접촉정보/접촉력 digest포함), Annotation2env4episode/148numeric·8MP4일치, 평가2env3회×6step/108numeric·6MP4일치. DataGen/직접생성Resume는 동일 초기claim(env1→env0)을 검증 runner에서만 맞춰 전후Reset·명령·IK·물리·영상 일치. 자유 병렬 첫 실행은 env배정이 달라1성공/1실패 vs2실패; Production Scheduler/RNG를 고쳐 숨기지 않았고 무제어 병렬 bitwise 재현성 주장금지. 동일배정 A/B는1성공/1IK실패, Resume는누적1성공/3IK실패이며 목표2미달 정상domain실패다.
+
+load는 Source/Resume4→3, Unified Annotation/DataGen/평가3→1, 직접DataGenResume2→1. compile1·공유Model1·독립primaryMjData/Renderer/실제close 동일. none준비3회 중앙1.258→1.146s(기준/현재각3회), pagecache/thermal미통제라전체속도향상 주장금지. core126PASS/Qt1제외→Qt1PASS, 계약95PASS/Qt1skip→UI110PASS에서통과, 초기정책34PASS/준비12PASS/생성43PASS. 겹침합산금지. Renderer-before-import/Qt누락/spy/timing비교의초기실패로그 보존. Source새UUID/private영상경로/실측timing만명시제외.
+
+근거 outputs/workflow_validation/functional_refactor/mujoco_environment/REPORT.md·resource_comparison/audit/각payload와execution_comparison. Code/원래untracked로그/사용자자료/설정·HEAD보존, Commit/Push없음. Source Resume helper의 workflow 역참조·Legacy reader위치·Registry/Path/Training/MiniVLA/Isaac Source·평가 통합은남음. 실물/학습정책품질/장시간/4·8환경actual/새LegacyEGL/OSMesa·softwareEGL/developer창실조작은미검증.
+
 
 ## 2026-10-21 — 6c-2b 완료: 명시 카메라·관측 요구
 

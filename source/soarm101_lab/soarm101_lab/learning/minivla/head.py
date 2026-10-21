@@ -127,3 +127,8 @@ class ActionHead(nn.Module):
             t = torch.full((state.shape[0],), k / self.cfg.flow_steps, device=state.device)
             x = x + self(ctx, cmask, state, x, t) / self.cfg.flow_steps
         return x
+
+
+def compute_loss(backbone, head, batch, augment=False):
+    features=backbone(batch['images'], batch['instruction'], augment=augment)
+    return head.loss(features,batch['state'],batch['actions'],batch['mask'])

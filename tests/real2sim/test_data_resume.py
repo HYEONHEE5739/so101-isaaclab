@@ -21,7 +21,7 @@ def test_datagen_resume_requires_actual_generated_result(tmp_path,monkeypatch):
     from soarm101_lab.data.episodes import SCHEMA
     path=tmp_path/'data.hdf5';path.touch()
     item={'format':SCHEMA,'env_args':{}}
-    monkeypatch.setattr(data_resume,'inspect_artifact',lambda *args:item)
+    monkeypatch.setattr(data_resume,'inspect_dataset',lambda *args:item)
     with pytest.raises(ValueError,match='이전 DataGen 결과'):data_resume.inspect_resume_input('datagen',path)
     item['env_args'].update(generation_method='isaaclab_mimic/1.0.15',generation_seed=1047)
     assert data_resume.inspect_resume_input('datagen',path) is item
@@ -75,7 +75,7 @@ def test_merge_preserves_previous_and_orders_completed_episodes(tmp_path):
 def test_resume_rejects_wrong_workspace_task_and_datagen_input(monkeypatch):
     import pytest
     from soarm101_lab.workflow import data_resume
-    monkeypatch.setattr(data_resume, 'inspect_artifact', lambda *args: {
+    monkeypatch.setattr(data_resume, 'inspect_dataset', lambda *args: {
         'workspace': {'id': 'a'}, 'tasks': [{'task_id': 'pick'}],
         'episode_count': 20, 'env_args': {'source_dataset': '/tmp/input.hdf5'}})
     assert data_resume.validate('datagen', 'unused', {'id': 'a'}, [{'task_id': 'pick'}],

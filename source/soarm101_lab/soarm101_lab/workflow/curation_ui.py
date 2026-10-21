@@ -285,9 +285,10 @@ class Plot(QWidget):
 
 class DatasetPicker(QFileDialog):
     """One picker accepts either a canonical dataset directory or an HDF5 file."""
-    def __init__(self,parent,directory,*,allow_evaluation=True):
+    def __init__(self,parent,directory,*,allow_evaluation=True,allow_collection=False):
         super().__init__(parent,'데이터 열기 · HDF5 파일 또는 데이터 폴더',directory)
         self.allow_evaluation = allow_evaluation
+        self.allow_collection = allow_collection
         self.setOption(QFileDialog.Option.DontUseNativeDialog)
         self.setFileMode(QFileDialog.FileMode.AnyFile)
         self.setNameFilter('데이터 (*.hdf5 *.h5)')
@@ -297,12 +298,13 @@ class DatasetPicker(QFileDialog):
         selected=self.selectedFiles()
         if not selected:return
         path=Path(selected[0])
-        if path.is_dir():
-            from .curation import evaluation_inputs
-            if (self.allow_evaluation and evaluation_inputs(path) is not None) or ((path/'manifest.json').is_file() and (path/'project_provenance.json').is_file()):
-                QDialog.accept(self)
-            else:self.setDirectory(str(path))
-        elif path.is_file() and path.suffix.lower() in ('.hdf5','.h5'):QDialog.accept(self)
+        if self.allow_collection and path.is_dir():
+            QDialog.accept(self);return
+        from .paths import input_format
+        fmt=input_format(path)
+        if fmt in ('hdf5','canonical') or (self.allow_evaluation and fmt in ('evaluation','hdf5-collection')):
+            QDialog.accept(self)
+        elif path.is_dir():self.setDirectory(str(path))
 
 
 class SquareViewport(QWidget):
@@ -369,9 +371,9 @@ class EventTimeline(QSlider):
 
 
 class CurationDialog(QDialog):
-    def __init__(self,registry,parent=None,workspace=None):
-        super().__init__(parent);self.registry=registry;self.workspace=workspace;self.split_generation=0
-        self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None;self.split_plan=None;self.saved_collection=None
+    def __init__(self,root,parent=None,workspace=None):
+        super().__init__(parent);self.root=Path(root).expanduser().resolve();self.workspace=workspace;self.split_generation=0
+        self.rows=[];self.excluded=set();self.path=None;self.kind='datagen';self.job=None;self.split_plan=None;self.saved_collection=None;self.output_parent=None
         self.reader=None;self.frame_job=None;self.pending_frame=None;self.generation=0;self.seek_generation=0;self.pending_selection=None
         self.finished.connect(lambda _result:self.release_reader())
         self.setWindowTitle('Data Curation · 에피소드 검토');self.resize(1400,920)
@@ -439,12 +441,12 @@ class CurationDialog(QDialog):
         bar=QHBoxLayout();advanced_layout.addLayout(bar)
         self.count=QSpinBox();self.count.setRange(1,100000);bar.addWidget(QLabel('사용할 데이터 수'));bar.addWidget(self.count)
         self.choose_button=QPushButton('적용');self.choose_button.clicked.connect(self.auto_select);bar.addWidget(self.choose_button)
-        self.restore_button=QPushButton('제외 취소 · 모두 포함');self.restore_button.clicked.connect(self.restore_all);bar.addWidget(self.restore_button);bar.addStretch()
+        self.restore_button=QPushButton('제외 취소 · 모두 포함');self.restore_button.clicked.connect(self.restore_all);bar.addWidget(self.restore_button);self.exclude_all=QPushButton('전체 제외');self.exclude_all.clicked.connect(lambda:self.set_excluded({r['name'] for r in self.rows}));bar.addWidget(self.exclude_all);bar.addStretch()
         self.help_button=QPushButton('설명');self.help_button.clicked.connect(self.show_curation_help);bar.addWidget(self.help_button)
         sourcebar=QHBoxLayout();advanced_layout.addLayout(sourcebar)
         self.train_ratio=QDoubleSpinBox();self.train_ratio.setRange(1,99);self.train_ratio.setValue(80);self.train_ratio.setSuffix('%')
         self.split_seed=QSpinBox();self.split_seed.setRange(0,2147483647)
-        self.train_ratio.setToolTip('포함된 Source 중 학습용으로 배정할 목표 비율입니다. 같은 원본 그룹을 묶으면 실제 비율은 달라질 수 있습니다.')
+        self.train_ratio.setToolTip('포함된 Episode 중 Train으로 배정할 비율입니다. 분할은 선택 사항입니다.')
         self.split_seed.setToolTip('분할 조합을 재현하는 랜덤값입니다. 같은 데이터와 같은 값은 같은 분할을 만들며, 값을 바꾸면 다른 조합을 시도합니다. 에피소드 개수가 아닙니다.')
         sourcebar.addWidget(QLabel('학습 비율 (Train)'));sourcebar.addWidget(self.train_ratio)
         self.val_ratio=QLabel('검증 20%');sourcebar.addWidget(self.val_ratio)
@@ -452,17 +454,19 @@ class CurationDialog(QDialog):
         self.plan_split=QPushButton('Train/Val 배치 미리보기');self.plan_split.clicked.connect(self.preview_source_split);sourcebar.addWidget(self.plan_split)
         assignbar=QHBoxLayout();advanced_layout.addLayout(assignbar);assignbar.addWidget(QLabel('미리보기 수동 조정'))
         self.source_assignment=QComboBox();self.source_assignment.addItem('학습 (Train)','train');self.source_assignment.addItem('검증 (Validation)','val');assignbar.addWidget(self.source_assignment)
-        self.assign_split=QPushButton('선택 원본 그룹을 이쪽으로 이동');self.assign_split.clicked.connect(self.assign_source_split);assignbar.addWidget(self.assign_split)
-        self.assign_split.setToolTip('현재 선택한 에피소드와 같은 원본 그룹을 함께 이동합니다. 복제된 원본이 학습/검증 양쪽에 섞이지 않도록 합니다.')
+        self.assign_split=QPushButton('선택 Episode를 이쪽으로 이동');self.assign_split.clicked.connect(self.assign_source_split);assignbar.addWidget(self.assign_split)
+        self.assign_split.setToolTip('선택한 Episode 하나만 이동합니다. 알려진 원본 계보 중복은 경고로 표시합니다.')
         self.cancel_split=QPushButton('미리보기 지우기');self.cancel_split.clicked.connect(self.cancel_source_split);assignbar.addWidget(self.cancel_split);assignbar.addStretch()
         self.split_status=QLabel('비율과 랜덤값을 정한 뒤 미리보기를 누르면 분포 그림에 색으로 표시됩니다.');self.split_status.setWordWrap(True);advanced_layout.addWidget(self.split_status)
         self.names_form=QFormLayout();page.addLayout(self.names_form)
         self.storage_name=QLineEdit();self.storage_name.setPlaceholderText('필수 · 예: 선별_1 또는 분할_1');self.names_form.addRow('저장 이름',self.storage_name)
         self.output_preview=QLabel();self.output_preview.setWordWrap(True);self.output_preview.setTextFormat(Qt.TextFormat.PlainText);self.names_form.addRow('예상 저장 위치',self.output_preview)
+        self.output_browse=QPushButton('출력 폴더 선택');self.output_browse.clicked.connect(self.choose_output_parent);self.names_form.addRow('출력 위치',self.output_browse)
         self.storage_name.textChanged.connect(self.update_output_preview)
         footer=QHBoxLayout();layout.addLayout(footer);self.storage_note=QLabel('원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.');footer.addWidget(self.storage_note);footer.addStretch()
         self.export_button=QPushButton('데이터 저장');self.export_button.setObjectName('primaryAction');self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.save);footer.addWidget(self.export_button)
+        self.cancel_job=QPushButton('저장 취소');self.cancel_job.setEnabled(False);self.cancel_job.clicked.connect(lambda:self.job.requestInterruption() if self.job is not None else None);footer.addWidget(self.cancel_job)
         self.scatter.picked.connect(self.select);self.list.currentItemChanged.connect(self.from_list)
         self.exclude.setEnabled(False)
         self.train_ratio.valueChanged.connect(self.split_settings_changed);self.split_seed.valueChanged.connect(self.split_settings_changed)
@@ -487,15 +491,15 @@ class CurationDialog(QDialog):
             '학습 비율 / 랜덤값 (Seed)\n'
             'Train은 학습용, Validation은 성능 확인용입니다.\n'
             '20개에서 학습 70%이면 약 14개 / 검증 6개입니다.\n'
-            '같은 원본 그룹을 함께 묶으면 실제 비율은 달라질 수 있습니다.\n'
+            'Episode 단위로 배정하며 같은 원본 계보는 경고만 표시합니다.\n'
             '같은 데이터·같은 Seed는 같은 분할을 재현합니다. Seed는 개수가 아닙니다.\n\n'
             '미리보기 / 수동 조정 / 저장\n'
             '미리보기는 저장 전 계획이며 Train 초록 / Val 파랑으로 표시합니다.\n'
-            '선택한 점/목록과 같은 원본 그룹을 학습 또는 검증 쪽으로 함께 옮깁니다.\n'
+            '선택한 Episode 하나만 학습 또는 검증 쪽으로 옮깁니다.\n'
             '포함/제외·비율·Seed를 바꾸면 미리보기를 다시 만드세요.\n'
-            '새 분할에는 원본 Source를 사용합니다.\n'
+            '선별본이나 과거 분할본도 다시 선택·분할할 수 있습니다.\n'
             '하단 저장 버튼 하나를 사용합니다. 미리보기가 있으면 Train / Val을 각각 저장하고,\n'
-            '없으면 현재 포함된 데이터를 저장합니다. 이미 저장된 분할은 그대로 유지합니다.')
+            '없으면 현재 포함된 데이터를 저장합니다. 과거 Partition은 역사 정보로 보존하며 새 배정과 구분합니다.')
 
     def pause(self,*args):
         self.play_timer.stop();self.play.setText('재생')
@@ -581,15 +585,20 @@ class CurationDialog(QDialog):
             else:label.clear();label.setText(camera.title()+' · 기록된 영상 없음')
 
     def error(self,exc):QMessageBox.warning(self,'Curation',str(exc))
-    def run_job(self,fn,done):
+    def run_job(self,fn,done,*,cancellable=False):
         if self.job is not None and self.job.isRunning():
             self.error('현재 분석/저장이 끝난 뒤 실행하세요.');return
         self.job=Job(fn,self);result=[];errors=[]
+        self.cancel_job.setEnabled(cancellable);self.export_button.setEnabled(False)
+        for control in (self.load_button,self.list,self.plan_split,self.assign_split,self.exclude,self.restore_button,self.exclude_all,self.choose_button,self.storage_name,self.output_browse,self.train_ratio,self.split_seed,self.count,self.cancel_split,self.source_assignment):control.setEnabled(False)
         self.job.result.connect(result.append);self.job.failed.connect(errors.append)
         def finish():
-            self.job=None
-            self.list.setEnabled(True);self.load_button.setEnabled(True)
-            if errors:self.error(errors[0])
+            self.job=None;self.cancel_job.setEnabled(False)
+            for control in (self.load_button,self.list,self.exclude,self.exclude_all,self.storage_name,self.output_browse):control.setEnabled(True)
+            self.update_split_controls()
+            if errors:
+                if 'Curation 취소됨' in str(errors[0]):self.info.setText(str(errors[0]))
+                else:self.error(errors[0])
             elif result:done(result[0])
             if self.pending_selection is not None:
                 index=self.pending_selection;self.pending_selection=None;self.select(index)
@@ -615,24 +624,32 @@ class CurationDialog(QDialog):
             self.frame_job.finished.connect(reader.close)
         else:reader.close()
     def open_data(self):
-        from .artifacts import browse_directory
-        directory=browse_directory('source',self.path or '',self.registry,self.workspace)
+        from .paths import browse_directory
+        directory=browse_directory('source',self.path or '',root=self.root)
         picker=DatasetPicker(self,directory)
         if picker.exec()==QDialog.DialogCode.Accepted:self.load_data(picker.selectedFiles()[0])
 
     def open_latest(self):
-        artifact=self.registry.latest({'source','annotated','datagen','evaluation_dataset','sim_eval'},self.workspace)
-        if artifact and artifact['type']=='sim_eval':artifact={**artifact,'path':str(Path(artifact['path']).parent)}
-        if artifact and artifact['type']=='evaluation_dataset':
-            run=next((p for p in Path(artifact['path']).parents if (p/'evaluation_datasets.json').is_file()),None)
-            if run:artifact={**artifact,'path':str(run)}
-        if artifact and artifact['type']=='source' and artifact.get('collection',{}).get('partition'):
-            origin=self.registry.root/'sources'/artifact['collection']['source']/'origin'
-            artifact=next((a for a in reversed(self.registry.all()) if a['type']=='source'
-                           and a.get('status')=='SUCCEEDED' and Path(a['path']).is_relative_to(origin)
-                           and Path(a['path']).exists()),artifact)
-        if artifact:self.load_data(artifact['path'])
-        else:self.info.setText('현재 Workspace에 완료된 Source / Annotation / DataGen이 없습니다. 데이터 열기에서 선택하세요.')
+        from .paths import discover_inputs
+        def newest():
+            items=discover_inputs(self.root,category='dataset')
+            items=[v for v in items if v['format'] in ('hdf5','canonical','evaluation')]
+            if self.workspace:
+                from .dataset import EpisodeDataset
+                compatible=[]
+                for item in items:
+                    try:
+                        if item['format']=='evaluation':
+                            identity=json.loads((Path(item['path'])/'evaluation_datasets.json').read_text()).get('workspace')
+                        else:identity=EpisodeDataset(item['path']).args.get('workspace')
+                        if identity==self.workspace:compatible.append(item)
+                    except (ValueError,OSError,KeyError):continue
+                items=compatible
+            return max(items,key=lambda v:Path(v['path']).stat().st_mtime)['path'] if items else None
+        def done(path):
+            if path:self.load_data(path)
+            else:self.info.setText('완료 데이터를 찾지 못했습니다. 데이터 열기에서 Path를 선택하세요.')
+        self.run_job(newest,done)
 
     def load_data(self,path):
         if self.job is not None:return self.error('현재 분석/저장이 끝난 뒤 실행하세요.')
@@ -641,27 +658,16 @@ class CurationDialog(QDialog):
         self.clear_events()
         self.release_reader();self.trajectory.row=None;self.list.setEnabled(False);self.load_button.setEnabled(False);self.export_button.setEnabled(False)
         self.info.setText('데이터 분석 중…')
-        self.run_job(lambda:analyze(path),lambda rows:self.loaded(path,rows))
-    def loaded(self,path,rows):
+        def read():
+            rows=analyze(path)
+            from .dataset import episode_input_kind
+            kind='evaluation_dataset' if any(r.get('evaluation_outcome') for r in rows) else episode_input_kind(path)
+            return rows,kind
+        self.run_job(read,lambda result:self.loaded(path,result[0],result[1]))
+    def loaded(self,path,rows,kind=None):
         try:
             self.rows=rows;self.path=path;self.excluded=set();self.split_plan=None;self.split_generation+=1
-            partition=next((r['source_partition'] for r in rows if r.get('source_partition')),None)
-            if partition:
-                for control,value in ((self.train_ratio,partition['train_fraction']*100),(self.split_seed,partition['seed'])):
-                    control.blockSignals(True);control.setValue(value);control.blockSignals(False)
-                self.val_ratio.setText(f'검증 {100-self.train_ratio.value():g}%')
-            known=next((a for a in reversed(self.registry.all()) if a['path']==path and a.get('status')=='SUCCEEDED'),None)
-            if any(r.get('evaluation_outcome') for r in rows):self.kind='evaluation_dataset'
-            elif known:self.kind=known['type']
-            elif Path(path).is_dir():
-                manifest=json.loads((Path(path)/'manifest.json').read_text())
-                provenance=json.loads((Path(path)/'project_provenance.json').read_text())
-                self.kind='datagen' if provenance.get('generation_method') else 'annotated' if all((Path(path)/e['path']/'annotation.json').is_file() for e in manifest['episodes']) else 'source'
-            else:
-                import h5py
-                with h5py.File(path) as f:
-                    g=f['data'][self.rows[0]['name']]
-                    self.kind='datagen' if f['data'].attrs.get('generation_provenance') else 'annotated' if 'obs/datagen_info/subtask_term_signals/grasp' in g else 'source'
+            self.kind=kind or ('evaluation_dataset' if any(r.get('evaluation_outcome') for r in rows) else 'source')
             if self.kind not in ('source','annotated','datagen','evaluation_dataset'):raise ValueError('Source / Annotation / Datagen / 평가 데이터를 선택하세요.')
             self.count.setMaximum(len(self.rows));self.count.setValue(len(self.rows))
             for key,combo in self.filters.items():
@@ -670,7 +676,7 @@ class CurationDialog(QDialog):
                 combo.blockSignals(True);combo.clear();combo.addItem('전체',None)
                 for value in sorted({self.filter_value(r,key) for r in rows}):combo.addItem(value,value)
                 combo.blockSignals(False)
-            self.dataset_label.setText({'source':'Source · 수집 데이터','annotated':'Annotation · 주석 데이터','datagen':'DataGen · 생성 데이터','evaluation_dataset':'Sim 평가 · 성공 / 실패 비교 (읽기 전용)'}[self.kind]+'  /  '+Path(path).name)
+            self.dataset_label.setText({'source':'Source · 수집 데이터','annotated':'Annotation · 주석 데이터','datagen':'DataGen · 생성 데이터','evaluation_dataset':'Sim 평가 · 성공 / 실패 기록'}[self.kind]+'  /  '+Path(path).name)
             self.dataset_label.setToolTip(str(path));self.export_button.setEnabled(True);self.exclude.setEnabled(True)
             self.scatter.context_rows=self.rows;self.scatter.rows=self.rows;self.refresh_list();self.select(0)
         except Exception as exc:self.error(exc)
@@ -734,33 +740,29 @@ class CurationDialog(QDialog):
 
     def update_split_controls(self):
         evaluation=self.kind=='evaluation_dataset'
-        locked=evaluation or any(r.get('source_partition') for r in self.rows);planned=self.split_plan is not None
-        self.advanced_toggle.setVisible(not evaluation)
-        if evaluation:self.advanced_toggle.setChecked(False);self.advanced_panel.hide()
-        self.storage_name.setVisible(not evaluation);self.names_form.labelForField(self.storage_name).setVisible(not evaluation)
-        self.output_preview.setVisible(not evaluation);self.names_form.labelForField(self.output_preview).setVisible(not evaluation)
-        self.export_button.setVisible(not evaluation)
-        self.storage_note.setText('평가 완료 시 성공/실패 데이터가 자동 저장됩니다. 현재 화면은 평가 기록을 검토합니다.' if evaluation else '원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.')
+        locked=evaluation and Path(self.path or '').is_dir();planned=self.split_plan is not None
+        self.advanced_toggle.setVisible(not locked)
+        if locked:self.advanced_toggle.setChecked(False);self.advanced_panel.hide()
+        self.storage_name.setVisible(not locked);self.names_form.labelForField(self.storage_name).setVisible(not locked)
+        self.output_preview.setVisible(not locked);self.names_form.labelForField(self.output_preview).setVisible(not locked)
+        self.export_button.setVisible(not locked)
+        self.output_browse.setVisible(not locked);self.names_form.labelForField(self.output_browse).setVisible(not locked)
+        self.storage_note.setText('평가 완료 시 성공/실패 데이터가 자동 저장됩니다. 현재 화면은 평가 기록을 검토합니다.' if locked else '원본 보존 · 제외한 에피소드는 새 데이터셋에 저장하지 않습니다.')
         eligible=sum(r['name'] not in self.excluded for r in self.rows)
         self.plan_split.setEnabled(bool(self.path) and eligible>=2 and not locked)
         for control in (self.assign_split,self.source_assignment):control.setEnabled(planned and not locked)
         for control in (self.train_ratio,self.split_seed):control.setEnabled(bool(self.rows) and not locked)
         self.cancel_split.setVisible(planned);self.choose_button.setEnabled(bool(self.rows));self.count.setEnabled(bool(self.rows))
-        self.restore_button.setEnabled(bool(self.excluded));self.export_button.setEnabled(bool(self.path) and eligible>0 and not evaluation)
+        self.restore_button.setEnabled(bool(self.excluded));self.export_button.setEnabled(bool(self.path) and eligible>0 and not locked)
         self.export_button.setText('Train / Val 저장' if planned else '데이터 저장')
-        self.export_button.setToolTip('같은 Source 묶음의 입력한 이름 아래 Train / Validation을 저장합니다.' if planned else '현재 포함된 에피소드를 입력한 이름으로 저장합니다. 기록된 분할은 유지합니다.')
+        self.export_button.setToolTip('같은 Source 묶음의 입력한 이름 아래 Train / Validation을 저장합니다.' if planned else '현재 포함된 에피소드를 입력한 이름으로 저장합니다. 과거 분할은 역사 정보로만 보존합니다.')
         if planned:
             counts={s:sum(r.get('split')==s and r['name'] not in self.excluded for r in self.rows) for s in ('train','val')}
-            self.split_status.setText(f"저장 전 · Train {counts['train']}개 / Val {counts['val']}개")
-            self.split_status.setToolTip('같은 원본과 복제본은 함께 배정됩니다. 원본 그룹이 학습/검증 양쪽에 섞이지 않는지 확인한 계획입니다.')
-        elif evaluation:
+            self.split_status.setText(f"저장 전 · Train {counts['train']}개 / Val {counts['val']}개"+'\n'+'\n'.join(self.split_plan.get('warnings',[])))
+            self.split_status.setToolTip('Episode별 현재 배정입니다. 경고가 없어도 계보가 완전하거나 독립적임을 증명하지 않습니다.')
+        elif locked:
             self.split_status.setText('평가 기록 · 성공/실패 분포와 궤적 비교 · Train/Val 분할 대상이 아닙니다.')
             self.split_status.setToolTip('에피소드 필터에서 성공 라벨·실패 유형·환경을 선택하세요.')
-        elif locked:
-            counts={s:sum(r.get('split')==s and r['name'] not in self.excluded for r in self.rows) for s in ('train','val')}
-            pools={s:{key for r in self.rows if r.get('source_partition') and r['source_partition']['split']==s for key in r['source_partition']['source_ids']} for s in ('train','val')}
-            self.split_status.setText(f"저장된 분할 · Train {counts['train']}개 / Val {counts['val']}개")
-            self.split_status.setToolTip(f"기록된 입력 원본 Pool: Train Source {len(pools['train'])}개 / Validation Source {len(pools['val'])}개. 생성 에피소드 수와는 다를 수 있습니다. 원본 계보의 교집합은 학습 전에 다시 검사합니다.")
         else:
             self.split_status.clear()
             self.split_status.setToolTip('')
@@ -768,15 +770,21 @@ class CurationDialog(QDialog):
         self.update_output_preview()
 
     def curation_destination(self):
-        from .artifacts import validate_storage_name
+        from .paths import validate_storage_name, source_collection
         if not self.storage_name.text():raise ValueError('저장 이름을 입력하세요.')
         name=validate_storage_name(self.storage_name.text())
         split=self.split_plan is not None
-        if self.path and (self.kind=='source' or split):
+        if self.output_parent:return Path(self.output_parent)/(name if split or Path(self.path or '').is_dir() else name+'.hdf5')
+        if self.path and self.kind=='source':
             if name=='origin':raise ValueError('origin은 원본 폴더 이름입니다. 다른 저장 이름을 입력하세요.')
-            folder=self.registry.source_collection(self.path)/name
+            folder=source_collection(self.path,self.root)/name
             return folder if split or Path(self.path).is_dir() else folder/'dataset.hdf5'
-        return self.registry.root/'curation'/'filtered'/(name if self.path and Path(self.path).is_dir() else name+'.hdf5')
+        bucket={'annotated':'annotations','datagen':'datagen','evaluation_dataset':'evaluations'}.get(self.kind,'datasets')
+        return self.root/bucket/(name if split or self.path and Path(self.path).is_dir() else name+'.hdf5')
+
+    def choose_output_parent(self):
+        folder=QFileDialog.getExistingDirectory(self,'새 결과를 저장할 폴더',str(self.output_parent or self.root))
+        if folder:self.output_parent=folder;self.update_output_preview()
 
     def update_output_preview(self):
         try:self.output_preview.setText(str(self.curation_destination()))
@@ -784,7 +792,7 @@ class CurationDialog(QDialog):
 
     def clear_split_preview(self):
         self.split_generation+=1;self.split_plan=None
-        for row in self.rows:row['split']=(row.get('source_partition') or {}).get('split')
+        for row in self.rows:row['split']=None
         combo=self.filters['split'];combo.blockSignals(True);combo.clear();combo.addItem('전체',None)
         for value in sorted({r['split'] for r in self.rows if r.get('split')}):combo.addItem(value,value)
         combo.blockSignals(False)
@@ -858,6 +866,7 @@ class CurationDialog(QDialog):
             'EE 정지: 끝단 속도 2 mm/s 미만인 구간. 정지 명령: 관절 목표 변화 1°/s 미만인 구간.\n'
             '명령 가속도 RMS는 명령의 급격한 변화 정도이며 측정 관절 가속도와 다릅니다.\n'
             f"Task: {row['task_id']}\nActive: {', '.join(row.get('active_object_ids') or [])}\n"
+            f"과거 Partition: {row.get('historical_split') or '없음'} (현재 배정 아님)\n"
             f"Source group: {row.get('source_group','UNKNOWN')}\nScene: {((row.get('scene_configuration') or {}).get('sha256') or 'UNKNOWN')}\n"
             f"Success source: {row.get('success_source','unknown')}\n"
             f"Grasp 전/후 이동: {mm(row.get('movement_before_grasp_m'))} / {mm(row.get('movement_after_grasp_m'))}\n"
@@ -879,10 +888,10 @@ class CurationDialog(QDialog):
 
     def preview_source_split(self):
         if not self.path:return
-        from .episodes import source_split
+        from .curation import split_dataset
         names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         path,ratio,seed=self.path,self.train_ratio.value()/100,self.split_seed.value();generation=self.split_generation
-        self.run_job(lambda:source_split(path,ratio,seed,names=names),lambda plan:self.install_source_split(plan) if generation==self.split_generation else None)
+        self.run_job(lambda:split_dataset(path,ratio,seed,names=names),lambda plan:self.install_source_split(plan) if generation==self.split_generation else None)
 
     def install_source_split(self,plan):
         self.split_plan=plan
@@ -897,13 +906,13 @@ class CurationDialog(QDialog):
     def assign_source_split(self):
         if not self.split_plan:return self.error('먼저 Source 분할 미리보기를 실행하세요.')
         if not 0<=self.scatter.selected<len(self.rows):return self.error('분포의 점이나 목록에서 옮길 에피소드를 먼저 선택하세요.')
-        from .episodes import source_split
+        from .curation import split_dataset
         assignments=dict(self.split_plan['assignments']);name=self.rows[self.scatter.selected]['name']
         if name not in assignments:return self.error('포함된 Source를 선택하세요.')
-        for member in self.split_plan['group_members'][name]:assignments[member]=self.source_assignment.currentData()
-        if len(set(assignments.values()))<2:return self.error('학습과 검증에 각각 최소 한 개의 원본 그룹을 남겨야 합니다.')
+        assignments[name]=self.source_assignment.currentData()
+        if len(set(assignments.values()))<2:return self.error('학습과 검증에 각각 최소 한 개의 Episode을 남겨야 합니다.')
         path,ratio,seed=self.path,self.train_ratio.value()/100,self.split_seed.value();generation=self.split_generation
-        self.run_job(lambda:source_split(path,ratio,seed,assignments=assignments,names=list(assignments)),lambda plan:self.install_source_split(plan) if generation==self.split_generation else None)
+        self.run_job(lambda:split_dataset(path,ratio,seed,assignments=assignments,names=list(assignments)),lambda plan:self.install_source_split(plan) if generation==self.split_generation else None)
 
     def save_source_split(self):
         if not self.split_plan:return self.error('Source 분할을 먼저 확인하세요.')
@@ -911,22 +920,19 @@ class CurationDialog(QDialog):
             dest=self.curation_destination()
             if dest.exists():raise ValueError('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
         except ValueError as exc:return self.error(exc)
-        from .episodes import export_source_splits
+        from .curation import export_splits
         source,kind=self.path,self.kind;names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         assignments={n:self.split_plan['assignments'][n] for n in names}
         ratio,seed=self.train_ratio.value()/100,self.split_seed.value()
         def work():
-            parent=self.registry.ensure_source_origin(source,kind)
-            result=export_source_splits(parent['path'],dest,ratio,seed,assignments,names,nested=True)
-            for split,output in result['outputs'].items():
-                self.registry.register(kind,output,parents=[parent['id']],display_name=split)
+            result=export_splits(source,dest,ratio,seed,assignments,names,cancel=self.job.isInterruptionRequested)
             result['folder']=str(dest)
             return result
         def done(result):
             self.saved_collection=result['folder']
-            self.info.setText(f'Train {result["counts"]["train"]} / Validation {result["counts"]["val"]} 저장·등록 완료 · {self.saved_collection}')
+            self.info.setText(f'Train {result["counts"]["train"]} / Validation {result["counts"]["val"]} 저장 완료 · {self.saved_collection}')
             self.update_output_preview()
-        self.run_job(work,done)
+        self.run_job(work,done,cancellable=True)
 
     def save(self):
         if not self.path:return
@@ -934,29 +940,15 @@ class CurationDialog(QDialog):
         canonical=Path(self.path).is_dir()
         try:proposed=self.curation_destination()
         except ValueError as exc:return self.error(exc)
-        source_subset=self.kind=='source'
-        if source_subset:dest=str(proposed)
-        else:
-            proposed.parent.mkdir(parents=True,exist_ok=True)
-            dest,_=QFileDialog.getSaveFileName(self,'새 데이터셋 저장',str(proposed),'폴더 이름 (*)' if canonical else 'HDF5 (*.hdf5)')
-            if not dest:return
-            if not canonical and not Path(dest).suffix:dest+='.hdf5'
-            if not canonical and Path(dest).suffix.lower() not in ('.h5','.hdf5'):return self.error('HDF5 파일 확장자를 사용하세요.')
-        from .artifacts import validate_storage_name
-        try:name=validate_storage_name(self.storage_name.text() if source_subset else Path(dest).name if canonical else Path(dest).stem)
-        except ValueError as exc:return self.error(exc)
-        boundary=Path(dest) if canonical or not source_subset else Path(dest).parent
-        if boundary.exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름을 입력하세요.')
+        dest=str(proposed)
+        if Path(dest).exists():return self.error('이미 존재하는 결과물입니다. 새 저장 이름/위치를 선택하세요.')
         names=[r['name'] for r in self.rows if r['name'] not in self.excluded]
         source,kind=self.path,self.kind
-        self.info.setText('새 데이터 저장·검증·등록 중… 원본은 유지됩니다.')
+        self.info.setText('새 데이터 저장·검증 중… 원본은 유지됩니다.')
         def work():
-            parent=self.registry.ensure_source_origin(source,kind) if source_subset else next((a for a in self.registry.all() if a['path']==source),None)
-            if source_subset and not canonical:boundary.mkdir(parents=True,exist_ok=False)
-            output=export_subset(parent['path'] if source_subset else source,dest,names)
-            self.registry.register(kind,output,parents=[parent['id']] if parent else [],display_name=name)
+            output=export_subset(source,dest,names,cancel=self.job.isInterruptionRequested)
             return output
         def done(output):
-            if source_subset:self.saved_collection=str(boundary)
-            self.info.setText(f'저장·등록 완료: {output} · {len(names)} episodes')
-        self.run_job(work,done)
+            self.saved_collection=str(output)
+            self.info.setText(f'저장 완료: {output} · {len(names)} episodes')
+        self.run_job(work,done,cancellable=True)

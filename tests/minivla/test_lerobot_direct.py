@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from soarm101_lab.learning.minivla.data import Episodes,fit_statistics,load_manifest,collate
 from soarm101_lab.learning.minivla.config import MiniVLAConfig
 from soarm101_lab.so101_joint_mapping import JOINTS,RobotCoordinates
 
@@ -33,113 +32,11 @@ def lerobot_fixture(root,height=24,width=32,frames=5):
     return {'path':str(root),'coordinates':contract,'workspace':None,'provenance':provenance,'tasks':[]}
 
 
-@pytest.fixture
-def direct_data(tmp_path,monkeypatch):
-    from soarm101_lab.workflow import mujoco as worker
-    artifact=lerobot_fixture(tmp_path/'lerobot');out=tmp_path/'training'
-    def prepared(request,output):
-        p=Path(request['input']);model=output/'policy';model.mkdir()
-        provenance=json.loads((p/'project_provenance.json').read_text());provenance['source_dataset']=str(p)
-        (model/'project_provenance.json').write_text(json.dumps(provenance))
-        return {'passed':True}
-    monkeypatch.setattr(worker,'train',prepared)
-    worker.train_from_lerobot(artifact,{'workspace':'unused','legacy_group_split':True},out)
-    return artifact,out
-
-
-def test_direct_numeric_chunk_rgb_and_train_only_stats(direct_data):
-    artifact,out=direct_data;p=out/'dataset';cfg=MiniVLAConfig()
-    stats=json.loads((p/'statistics.json').read_text());ds=Episodes(p/'manifest.json',stats,cfg,'train')
+def test_native_learning_reader_without_partition(tmp_path):
+    from soarm101_lab.learning.datasets import inspect_dataset
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    reference=LeRobotDataset('local/direct-fixture',root=artifact['path'])
-    coords=RobotCoordinates();raw=np.stack([reference.hf_dataset[i]['observation.state'].numpy() for i in range(5)])
-    np.testing.assert_allclose(stats['state_mean'],coords.to_policy(raw,measured=True).mean(0),rtol=1e-6)
-    for t in range(5):
-        old=reference[t];sample=ds[t]
-        np.testing.assert_array_equal(ds.arrays[0]['state'][t],coords.to_policy(old['observation.state']))
-        np.testing.assert_array_equal(ds.arrays[0]['action'][t],coords.to_policy(old['action']))
-        rgb=old['observation.images.side_cam'].permute(1,2,0).numpy()*255
-        np.testing.assert_allclose(sample['images'][0],rgb,atol=1e-4)
-        assert sample['images'][0].dtype==np.uint8 and sample['images'][0].shape==(24,32,3)
-        assert sample['instruction']=='Pick target 0' and sample['frame']==t
-        assert sample['mask'].sum()==5-t and torch.all(sample['actions'][5-t:]==0)
-        np.testing.assert_allclose(ds.pre.denormalize(sample['actions'][:5-t].numpy()),ds.arrays[0]['action'][t:],atol=1e-6)
-    batch=collate([ds[4]]);assert batch['actions'].shape==(1,40,6) and batch['mask'].shape==(1,40)
-    m=load_manifest(p/'manifest.json');assert [e['group_id'] for e in m['episodes']]==['source_a','source_b']
-    assert m['episodes'][1]['scene_configuration']['active_object_ids']==['target','other']
-    assert not list(out.rglob('*.npy')) and not (out/'canonical_source').exists()
-    assert len(ds.decoders)<=2 and len(ds.frame_cache)<=8 and ds.cache_bytes<=16*2**20
-
-
-def test_statistics_never_decode_and_direct_bytes_guard(direct_data,monkeypatch):
-    artifact,out=direct_data;p=out/'dataset'
-    import torchcodec.decoders
-    monkeypatch.setattr(torchcodec.decoders,'VideoDecoder',lambda *a,**k:pytest.fail('Statistics decoded video'))
-    stats=fit_statistics(p/'manifest.json',out/'check_stats.json')
-    assert stats==json.loads((p/'statistics.json').read_text())
-    video=next(Path(artifact['path']).rglob('*.mp4'));video.write_bytes(video.read_bytes()+b'changed')
-    with pytest.raises(ValueError,match='bytes changed'):Episodes(p/'manifest.json',stats,MiniVLAConfig(),'train')
-
-
-def test_direct_decode_errors_are_not_skipped(direct_data,monkeypatch):
-    _,out=direct_data;p=out/'dataset';stats=json.loads((p/'statistics.json').read_text())
-    ds=Episodes(p/'manifest.json',stats,MiniVLAConfig(),'train')
-    import torchcodec.decoders
-    def broken(*args,**kwargs):raise RuntimeError('fixture decoder failure')
-    monkeypatch.setattr(torchcodec.decoders,'VideoDecoder',broken)
-    with pytest.raises(ValueError,match='episode 0, frame 0'):ds[0]
-
-
-def test_direct_frame_and_action_timestamp_mismatch(direct_data):
-    _,out=direct_data;p=out/'dataset';m=json.loads((p/'manifest.json').read_text());m['episodes'][0]['dataset_episode_index']=1
-    (p/'manifest.json').write_text(json.dumps(m))
-    with pytest.raises(ValueError,match='index mismatch'):fit_statistics(p/'manifest.json',out/'invalid.json')
-
-
-def test_direct_group_leakage_rejected(direct_data):
-    _,out=direct_data;p=out/'dataset';m=json.loads((p/'manifest.json').read_text());m['episodes'][1]['group_id']='source_a'
-    (p/'manifest.json').write_text(json.dumps(m))
-    with pytest.raises(ValueError,match='leakage'):load_manifest(p/'manifest.json')
-
-
-def test_direct_action_timestamp_and_gripper_contract(direct_data):
-    from types import SimpleNamespace
-    from soarm101_lab.learning.minivla.data import episode_arrays
-    _,out=direct_data;p=out/'dataset';m=load_manifest(p/'manifest.json')
-    stats=json.loads((p/'statistics.json').read_text());ds=Episodes(p/'manifest.json',stats,MiniVLAConfig(),'train')
-    hf=ds.reader.hf_dataset
-    bad=hf.add_column('action_timestamp',(np.asarray(hf['timestamp']).reshape(-1)-.001).tolist())
-    reader=SimpleNamespace(hf_dataset=bad,meta=ds.reader.meta)
-    with pytest.raises(ValueError,match='follow'):episode_arrays(m['episodes'][0],['side'],30,reader)
-    raw=np.asarray(hf.select_columns(['action'])[:]['action'],dtype=np.float32);raw[:,5]=10.
-    bad=hf.remove_columns('action').add_column('action',raw.tolist())
-    with pytest.raises(ValueError,match='Gripper outside'):episode_arrays(m['episodes'][0],['side'],30,SimpleNamespace(hf_dataset=bad,meta=ds.reader.meta))
-
-
-@pytest.mark.parametrize('groups',[{}, {'0':'UNKNOWN:source','1':'UNKNOWN:source'}])
-def test_unverified_source_group_lineage_rejected(direct_data,groups):
-    from soarm101_lab.workflow import mujoco as worker
-    artifact,out=direct_data;artifact['provenance']['source_groups']=groups
-    with pytest.raises(ValueError,match='verified source_groups'):
-        worker.train_from_lerobot(artifact,{'workspace':'unused','legacy_group_split':True},out.parent/'unverified')
-
-
-def test_validation_measured_gripper_uses_saved_model_limits(direct_data):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from soarm101_lab.workflow.artifacts import fingerprint
-    from soarm101_lab.learning.minivla.data import episode_arrays
-    artifact,out=direct_data;root=Path(artifact['path']);prepared=out/'dataset'
-    file=next((root/'data').rglob('*.parquet'));table=pq.read_table(file)
-    values=np.array(table['observation.state'].to_pylist(),np.float32);values[5:7,5]=[-.04528482,-.04189385]
-    table=table.set_column(table.schema.get_field_index('observation.state'),'observation.state',pa.array(values.tolist(),type=table['observation.state'].type));pq.write_table(table,file)
-    manifest=json.loads((prepared/'manifest.json').read_text());manifest['storage']['sha256']=fingerprint(root)
-    manifest['storage']['canonical_coordinates']['measured_gripper_limits_rad']=[-.174533,1.74533]
-    (prepared/'manifest.json').write_text(json.dumps(manifest))
-    stats=fit_statistics(prepared/'manifest.json',prepared/'statistics.json')
-    val=Episodes(prepared/'manifest.json',stats,MiniVLAConfig(),'val')
-    assert len(val)==5 and np.array_equal(val.arrays[0]['state'][:2,5],[0,0])
-    assert np.array(pq.read_table(file,columns=['observation.state'])['observation.state'].to_pylist())[5,5]<-.04
-    entry=val.episodes[0];entry['_storage']['canonical_coordinates'].pop('measured_gripper_limits_rad')
-    with pytest.raises(ValueError,match='episode_0001.*observation.state.*canonical endpoints'):
-        episode_arrays(entry,('side',),30,val.reader)
+    data=lerobot_fixture(tmp_path/'data')
+    checked=inspect_dataset(data['path'])
+    reader=LeRobotDataset('local/direct-fixture',root=data['path'])
+    assert len(reader)==10 and checked['format']['total_episodes']==2
+    assert reader[0]['observation.images.side_cam'].shape==(3,24,32)

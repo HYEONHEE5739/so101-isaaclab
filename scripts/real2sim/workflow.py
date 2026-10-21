@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Workflow registry, engine workers and Builder workspace import in one CLI."""
+"""Path-based workflow, engine workers and Builder workspace import in one CLI."""
 import argparse
 import json
 from pathlib import Path
@@ -10,23 +10,38 @@ sys.path.insert(0, str(ROOT / 'source/soarm101_lab'))
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='discover':
+        parser=argparse.ArgumentParser(description='Read-only native Dataset/Policy paths; candidates require execution validation')
+        parser.add_argument('--path',default=str(ROOT/'outputs/workflow'))
+        parser.add_argument('--category',choices=['dataset','policy','report','workspace'])
+        parser.add_argument('--details',action='store_true',help='Read only the explicitly selected input header/config')
+        args=parser.parse_args(sys.argv[2:])
+        from soarm101_lab.workflow.paths import discover_inputs,input_format
+        if args.details:
+            fmt=input_format(args.path)
+            if fmt in ('lerobot-policy','minivla-checkpoint','minivla-policy'):
+                from soarm101_lab.workflow.policy import checkpoint_metadata,selected_minivla_checkpoint
+                result=checkpoint_metadata(selected_minivla_checkpoint(args.path) if fmt=='minivla-policy' else args.path)
+            elif fmt in ('hdf5','canonical','lerobot','evaluation'):
+                from soarm101_lab.data.episodes import dataset_metadata
+                result=dataset_metadata(args.path,fmt)
+            else:parser.error('Select one native Dataset/Checkpoint path for --details')
+        else:result=discover_inputs(args.path,category=args.category)
+        print(json.dumps(result,indent=2,ensure_ascii=False));return
     from soarm101_lab.workflow.operations import Operations, STAGES, MUJOCO_STAGES, MODEL_ROOT, execute_request
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ('list', 'register', 'run', 'ready'):
+    commands.add_parser('discover', help='Read-only Dataset/Checkpoint paths; see discover --help')
+    for name in ('run','ready'):
         sub = commands.add_parser(name)
-        sub.add_argument('--type')
-        sub.add_argument('--path')
-        sub.add_argument('--stage', choices=sorted(STAGES))
-        sub.add_argument('--artifact')
+        sub.add_argument('--stage', choices=sorted(STAGES),required=True)
+        sub.add_argument('--input',help='Native Dataset/Model/Workspace Path',required=True)
+        sub.add_argument('--root',help='Output and runs root; native Path discovery needs no registration')
         sub.add_argument('--workspace', default='')
         sub.add_argument('--options', help='JSON options file')
         sub.add_argument('--ik-solver', choices=['scipy_ls','pinocchio_dls'], help='DataGen only; overrides options JSON')
         sub.add_argument('--ik-failure-policy',choices=['strict','hold','best_effort'],help='DataGen only; overrides options JSON')
-        sub.add_argument('--registry')
-        sub.add_argument('--summary', action='store_true')
         sub.add_argument('--storage-name',help='신규 결과물의 저장 이름')
-        sub.add_argument('--display-name',help='등록 Artifact의 표시 이름')
     worker = commands.add_parser('worker', help='Execute a UI request or explicit simulation stage')
     worker.add_argument('--request', help='Immutable worker request JSON')
     worker.add_argument('--backend', choices=['common', 'mujoco', 'isaac'], default='mujoco')
@@ -55,8 +70,6 @@ def main():
         from soarm101_lab.real2sim.workspaces.builder import import_scene
         task = json.loads(Path(args.task).read_text()) if args.task else None
         destination = import_scene(args.source, args.workspace_id, args.version, task)
-        from soarm101_lab.workflow.artifacts import Registry
-        Registry().register('workspace', destination)
         print(destination, flush=True)
         return
     if args.command=='migrate':
@@ -86,28 +99,18 @@ def main():
         from soarm101_lab.workflow.episodes import convert_hdf5
         print(convert_hdf5(args.recipe, args.output))
         return
-    from soarm101_lab.workflow.artifacts import Registry, TYPES
-    registry = Registry(args.registry)
-    if args.command == 'list':
-        result = registry.summary() if args.summary else registry.all()
-    elif args.command == 'register':
-        if args.type not in TYPES or not args.path:
-            parser.error('--type must be a registered artifact type and --path is required')
-        result = registry.register(args.type, args.path,display_name=args.display_name)
-    else:
-        options = json.loads(Path(args.options).read_text()) if args.options else {}
-        if args.storage_name is not None:options['storage_name']=args.storage_name
-        if args.ik_solver is not None:
-            if args.stage!='datagen':parser.error('--ik-solver requires datagen')
-            options['ik_solver']=args.ik_solver
-        if args.ik_failure_policy is not None:
-            if args.stage!='datagen':parser.error('--ik-failure-policy requires datagen')
-            options['ik_failure_policy']=args.ik_failure_policy
-        service = Operations(registry)
-        artifact = registry.get(args.artifact)
-        result = (service.readiness(args.stage, artifact, args.workspace, options)
-                  if args.command == 'ready' else service.run(args.stage, artifact, args.workspace, options, print))
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    options=json.loads(Path(args.options).read_text()) if args.options else {}
+    if not isinstance(options,dict):parser.error('Options must be a JSON object')
+    if args.storage_name is not None:options['storage_name']=args.storage_name
+    for name in ('ik_solver','ik_failure_policy'):
+        value=getattr(args,name)
+        if value is not None:
+            if args.stage!='datagen':parser.error('--'+name.replace('_','-')+' requires datagen')
+            options[name]=value
+    service=Operations(root=args.root or ROOT/'outputs/workflow')
+    result=(service.readiness(args.stage,args.input,args.workspace,options) if args.command=='ready'
+            else service.run(args.stage,args.input,args.workspace,options,lambda message:print(message,file=sys.stderr)))
+    print(json.dumps(result,indent=2,ensure_ascii=False))
 
 
 if __name__ == '__main__':

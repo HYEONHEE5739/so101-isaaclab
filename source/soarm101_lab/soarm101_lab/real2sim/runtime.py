@@ -212,6 +212,8 @@ class Runtime:
             for name,key in bindings.items(): cfg[name+'_camera']=cfg.get(key,'')
         if self.backend == 'real':
             self.profile=p
+        elif self.backend == 'isaac' and self.live_workspace:
+            self.build_environment(p, workspace=workspace)
         else:
             self.build_environment(p)
         from .workspaces.package import ROOT
@@ -299,7 +301,8 @@ class Runtime:
             self.cameras['real_' + view] = camera
             camera.start()
 
-    def build_environment(self, p):
+    def build_environment(self, p, *, workspace=None):
+        """Build a session environment; borrow connect's validated Workspace if supplied."""
         if self.backend == 'mujoco':
             from ..simulation.mujoco_backend import MujocoBackend
             from .workspaces.package import ROOT, load as load_workspace
@@ -334,7 +337,9 @@ class Runtime:
         print('[Real2Sim][isaac] Scene configuration/assets: START', flush=True)
         if self.live_workspace:
             from .workspaces.environment import make_config
-            ec = make_config(self.live_workspace, self.args.device,
+            from .workspaces.package import load as load_workspace
+            if workspace is None:workspace = load_workspace(self.live_workspace)
+            ec = make_config(workspace, self.args.device,
                              task_definition=getattr(self, 'task_definition', None),simulation=getattr(self,'simulation_configuration',None), overview_camera=False, grasp_observations=False)
         else:
             ec = SO101TeleopEnvCfg()
@@ -361,9 +366,8 @@ class Runtime:
         print('[Real2Sim][isaac] Reset/profile/camera warmup: START', flush=True)
         self.env.reset()
         if self.live_workspace:
-            from .workspaces.package import load as load_workspace
             # Both live backends show the measured profile layout, not a reset sample.
-            apply_profile(self.env, p, workspace=load_workspace(self.live_workspace))
+            apply_profile(self.env, p, workspace=workspace)
         from .scene import apply_robot_appearance
         from isaaclab.sim import get_current_stage
         apply_robot_appearance(get_current_stage(), p)

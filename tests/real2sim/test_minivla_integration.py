@@ -65,7 +65,8 @@ def test_source_uses_saved_precision_and_records_model_frame(tmp_path,env,monkey
     def environment(request,*args):
         assert request['options']['_collection_mappings']['leader']==mapper.metadata()
         return env
-    monkeypatch.setattr(worker,'_environment',environment)
+    monkeypatch.setattr(worker,'prepare_mujoco',lambda request,**kwargs:{'request':request})
+    monkeypatch.setattr(worker.simulation_environment,'create_mujoco',environment)
     request={'workspace':'fixture','options':{'port':'fixture','instruction':'pick red','episodes':1,'episode_time_s':2}}
     worker.source(request,tmp_path,lambda *args:None,Bridge())
     actions=np.load(tmp_path/'dataset/episode_0000/raw_action.npy')
@@ -115,7 +116,8 @@ def test_custom_policy_chunk_drives_real_cpu_environment(tmp_path, env, monkeypa
     checkpoint.touch()
     (tmp_path / 'project_provenance.json').write_text(json.dumps({'coordinates': env.coordinates.metadata()}))
     monkeypatch.setattr(worker, '_verify_workspace', lambda *args: None)
-    monkeypatch.setattr(worker, '_environment', lambda *args: env)
+    monkeypatch.setattr(worker,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(worker.simulation_environment, 'create_mujoco', lambda *args,**kwargs: env)
     class Policy:
         cfg = SimpleNamespace(cameras=('side',), horizon=16, replan_steps=4)
         control_hz = 30
@@ -156,7 +158,8 @@ def test_source_discard_save_quit_with_fake_leader(tmp_path, env, monkeypatch):
             command = next(self.commands, 'quit')
             if command: self.pending.add(command)
     monkeypatch.setattr(hardware, 'Leader', Leader)
-    monkeypatch.setattr(worker, '_environment', lambda *args: env)
+    monkeypatch.setattr(worker,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(worker.simulation_environment, 'create_mujoco', lambda *args,**kwargs: env)
     monkeypatch.setattr(worker.time, 'sleep', lambda *args: None)
     request = {'options': {'port': 'fixture', 'instruction': 'pick red', 'episodes': 2, 'episode_time_s': 10}}
     report = worker.source(request, tmp_path, lambda *args: None, Bridge())
@@ -178,27 +181,15 @@ def test_backend_preserves_valid_targets_and_rejects_nonfinite(env):
 
 
 def test_capture_alignment_prepare_group_split_and_smoke_rejection(tmp_path, env):
-    from soarm101_lab.learning.minivla.data import load_manifest, episode_arrays
-    from soarm101_lab.workflow.episodes import prepare_dataset
+    from soarm101_lab.data.legacy import load_manifest, episode_arrays
     writer = make_dataset(tmp_path / 'source', env)
     manifest = load_manifest(writer.root / 'manifest.json')
     arrays = episode_arrays(manifest['episodes'][0], ['side'], 30)
     np.testing.assert_allclose(np.diff(arrays['timestamp']), 1 / 30)
     np.testing.assert_array_equal(arrays['timestamp'], arrays['action_timestamp'])
-    prepare_dataset(writer.root, tmp_path / 'prepared')
-    prepared = load_manifest(tmp_path / 'prepared/manifest.json')
-    assert {e['split'] for e in prepared['episodes']} == {'train', 'val', 'test'}
-    assert (tmp_path / 'prepared/statistics.json').is_file()
-    with pytest.raises(ValueError, match='Source group leakage'):
-        changed = json.loads((writer.root / 'manifest.json').read_text())
-        changed['episodes'][1]['group_id'] = changed['episodes'][0]['group_id']
-        (writer.root / 'manifest.json').write_text(json.dumps(changed))
-        prepare_dataset(writer.root, tmp_path / 'leaky', {'episode_0000': 'train', 'episode_0001': 'val', 'episode_0002': 'test'})
-    smoke = make_dataset(tmp_path / 'smoke', env, smoke=True)
-    with pytest.raises(ValueError, match='Synthetic'):
-        prepare_dataset(smoke.root, tmp_path / 'bad_train')
-
-
+    from soarm101_lab.workflow.curation import export_subset
+    selected=export_subset(writer.root,tmp_path/'selected',[manifest['episodes'][0]['id']])
+    assert len(load_manifest(selected/'manifest.json')['episodes'])==1
 
 
 def test_recorded_state_actions_replay_exactly(tmp_path, env):
@@ -234,26 +225,6 @@ assert not any(n.split('.')[0] in ('torch','minivla','mujoco','isaaclab','omni',
     assert p.returncode == 0, p.stderr
 
 
-def test_training_worker_uses_integrated_module_and_clean_source_path(tmp_path, env, monkeypatch):
-    from soarm101_lab.workflow import mujoco as worker
-    from soarm101_lab.workflow.episodes import prepare_dataset
-    writer = make_dataset(tmp_path / 'source', env)
-    prepared = tmp_path / 'prepared'
-    prepare_dataset(writer.root, prepared)
-    output = tmp_path / 'training'; output.mkdir()
-    monkeypatch.setenv('PYTHONPATH', '/gui/venv/site-packages')
-    def launch(argv, **kwargs):
-        assert argv[:3] == [sys.executable, '-m', 'soarm101_lab.learning.minivla.train']
-        assert kwargs['cwd'] == ROOT
-        assert kwargs['env']['PYTHONPATH'] == str(ROOT / 'source/soarm101_lab')
-        config = Path(argv[argv.index('--config') + 1])
-        assert json.loads(config.read_text())['layers'] == 4
-        assert json.loads(config.read_text())['save_freq'] == 7
-        raise RuntimeError('validated launch before GPU training')
-    monkeypatch.setattr(worker.subprocess, 'run', launch)
-    with pytest.raises(RuntimeError, match='validated launch'):
-        worker.train({'input': str(prepared), 'options': {'save_freq':7},
-                      'config': str(worker.MODEL_ROOT / 'configs/default.json')}, output)
 
 
 def test_leader_import_no_isaac_dependencies():
@@ -285,12 +256,12 @@ def test_ik_is_bounded_and_does_not_change_physics(env):
 
 
 def test_canonical_registry_and_resume_preserve_original(tmp_path, env):
-    from soarm101_lab.workflow.artifacts import Registry, fingerprint
+    from soarm101_lab.utils.artifact_identity import fingerprint
+    from soarm101_lab.workflow.dataset import inspect_dataset
     from soarm101_lab.data.episodes import LegacyEpisodeWriter
     from soarm101_lab.workflow.source import metadata,resume_legacy
     writer = make_dataset(tmp_path / 'source', env)
-    registry = Registry(tmp_path / 'registry')
-    artifact = registry.register('source', writer.root)
+    artifact=inspect_dataset('source',writer.root)
     assert artifact['backend'] == 'mujoco'
     before = fingerprint(writer.root)
     manifest,provenance=metadata(env.recording_context(),'pick the red cube')
@@ -298,13 +269,13 @@ def test_canonical_registry_and_resume_preserve_original(tmp_path, env):
     resume_legacy(resumed,writer.root,env.backend.workspace)
     assert len(resumed.manifest['episodes']) == 3
     assert fingerprint(writer.root) == before
-    registry.verify(artifact)
+    assert inspect_dataset('source',writer.root)==artifact
 
 
 def test_canonical_curation_preserves_lineage_and_rejects_bad_annotation(tmp_path, env):
     from soarm101_lab.workflow.curation import analyze, export_subset
-    from soarm101_lab.workflow.artifacts import inspect_artifact, fingerprint
-    from soarm101_lab.workflow.episodes import prepare_dataset
+    from soarm101_lab.workflow.dataset import inspect_dataset
+    from soarm101_lab.utils.artifact_identity import fingerprint
     writer = make_dataset(tmp_path / 'source', env)
     original = fingerprint(writer.root)
     rows = analyze(writer.root)
@@ -313,12 +284,12 @@ def test_canonical_curation_preserves_lineage_and_rejects_bad_annotation(tmp_pat
     assert fingerprint(writer.root) == original
     entry = json.loads((subset / 'manifest.json').read_text())['episodes'][0]
     assert entry['group_id'] == writer.manifest['episodes'][2]['group_id']
-    assert inspect_artifact('source', subset)['episode_count'] == 1
-    prepare_dataset(subset, tmp_path / 'single_prepared', require_validation=False)
-    with pytest.raises(ValueError): prepare_dataset(subset, tmp_path / 'mini_prepared')
+    assert inspect_dataset('source', subset)['episode_count'] == 1
+    again=export_subset(subset,tmp_path/'again',[entry['id']])
+    assert inspect_dataset('source',again)['episode_count']==1
     (subset / entry['path'] / 'annotation.json').write_text(json.dumps({
         'schema': 'so101.mujoco-subtasks/1', 'frame_count': 4, 'grasp': 3, 'place': 1}))
-    with pytest.raises(ValueError, match='ordered'): inspect_artifact('annotated', subset)
+    with pytest.raises(ValueError, match='ordered'): inspect_dataset('annotated', subset)
 
 
 def test_datagen_rejects_unsuccessful_physical_attempt():
@@ -394,7 +365,7 @@ def test_front_camera_dataset_and_policy_contract(tmp_path,monkeypatch):
     from soarm101_lab.data.recording import SourceEpisode
     from soarm101_lab.workflow.source import metadata
     from soarm101_lab.workflow import mujoco as worker
-    from soarm101_lab.learning.minivla.data import load_manifest,episode_arrays
+    from soarm101_lab.data.legacy import load_manifest,episode_arrays
     export=fruit_export.__wrapped__(tmp_path);workspace=import_scene(export,registry=tmp_path/'workspaces')
     env=PolicyEnvironment(workspace,'none',control_hz=30)
     env.backend.get_rgb=lambda camera=None:np.zeros((240,320,3),np.uint8)
@@ -413,7 +384,8 @@ def test_front_camera_dataset_and_policy_contract(tmp_path,monkeypatch):
     checkpoint=tmp_path/'fixture_policy.pt';checkpoint.touch()
     (tmp_path/'project_provenance.json').write_text(json.dumps({'coordinates':env.coordinates.metadata()}))
     monkeypatch.setattr(worker,'_verify_workspace',lambda *args:None)
-    monkeypatch.setattr(worker,'_environment',lambda *args:env)
+    monkeypatch.setattr(worker,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(worker.simulation_environment,'create_mujoco',lambda *args,**kwargs:env)
     class Policy:
         cfg=SimpleNamespace(cameras=('front',),horizon=4,replan_steps=2)
         control_hz=30

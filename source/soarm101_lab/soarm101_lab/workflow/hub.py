@@ -6,7 +6,7 @@ from ..real2sim.storage import atomic
 
 
 def publication_metadata(artifact, options):
-    return {'schema': 'so101.hub-provenance/1', 'artifact': artifact,
+    return {'schema': 'so101.hub-provenance/1', 'input': {'path':artifact['path']},
             'repository': {'repo_id': options['repo_id'], 'private': bool(options['private']),
                            'revision': options.get('revision', 'main')},
             'representation': artifact.get('representation'), 'workspace': artifact.get('workspace'),
@@ -39,6 +39,6 @@ def publish(artifact, options, output, api=None):
                              path_in_repo='hf_publication_provenance.json', parent_commit=commit.oid)
     result = {'repo_id': repo, 'repo_type': kind, 'revision': revision,
               'commit': commit.oid, 'url': str(commit.commit_url), 'status': 'SUCCEEDED',
-              'local_path': str(folder), 'source_artifact': artifact['id']}
+              'local_path': str(folder), 'source_path': artifact['path']}
     atomic(output, result)
     return result

@@ -11,7 +11,8 @@ from soarm101_lab.real2sim.workspaces.package import load, metadata
 from soarm101_lab.real2sim.workspaces.demo import coordinate_contract
 from soarm101_lab.real2sim.workspaces.physics import compile_physics
 from soarm101_lab.real2sim.workspaces.reset import WorkspaceRandomizer
-from soarm101_lab.workflow.artifacts import Registry, browse_directory
+from soarm101_lab.workflow.dataset import inspect_dataset
+from soarm101_lab.workflow.paths import browse_directory
 from soarm101_lab.workflow.operations import Operations
 from soarm101_lab.workflow.hub import publication_metadata, publish
 
@@ -82,19 +83,10 @@ def test_four_anchor_bounds_repeatability(published):
         for p in sample['cube_positions'].values(): assert max(abs(p[0]), abs(p[1])) <= .053
 
 
-def test_registry_dependencies_tamper_and_picker(published, tmp_path):
-    registry = Registry(tmp_path / 'registry'); a = registry.register('workspace', published[3])
-    report = tmp_path / 'replay.json'; report.write_text('{"passed":true}')
-    b = registry.register('replay', report, [a['id']])
-    assert b['workspace'] == a['workspace'] and b['parents'] == [a['id']]
-    assert registry.latest({'replay'})['id'] == b['id']
-    assert browse_directory('replay', registry=registry) == str(tmp_path)
-    report.write_text('{"passed":false}')
-    with pytest.raises(ValueError, match='changed'): registry.verify(b)
 
 
 def test_operation_plan_preserves_cli_no_shell(published, tmp_path):
-    r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
+    r=tmp_path/'workflow';a=str(published[3]);op=Operations(root=r)
     assert op.readiness('source', a, '', {})[0] == 'NOT_READY'
     opts = {'port': '/dev/test;echo not-a-shell', 'output': str(tmp_path / 'demo with space.hdf5')}
     assert op.readiness('source', a, '', opts)[0] == 'READY'
@@ -105,7 +97,7 @@ def test_operation_plan_preserves_cli_no_shell(published, tmp_path):
 
 
 def test_failed_run_never_registers(published, tmp_path, monkeypatch):
-    r = Registry(tmp_path / 'registry'); a = r.register('workspace', published[3]); op = Operations(r)
+    r=tmp_path/'workflow';a=str(published[3]);op=Operations(root=r)
     monkeypatch.setenv('PYTHONPATH', '/gui/venv/lib/python3.11/site-packages')
     monkeypatch.setenv('PYTHONHOME', '/gui/venv')
     environments = []
@@ -114,10 +106,10 @@ def test_failed_run_never_registers(published, tmp_path, monkeypatch):
         def wait(self, **kwargs): return 3
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.Popen', Process)
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.run', lambda *a, **k: SimpleNamespace(stdout='test'))
-    with pytest.raises(RuntimeError): op.run('source', a, options={'port': 'test'})
-    states = list((r.root / 'runs').glob('*/state.json'))
+    with pytest.raises(RuntimeError): op.run('source',a,options={'port':'test','storage_name':'failed'})
+    states = list((r / 'runs').glob('*/state.json'))
     assert json.loads(states[0].read_text())['status'] == 'FAILED'
-    assert len(r.all()) == 1
+    assert not (r/'artifacts').exists()
     from soarm101_lab.real2sim.workspaces.package import ROOT
     import os
     assert environments[0]['PYTHONPATH'].split(os.pathsep) == [str(ROOT / 'source/soarm101_lab')]
@@ -125,7 +117,7 @@ def test_failed_run_never_registers(published, tmp_path, monkeypatch):
 
 
 def test_cancelled_datagen_without_success_is_stopped_without_artifact(published,tmp_path,monkeypatch):
-    r=Registry(tmp_path/'registry');a=r.register('workspace',published[3]);op=Operations(r)
+    r=tmp_path/'workflow';a=str(published[3]);op=Operations(root=r)
     target=tmp_path/'output'
     plan={'output':str(target),'argv':['fake-worker'],'options':{'mode':'operator','backend':'mujoco','headless':True},
         'worker_report':True,'type':'datagen','result_key':'dataset'}
@@ -137,8 +129,8 @@ def test_cancelled_datagen_without_success_is_stopped_without_artifact(published
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.Popen',Process)
     monkeypatch.setattr('soarm101_lab.workflow.operations.subprocess.run',lambda *a,**k:SimpleNamespace(stdout='test'))
     result=op.run('datagen',a,str(published[3]))
-    assert result=={'status':'STOPPED','no_artifact':True} and len(r.all())==1
-    state=json.loads(next((r.root/'runs').glob('*/state.json')).read_text())
+    assert result=={'status':'STOPPED','no_artifact':True} and not (r/'artifacts').exists()
+    state=json.loads(next((r/'runs').glob('*/state.json')).read_text())
     assert state['status']=='STOPPED' and 'error' not in state
 
 
@@ -171,27 +163,27 @@ def test_source_artifact_contract_and_readiness(published, tmp_path):
         episode.create_dataset('actions', data=np.zeros((2, 7)))
         episode.create_dataset('joint_targets', data=np.zeros((2, 6)))
         episode.create_dataset('obs/policy/joint_pos', data=np.zeros((2, 6)))
-    r = Registry(tmp_path / 'registry'); source = r.register('source', demo)
+    r=tmp_path/'workflow';source=inspect_dataset('source',demo)
     assert source['representation']['id'] == 'MODEL_JOINT_RAD_V1'
-    assert Operations(r).readiness('annotate', source, str(published[3]))[0] == 'READY'
+    state,reason=Operations(root=r).readiness('annotate', str(demo), str(published[3]),{'storage_name':'new'})
+    assert state=='NOT_READY' and 'control_dt' in reason  # This fixture lacks recorded timing.
     bad = copy.deepcopy(coordinate_contract(w)); bad['mapping']['gripper_zero_offset_rad'] = .1
     with h5py.File(demo, 'a') as h:
         h['data'].attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': bad})
-    bad_source = r.register('source', demo)
-    assert Operations(r).readiness('annotate', bad_source, str(published[3]))[0] == 'NOT_READY'
+    bad_source=inspect_dataset('source',demo)
+    assert Operations(root=r).readiness('annotate', str(demo), str(published[3]),{'storage_name':'new'})[0] == 'NOT_READY'
 
 
 def test_workflow_panel_shared_backend_and_no_autorun(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
     app = QApplication.instance() or QApplication([])
-    registry = Registry(tmp_path / 'registry')
-    monkeypatch.setattr(ui, 'Registry', lambda: registry)
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     calls = []
     panel = ui.WorkflowPanel(lambda *args: calls.append(args))
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
     assert not calls
-    assert panel.service.registry is registry
+    assert panel.service.root==panel.root and not hasattr(panel.service,'registry')
     assert panel.status.text().startswith('NOT_READY')
     assert panel.stage_options(require_name=False)['architecture'] == 'smolvla'
     panel.close()
@@ -212,10 +204,8 @@ def test_source_and_datagen_replay_layout_no_remapping():
 
 
 def test_source_timing_options(published, tmp_path):
-    registry = Registry(tmp_path / 'registry')
-    artifact = registry.register('workspace', published[3])
-    operations = Operations(registry)
-    options = {'port': '/dev/test', 'episode_time_s': 12.5, 'reset_time_s': 0}
+    artifact=str(published[3]);operations=Operations(root=tmp_path/'workflow')
+    options = {'port': '/dev/test', 'episode_time_s': 12.5, 'reset_time_s': 0, 'storage_name':'timing'}
     argv = operations.plan('source', artifact, '', options, run_dir=tmp_path)['argv']
     assert float(argv[argv.index('--episode_time_s') + 1]) == 12.5
     assert float(argv[argv.index('--reset_time_s') + 1]) == 0
@@ -235,18 +225,6 @@ def test_overview_framing_is_read_only(published):
     assert workspace['profile'] == original
 
 
-def test_readable_run_names():
-    import re
-    from soarm101_lab.workflow.operations import run_folder_name
-    artifact = {'tasks': [{'task_id': 'cube_red_to_cup_a'}]}
-    name = run_folder_name('annotate', artifact)
-    assert re.fullmatch(r'\d{8}_\d{6}_annotation_cube_red_to_cup_a_[0-9a-f]{8}', name)
-    assert run_folder_name('annotate', artifact) != name
-    assert '_cube_blue_to_cup_b_' in run_folder_name('source', artifact, options={'tasks': [{'task_id': 'cube_blue_to_cup_b'}]})
-    assert '_all_tasks_' in run_folder_name('sim_eval', artifact, options={'task_scope': 'all'})
-    assert '_multi_2_tasks_' in run_folder_name('train', {'tasks': [{'task_id': 'a'}, {'task_id': 'b'}]})
-    assert '_no_task_' in run_folder_name('hf_policy', {})
-    assert '/' not in run_folder_name('source', {}, options={'tasks': [{'task_id': '../../bad/name'}]})
 
 
 def test_success_target_name_and_legacy_alias():
@@ -281,68 +259,8 @@ def test_datagen_seed_changes_layout_without_mutating_workspace(published, monke
     assert datagen_seed(0, 12345) == 12345
 
 
-@pytest.mark.parametrize('fail_registration', [False, True])
-def test_annotation_replaces_source_only_after_validation(published, tmp_path, monkeypatch, fail_registration):
-    import h5py
-    import shutil
-    from soarm101_lab.so101_dataset_contract import write_contract, sidecar
-    w = load(published[3]); source_path = tmp_path / 'source.hdf5'
-    with h5py.File(source_path, 'w') as f:
-        data = f.create_group('data')
-        data.attrs['env_args'] = json.dumps({'workspace': metadata(w), 'so101_coordinates': coordinate_contract(w)})
-        g = data.create_group('demo_0')
-        g.create_dataset('actions', data=np.zeros((2, 7)))
-        g.create_dataset('joint_targets', data=np.zeros((2, 6)))
-        g.create_dataset('obs/policy/joint_pos', data=np.zeros((2, 6)))
-    write_contract(source_path, coordinate_contract(w))
-    registry = Registry(tmp_path / 'registry')
-    source = registry.register('source', source_path)
-    assert registry.register('source', source_path)['id'] == source['id']
-    result_path = tmp_path / 'annotated.hdf5'
-    shutil.copy2(source_path, result_path)
-    write_contract(result_path, {**coordinate_contract(w), 'source_dataset': str(source_path)})
-    before = source_path.read_bytes(), sidecar(source_path).read_bytes()
-    with pytest.raises(ValueError, match='Missing Mimic annotation'):
-        registry.promote_annotation(source, result_path)
-    with h5py.File(result_path, 'a') as f:
-        f['data/demo_0'].create_dataset('obs/datagen_info/subtask_term_signals/grasp', data=[False, True])
-    if fail_registration:
-        monkeypatch.setattr(registry, 'register', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('registration failed')))
-        with pytest.raises(RuntimeError, match='registration failed'):
-            registry.promote_annotation(source, result_path)
-        assert before == (source_path.read_bytes(), sidecar(source_path).read_bytes())
-        assert result_path.exists() and registry.get(source['id'])['status'] == 'SUCCEEDED'
-        registry.verify(source)
-    else:
-        result = registry.promote_annotation(source, result_path)
-        assert result['path'] == str(source_path) and result['type'] == 'annotated'
-        assert registry.get(source['id'])['status'] == 'SUPERSEDED'
-        assert registry.get(source['id'])['superseded_by'] == result['id']
-        registry.verify(result)
-        assert not result_path.exists()
-    assert not list(tmp_path.glob('.*annotation_backup*'))
 
 
-@pytest.mark.parametrize('canonical', [False, True])
-def test_partition_source_annotation_cannot_replace_original(published, tmp_path, canonical):
-    from test_source_partitions import source_fixture
-    from soarm101_lab.workflow.episodes import export_source_splits
-    from soarm101_lab.workflow.artifacts import fingerprint
-    source_path=tmp_path/'source.hdf5';source_fixture(source_path,4,load(published[3]))
-    plan=export_source_splits(source_path,tmp_path/'split')
-    path=Path(plan['outputs']['train'])
-    if canonical:
-        path=tmp_path/'canonical';folder=path/'episode';folder.mkdir(parents=True)
-        for name in ('state','action'):np.save(folder/(name+'.npy'),np.zeros((3,6),np.float32))
-        (folder/'outcome.json').write_text('{}')
-        (path/'manifest.json').write_text(json.dumps({'episodes':[{'id':'episode','path':'episode'}]}))
-        (path/'project_provenance.json').write_text(json.dumps({'workspace':metadata(load(published[3])),
-            'coordinates':coordinate_contract(load(published[3])),'source_partition':plan['partitions']['train']}))
-    registry=Registry(tmp_path/'registry');source=registry.register('source',path)
-    before=fingerprint(path)
-    with pytest.raises(ValueError,match='Source Partition is immutable'):
-        registry.promote_annotation(source,tmp_path/'annotation_not_opened.hdf5')
-    assert fingerprint(path)==before and registry.get(source['id'])['status']=='SUCCEEDED'
 
 
 

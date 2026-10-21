@@ -308,7 +308,12 @@ def test_valid_common_input_reaches_engine_without_legacy_import(stage,tmp_path,
     monkeypatch.setattr(package,'metadata',lambda *args:identity)
     monkeypatch.setattr(unified,'migrate',lambda *args:pytest.fail('Common input must not be migrated'))
     def engine(*args,**kwargs):raise RuntimeError('Validated common input reached the physics boundary')
-    monkeypatch.setattr(mujoco,'_environment',engine)
+    from soarm101_lab.workflow import worker_request
+    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(path),
+        'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],
+            'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+    monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',engine)
     request={'backend':'mujoco','stage':stage,'input':str(path),'workspace':'fixture',
         'output':str(tmp_path/stage),'options':{'generation_seed':1047}}
     with pytest.raises(RuntimeError,match='reached the physics boundary'):execute_request(request)
@@ -325,7 +330,10 @@ def test_datagen_cancel_before_trials_reports_stopped_without_false_success(tmp_
     monkeypatch.setattr(package,'load',lambda *args:{})
     monkeypatch.setattr(package,'metadata',lambda *args:identity)
     def cancel(*args,**kwargs):raise KeyboardInterrupt()
-    monkeypatch.setattr(mujoco,'_environment',cancel)
+    from soarm101_lab.workflow import worker_request
+    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(path), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+    monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',cancel)
     result=unified.execute({'backend':'mujoco','stage':'datagen','input':str(path),'workspace':'fixture',
         'output':str(tmp_path/'run'),'options':{'generation_seed':1047,'num_successful_demos':100}})
     assert result['stopped'] and result['successes']==0 and not result['passed'] and result['dataset'] is None
@@ -358,7 +366,10 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
         camera_requests.append(kwargs['overview_camera'])
         return native
     monkeypatch.setattr(environment,'create_isaac',create_isaac)
-    monkeypatch.setattr(mujoco,'_environment',lambda *args,**kwargs:native)
+    from soarm101_lab.workflow import worker_request
+    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(source), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+    monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',lambda *args,**kwargs:native)
     monkeypatch.setattr(adapters,'IsaacAdapter',lambda *args:adapter)
     monkeypatch.setattr(adapters,'MujocoAdapter',lambda *args:adapter)
     monkeypatch.setitem(sys.modules,'isaaclab.app',SimpleNamespace(AppLauncher=lambda **kwargs:SimpleNamespace(app=native)))
@@ -438,19 +449,6 @@ def test_standalone_manual_annotation_keyboard_uses_common_replay_state(monkeypa
     keyboard.callbacks['Q']();assert adapter.annotation_skipped==[True]
 
 
-def test_shared_subtask_source_cannot_leak_across_splits():
-    from soarm101_lab.workflow.episodes import split_episodes
-    def original(name):return {'kind':'source_episode','source_id':name,'source':{'groups':[]}}
-    def entry(name,sources):return {'id':name,'group_id':name,'source_lineage':{'kind':'mimic_segments',
-        'segments':[{'source':original(source)} for source in sources]}}
-    entries=[entry('ab',['a','b']),entry('bc',['b','c']),entry('d',['d']),entry('e',['e'])]
-    result,_=split_episodes(entries)
-    split={e['id']:e['split'] for e in result}
-    assert split['ab']==split['bc']
-    with pytest.raises(ValueError,match='Source group leakage'):
-        split_episodes(entries,{'ab':'train','bc':'val','d':'train','e':'val'})
-    entries[0]['source_lineage']['segments'][0]['source']={'kind':'UNKNOWN'}
-    with pytest.raises(ValueError,match='Unknown original Source'):split_episodes(entries)
 
 
 def test_common_source_resume_keeps_previous_and_video_references(tmp_path,episode):

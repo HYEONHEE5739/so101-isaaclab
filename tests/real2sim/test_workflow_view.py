@@ -22,9 +22,8 @@ def test_incremental_utf8_and_progress_filter(tmp_path):
 def test_pipeline_starts_at_source_without_retired_publication(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert panel.stage.currentData() == 'source'
     assert not panel.task_selector.isHidden()
@@ -54,10 +53,9 @@ def test_source_arrow_shortcuts_use_existing_commands(tmp_path, monkeypatch):
     from PyQt6.QtCore import Qt
     from PyQt6.QtTest import QTest
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.real2sim.storage import atomic
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path / 'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None); panel.show(); panel.activateWindow()
     root = tmp_path / 'presentation'; atomic(root / 'status.json', {'state':'RUNNING','frames':{}})
     panel.service.session = root; panel.busy = True; panel.active_stage = 'source'
@@ -81,7 +79,6 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     import json
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.workflow.option_help import KEYS, template, help_html
     from soarm101_lab.workflow.operations import STAGES
     assert set(KEYS) == set(STAGES)-{'merge'}  # Merge owns its separate dialog.
@@ -91,7 +88,7 @@ def test_stage_option_help_and_restore(tmp_path, monkeypatch):
     assert 'enable_motion' not in template('real_eval')  # Explicit start owns this internal flag.
     assert 'episode_time_s' not in template('source')
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert 'Episode Time' in panel.options_help.toPlainText()
     panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
@@ -146,9 +143,8 @@ def test_training_model_selector_owns_architecture(tmp_path, monkeypatch):
     import json
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert panel.architecture.isHidden()
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
@@ -169,9 +165,8 @@ def test_training_model_selector_owns_architecture(tmp_path, monkeypatch):
 def test_dashboard_navigation_selects_existing_stage(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, 'Registry', lambda: Registry(tmp_path))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel = ui.WorkflowPanel(lambda *args: None)
     assert panel.stage.isHidden()
     panel.navigation.setCurrentRow(panel.stage.findData('train'))
@@ -198,10 +193,9 @@ def test_minivla_periodic_resume_picker_reads_model_root(tmp_path,monkeypatch,ba
     import json
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.learning.minivla.config import MiniVLAConfig
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     model=tmp_path/'model';(model/'checkpoints').mkdir(parents=True)
     selected=model/'checkpoints/step_000002.pt';selected.write_bytes(b'not loaded by the GUI')
     MiniVLAConfig(steps=17,batch_size=batch_size,accumulation=accumulation).save(model/'config.json')
@@ -209,12 +203,14 @@ def test_minivla_periodic_resume_picker_reads_model_root(tmp_path,monkeypatch,ba
         saved=json.loads((model/'config.json').read_text());saved.pop('batch_size');(model/'config.json').write_text(json.dumps(saved))
     panel=ui.WorkflowPanel(lambda *args:None)
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
-    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
-    monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(str(selected),''))
-    panel.browse_checkpoint()
-    opts=panel.stage_options(require_name=False)
-    assert opts['resume_checkpoint']==str(selected) and opts['steps']==17 and opts['batch_size']==batch_size
-    assert opts['model_config']==str(model/'config.json')
+    assert panel.architecture.findData('minivla')==-1
+    panel.browse_checkpoint(str(selected))
+    from PyQt6.QtTest import QTest
+    for _ in range(100):
+        app.processEvents();panel._poll_checkpoint_metadata()
+        if panel._checkpoint_future is None:break
+        QTest.qWait(10)
+    assert '비활성화' in panel.status.text() and not panel.run.isEnabled()
     panel.close()
 
 
@@ -232,9 +228,8 @@ def test_training_graph_waits_and_updates_without_a_file_dialog(tmp_path,monkeyp
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtTest import QTest
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     monkeypatch.setattr(ui.QFileDialog,'getOpenFileName',lambda *args:(_ for _ in ()).throw(AssertionError('automatic graph must not ask for a file')))
     panel=ui.WorkflowPanel(lambda *args:None);panel.busy=True;panel.active_stage='train'
     panel.show_training_loss();chart=panel._loss_dialog.findChild(ui.TrainingLossPlot)
@@ -259,15 +254,13 @@ def test_training_graph_recovers_latest_matching_run_after_reopen(tmp_path,monke
     import json
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
-    registry=Registry(tmp_path/'registry');monkeypatch.setattr(ui,'Registry',lambda:registry)
+    registry=tmp_path/'outputs/workflow';monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel=ui.WorkflowPanel(lambda *args:None)
     panel.inputs.blockSignals(True);panel.inputs.clear();panel.inputs.addItem('dataset','train_id');panel.inputs.blockSignals(False)
-    monkeypatch.setattr(registry,'get',lambda key,**kwargs:{'type':'dataset','path':str(tmp_path/'dataset')})
     chosen=None
     for stamp,source in [('20261017_100000','train_id'),('20261017_110000','train_id'),('20261017_120000','different_id')]:
-        run=registry.root/'runs'/(stamp+'_train_cube');run.mkdir(parents=True)
+        run=registry/'runs'/(stamp+'_train_cube');run.mkdir(parents=True)
         output=tmp_path/stamp;metrics=output/'policy/metrics.jsonl';metrics.parent.mkdir(parents=True);metrics.write_text('')
         (run/'state.json').write_text(json.dumps({'stage':'train','source':source,'plan':{'output':str(output),'options':{'architecture':'minivla'}}}))
         if stamp=='20261017_110000':chosen=metrics
@@ -294,12 +287,11 @@ def test_loss_graph_incremental_partial_rows_and_aliases(tmp_path):
 def test_minivla_batch_size_defaults_and_stage_options(tmp_path,monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     panel=ui.WorkflowPanel(lambda *args:None)
     panel.stage.setCurrentIndex(panel.stage.findData('train'))
-    panel.architecture.setCurrentIndex(panel.architecture.findData('minivla'))
+    panel.architecture.setCurrentIndex(panel.architecture.findData('act'))
     assert panel.options.editors['batch_size'][1].value()==8
     panel.options.editors['batch_size'][1].setValue(4)
     assert panel.stage_options(require_name=False)['batch_size']==4 and 'accumulation' not in panel.options.editors

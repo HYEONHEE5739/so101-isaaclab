@@ -124,38 +124,50 @@ def _run_one(adapter,reader,writer,scheduler,index,attempt,seed,pool):
 
 
 def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
-    from .mujoco import _environment
+    from .worker_request import prepare_mujoco
+    from ..simulation.environment import create_mujoco
     from ..simulation.mujoco_backend import MujocoBackend
-    opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));num_envs=opts.get('num_envs',1);seed=opts['generation_seed']
-    if parent is None:parent=_environment(request,output,hz=reader.hz)
-    args=_output_args(reader,'mujoco',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
-    writer.args['execution_physics']={'backend':'mujoco','physics_dt':float(parent.backend.model.opt.timestep),
-        'control_decimation':parent.backend.decimation,'model_sha256':parent.backend.metadata['model_sha256'],
-        'integrator':int(parent.backend.model.opt.integrator),'solver':int(parent.backend.model.opt.solver),
-        'gravity_m_s2':parent.backend.model.opt.gravity.tolist()}
+    writer=None
     try:
+        opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));num_envs=opts.get('num_envs',1);seed=opts['generation_seed']
+        if parent is None:parent=create_mujoco(**prepare_mujoco(request,hz=reader.hz))
+        args=_output_args(reader,'mujoco',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
+        writer.args['execution_physics']={'backend':'mujoco','physics_dt':float(parent.backend.model.opt.timestep),
+            'control_decimation':parent.backend.decimation,'model_sha256':parent.backend.metadata['model_sha256'],
+            'integrator':int(parent.backend.model.opt.integrator),'solver':int(parent.backend.model.opt.solver),
+            'gravity_m_s2':parent.backend.model.opt.gravity.tolist()}
         resumed,history=_resume(writer,opts)
         scheduler=GenerationScheduler(opts['num_successful_demos'],opts.get('max_attempts',10000),num_envs,resumed,history)
+        if bridge:bridge.bind_generation(scheduler)
     except BaseException:
-        writer.close(False);parent.close();raise
-    if bridge:bridge.bind_generation(scheduler)
+        try:
+            if writer:writer.close(False)
+        finally:
+            if parent:parent.close()
+        raise
     metrics={};model_ids=[];data_ids=[];state_lock=threading.Lock();previews=queue.Queue(maxsize=1)
     def worker(index):
         backend=MujocoBackend(render_backend=parent.backend.render_backend,shared_backend=parent.backend)
-        adapter=MujocoAdapter(backend,reader.hz,output,_seed(seed,index),scheduler.stop)
-        adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
-        adapter.control=scheduler.control;adapter.worker_index=index
-        adapter.max_episode_steps=opts.get('max_episode_steps',2000)
-        last_preview=[0.]
-        def preview(a):
-            scheduler.set_state(index,'running',steps=a.step_index)
-            if a.step_index%50==0:print(f'[MIMIC] Env {index} step {a.step_index}',flush=True)
-            if index==0 and time.monotonic()-last_preview[0]>.1:
-                last_preview[0]=time.monotonic()
-                try:previews.put_nowait((a.step_index,a.last_images))
-                except queue.Full:pass
-        adapter.preview=preview
-        with state_lock:model_ids.append(id(backend.model));data_ids.append(id(backend.data))
+        adapter=None
+        try:
+            adapter=MujocoAdapter(backend,reader.hz,output,_seed(seed,index),scheduler.stop)
+            adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
+            adapter.control=scheduler.control;adapter.worker_index=index
+            adapter.max_episode_steps=opts.get('max_episode_steps',2000)
+            last_preview=[0.]
+            def preview(a):
+                scheduler.set_state(index,'running',steps=a.step_index)
+                if a.step_index%50==0:print(f'[MIMIC] Env {index} step {a.step_index}',flush=True)
+                if index==0 and time.monotonic()-last_preview[0]>.1:
+                    last_preview[0]=time.monotonic()
+                    try:previews.put_nowait((a.step_index,a.last_images))
+                    except queue.Full:pass
+            adapter.preview=preview
+            with state_lock:model_ids.append(id(backend.model));data_ids.append(id(backend.data))
+        except BaseException:
+            if adapter:adapter.close()
+            else:backend.close()
+            raise
         try:
             # Upstream generate() reads this pool; boundaries and RNG belong to each generator.
             started=time.perf_counter();pool=source_pool(adapter,reader.path,reader.mimic_names)
@@ -188,7 +200,9 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
     finally:
         scheduler.stop.set();executor.shutdown(wait=True)
         # An error from a worker must not publish unverified/incomplete data.
-        writer.record_attempts(scheduler.records);writer.close(publish=True);parent.close()
+        try:
+            writer.record_attempts(scheduler.records);writer.close(publish=True)
+        finally:parent.close()
         atomic(output/'attempts.json',scheduler.records)
     result={'ik_failure_policy':opts.get('ik_failure_policy','strict'),'ik_policy_configuration':policy_configuration(opts.get('ik_failure_policy','strict')),'ik_solver':opts.get('ik_solver','scipy_ls'),'ik_configuration':solver_configuration(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict')),**scheduler.progress(),'stopped':stopped,'dataset':str(writer.path),'requested':scheduler.target,
         'passed':scheduler.successes==scheduler.target or (stopped and scheduler.successes>0),

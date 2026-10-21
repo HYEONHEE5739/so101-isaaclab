@@ -2,7 +2,7 @@
 import json
 import os
 from pathlib import Path
-from .artifacts import inspect_artifact
+from .dataset import inspect_dataset
 
 
 def inspect_resume_input(stage, path):
@@ -11,7 +11,7 @@ def inspect_resume_input(stage, path):
     if not p.exists():raise ValueError('이어 수집할 데이터가 없습니다: '+str(p))
     if p.is_dir() and not ((p/'manifest.json').is_file() and (p/'project_provenance.json').is_file()):
         raise ValueError('이어 수집에는 dataset.hdf5 파일 또는 기존 데이터셋 폴더를 선택하세요. .videos 폴더는 영상 보관용입니다. 새로 생성할 때는 기존 완료 데이터를 비우세요.')
-    item=inspect_artifact(stage,p)
+    item=inspect_dataset(stage,p)
     if stage=='source' and (item.get('source_partition') or item.get('provenance',{}).get('source_partition')):
         raise ValueError('Source Partition is locked: Train/Val에는 이어 수집할 수 없습니다. origin의 원본 데이터를 선택하세요.')
     if stage=='datagen':
@@ -23,7 +23,7 @@ def inspect_resume_input(stage, path):
 
 
 def validate(stage, path, workspace, tasks, source=None, scene_configuration=None, workspace_definition=None):
-    item = inspect_artifact(stage,path)
+    item = inspect_dataset(stage,path)
     if stage=='source' and (item.get('source_partition') or item.get('provenance',{}).get('source_partition')):
         raise ValueError('Source Partition is locked; collect new demonstrations in the original unpartitioned Source dataset')
     if item.get('workspace') != workspace or item.get('tasks') != tasks:

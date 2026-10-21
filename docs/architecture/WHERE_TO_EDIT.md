@@ -1,5 +1,35 @@
 # 기능별 수정 시작점
 
+## 2026-10-21 — Curation 자유 선별·분할 완료
+
+`workflow.curation.split_dataset/export_splits/export_subset`가 Episode 단위 선택·선택적 Train/Val 배정·재선별을 소유한다. 기존 `episodes.source_split/export_source_splits` 강제 Group 연결 성분 분할은 삭제했다. 과거 Partition/Lineage는 변경 없이 검증·보존하며 새 배정은 `curation_split.json`/`curation.role`로 분리한다. UI에 전체 제외·출력 폴더 선택·저장 취소를 연결했다. 지원 편집 형식은 기존 HDF5와 Legacy NPY/MP4이며 LeRobot 직접 편집·평가 묶음 전체 편집은 지원하지 않는다. 기존 Training/LeRobot Merge 정책은 후속이다. [검증/지원 범위](../../outputs/workflow_validation/functional_refactor/curation_independent/REPORT.md). 아래 이전 완료 기록은 당시 상태다.
+
+
+## 2026-10-21 — Registry 제거 / 전체 Stage Path 실행
+
+현재 모든 Workflow Stage의 공개 입력은 Path다. `workflow/artifacts.py`와 Registry 등록·조회·promote·ID CLI는 삭제했다. 기존 `artifacts/*.json`은 사용자 과거 자료로 그대로 남지만 실행에서 읽지 않는다. 아래 이전 단계 기록은 당시 상태이며 현재 경계는 이 절을 따른다.
+
+- `workflow/paths.py`: native marker 탐색·저장 이름·출력 경계. 목록에서 payload/모델을 읽지 않는다.
+- `worker_request.stage_input/episode_context`: Path에서 Dataset/Checkpoint/Workspace 계약을 읽고 기존 Stage 실행에 전달한다. `dataset.inspect_dataset`와 `policy.inspect_checkpoint`가 형식별 검사를 소유한다.
+- `Operations`: Path 요청·출력 예약/Lock·process/Cancel·runs 로그·완료 결과 Path. UI의 선택/상세/READY는 기존 executor에서 처리한다.
+- Curation은 원본 Path를 직접 열어 새 결과를 저장한다. 과거 Group/Partition 정책과 MiniVLA 학습/Val 정책은 이번에 바꾸지 않았다. 공식 ACT/SmolVLA Trainer/Resume도 유지한다.
+- 필수 provenance/좌표가 없는 Checkpoint는 발견되더라도 평가 불가 오류를 낸다. Registry·다른 Checkpoint로부터 정보를 복원하거나 원본을 고치지 않는다.
+
+상세 결과와 검증 한계: [Registry 제거 보고서](../../outputs/workflow_validation/functional_refactor/registry_removal/REPORT.md).
+
+
+## 7b-1 Replay/Annotation Path 실행
+
+입력/READY: `workflow/ui.py:_refresh_episode_inputs/_poll_episode_inputs/_start_ready_check/_poll_ready_check`. 계획·출력/예약·process: `operations.py:episode_plan/Operations.run`. Native header/Scene/Coordinate: `worker_request.py:episode_context`. Worker full 검사/기존 엔진 수명: `unified.execute`. Playback·주석 알고리즘·Writer의 소유권은 바꾸지 않았다.
+
+CLI run/ready는 이 두 Stage만 --input/--workspace/--root/--storage-name을 사용한다. UI의 Path 선택은 Curation 창으로 직접 전달하지만 창 자체의 기존 등록/분할 정책은 후속이다. 다음7b-2의 DataGen caller는 [CALLERS](../../outputs/workflow_validation/functional_refactor/path_execution/CALLERS.md)를 따른다. [실제 실행/회귀](../../outputs/workflow_validation/functional_refactor/path_execution/REPORT.md).
+
+## 7a Path 발견/선택을 바꿀 때 (2026-10-21)
+
+형식 marker·nested/symlink/lock 처리: `workflow/paths.py:input_format/discover_inputs`. Resume 목록/선택의 비동기 연결: `workflow/ui.py:_request_model_discovery/_poll_model_discovery/browse_checkpoint/_poll_checkpoint_metadata`. 선택 설정: `workflow/policy.py:checkpoint_metadata`, Dataset header: `data/episodes.py:dataset_metadata`. Curation Picker는 marker만 검사하고 기존 QThread 분석으로 넘긴다. CLI: `scripts/real2sim/workflow.py discover`.
+
+발견은 실행 허가가 아니다. ID 기반 Stage 입력·실행과 등록을 바꾸려면 [7b 정확한 함수 목록과 metadata 누락 처리 조건](../../outputs/workflow_validation/functional_refactor/path_discovery/REGISTRY_RESPONSIBILITIES.md)을 먼저 읽는다. 지금은 Curation 정책·Training/Validation 변경을 섞지 않는다.
+
 **현재 구현 경계:** 공통 제어·guard·MiniVLA 추론 core·순수 Workspace Task와 Curation Reader(6a)·Common Writer/Buffer(6b-1/2)와 Source Writer(6b-3)·공통 Playback/Replay Stage(6c-1)를 분리했다. Registry와 MiniVLA 학습·Group 정책은 후속 교체 대상이며 아직 실제로 사용된다.
 
 먼저 [전체 구조](PROJECT_STRUCTURE.md)로 소유자를 찾고, [실행 흐름](SYSTEM_FLOW.md)에서 해당 함수의 앞뒤 데이터를
@@ -17,8 +47,8 @@
 | 장치 연결/Start/Stop | `runtime.py:connect/start/stop/disconnect_hardware/run` | launcher/Bus/Leader/Follower/CameraReader | Connect≠Start, 승인 없이 torque/goal 금지, heartbeat·예외 close. 높은 위험 |
 | Workspace import | `real2sim/workspaces/builder.py:inspect_export/import_scene` | package.load/metadata, 별도 Builder의 export schema | immutable/version/hash·robot frame/좌표/출처. Builder 원본 변경 금지 |
 | Workspace 메타데이터 | `workspaces/package.py:load/metadata` | builder.import_scene, demo.coordinate_contract, tasks.workspace_key, Registry inspection | 필드가 identity인지 정보인지 먼저 결정. 기존 hash/저장 파일 재작성 금지 |
-| Isaac Scene | `workspaces/environment.py:make_config` | tasks cfg/MDP, scene.configure_environment, unified._native_isaac | modelrad/action order·전체 reset·관측·camera. USD와 실제 PhysX 검사 구분 |
-| MuJoCo Scene/물성 | `simulation/mjcf.py:build_scene/robot_xml`, `mujoco_backend.py:MujocoBackend` | workspace_scene.extend_scene/physics.compile_physics, workflow.mujoco._environment | 기존 profile/reset·recorded model·MuJoCo 독립 process·physics defaults |
+| Isaac Scene | `workspaces/environment.py:make_config` | simulation.environment.create_isaac, tasks cfg/MDP, scene.configure_environment | modelrad/action order·전체 reset·관측·camera. USD와 실제 PhysX 검사 구분 |
+| MuJoCo Scene/물성 | `simulation/mjcf.py:build_scene/robot_xml`, `mujoco_backend.py:MujocoBackend` | workspace_scene.extend_scene/physics.compile_physics, worker_request.prepare_mujoco → simulation.environment.create_mujoco | 기존 profile/reset·recorded model·MuJoCo 독립 process·physics defaults |
 | MuJoCo 손가락 collision | `simulation/mjcf.py:robot_xml` | 저장소 루트 `assets/SO101/mujoco/finger_convex_parts.json`, 재생성 `scripts/mujoco/export_finger_collisions.py` | collision만 변경·원본 visual/URDF 불변·STL SHA·모터/물성 보존·접촉/실제 물리 검사 |
 | IK 계산/실패 정책 | `simulation/ik.py:solve_selected/solve_pose` | adapters.target_eef_pose_to_action, utils.so101_kinematics | SciPy/DLS 수식·seed·strict/hold/best_effort·limit·gripper. IK parity tests |
 | Task/active object/Scene 구성 | `real2sim/workspaces/tasks.py:catalog/validate/selected/configured` | 두 compiler/Workspace 환경/UI/worker; 기록/stamping은 아직 workflow.tasks | 원본 불변·기록 reset/physics·Task/Scene hash·명령문으로 identity 추정 금지 |
@@ -93,3 +123,22 @@
 `real2sim.workspaces.environment.make_config(..., overview_camera=False, grasp_observations=False)`는 전달된 요구만 사용한다. Workspace/Simulation의 Presentation.current/INSPECTION_STAGES 참조는 삭제했다. `workflow.unified.execute`는 연결된 DataGen의 Overview, `workflow.evaluation.evaluate_sim`은 연결된 평가의 Overview/Grasp 관측을 결정한다. 독립 Script/Source/Runtime은 false/false다. 정책 카메라 목록은 기존 Task가 소유한다. framing은 `simulation.workspace_scene.framing` 한 곳에 있고 이전 `workflow.presentation.framing`은 없다. MuJoCo는 같은 순수 구도 함수를 쓴다.
 
 삭제 edge: workspaces.environment→workflow.presentation/stages, simulation.workspace_scene→workflow.presentation. 새 edge: workspaces.environment→simulation.workspace_scene. 다른 Stage/I/O 역참조나 전체 SCC 해소를 뜻하지 않는다. 실제8종 설정/32회 UI독립 구성·Isaac2환경 Annotation/평가·MuJoCo 모델/물리/RGB 비교 근거는 `outputs/workflow_validation/functional_refactor/presentation_config/REPORT.md`다. 이전6c-2a의 간접 UI 결합 문구는 당시 상태다. 전체6c-2는 미완료다.
+
+## 6c-2c 실제 소유권 — 2026-10-21
+
+- Request/파일/Source Resume/보정/Physics Profile 선택: `workflow.worker_request.prepare_mujoco(request, coordinates=..., hz=..., workspace=...) → kwargs`. 이미 검증한 원본 Workspace를 재사용하며 compiler에 구성 copy 대신 원본을 전달한다. Task/Active Objects/Simulation.reset은 명시 kwargs다.
+- 실제 생성: `simulation.environment.create_mujoco(**kwargs) → 기존 PolicyEnvironment`. Stage/Dataset/Registry/Resume를 해석하지 않는다. Worker가 정상 close, PolicyEnvironment가 Backend 획득 후 초기화 실패 close를 소유한다.
+- 기존 `workflow.mujoco._environment`와 output 인수·export는 없다. Unified/DataGen/Evaluation의 생성용 mujoco import를 삭제했다. Source/옛 rollout/환경검사 caller도 새 경계를 직접 사용한다.
+- 계속 쓰는 Legacy/Common provenance 읽기는 `workflow.dataset.recording_provenance`로 이동했다. 새 형식·새 Writer·Wrapper는 없다. DataGen의 제공 Parent는 소유권을 이전받아 닫고 Parent가 없으면 직접 생성한다. 공유 MjModel/독립 MjData·ThreadPool·RNG·수치 알고리즘은 그대로다.
+- `workspaces.reset.source_workspace → workflow.tasks/artifacts` 및 Legacy reader 위치는 남은 결합이다. Registry/Path/Training/Isaac 생성 통합을 완료했다는 뜻이 아니다.
+
+실제 전후 결과·load/compile/close·DataGen 첫 환경 배정 차이와 검증용 배정 고정의 한계는 `outputs/workflow_validation/functional_refactor/mujoco_environment/REPORT.md`를 따른다. 숫자/MP4 일치에서 실측 timing·새 Source UUID·private 경로는 구분했다. 기존 6c-2a/b의 MuJoCo factory 미완료 문구는 당시 상태다.
+
+
+## 2026-10-21 — 6c-2d 완료 / 6c-2 환경 생성 경계 완료
+
+Isaac 설정/생성 호출35곳과 Gym 경로를 점검했다. Recorded Scene의 create_isaac, Source/Teleop, Sim 평가, Live Runtime, 독립 검사/고정 Scene CLI는 센서·Reset·수명이 달라 별도 진입을 유지한다. 공통 cfg는 기존 make_config이며 새 Factory/Manager/Wrapper를 추가하지 않았다. Source/평가/Runtime/물리 CLI는 이미 준비한 Workspace dict를 재사용한다. Runtime.build_environment(p, *, workspace=None)는 connect의 검증 snapshot을 빌리며 standalone 호출은 필요 시 현재 파일을1회 읽는다. Runtime profile 적용에는 파생 Task copy가 아닌 원본 Workspace를 사용한다. Source는 장치 연결 뒤 실제 mapping Hash 검사를 유지했다.
+
+실제 Isaac A/B: 평가2환경×6step의 설정·3trace/72numeric·24frame/PTS·Preview3파일, Runtime/Source 생성 경계6step과 물리CLI120step의 설정·초기/명령/관절·물체속도 trace가 같다. Source는 가상 Leader이며 Recorder 전 경계만 검증했다. load는 평가생성1→0(상위1회 별도), Runtime connect3→1/standalone build2→1, Source2→1, 물리CLI3→1이다. 평가 baseline 반복과 전후 RGB 차이는 따로 기록했으며 pixel/통계적 동등성·보편적 속도향상은 주장하지 않는다. GUI/Runtime137PASS·인접57PASS·입력6PASS, core 완료 로그는 보고서 참조(중복합산 금지). 설정32회 UI독립 비교도 통과했다.
+
+환경 생성·실제 reset event·Camera/framing에는 Workflow/UI/Registry import가 없다. 기존 workspaces.reset.source_workspace/demo.verify_dataset의 상위 입력 정책 역참조와 Task 생략 시 요청 파일 fallback은 남으며 전체 Workspace/Registry 정리 완료가 아니다. 사용자자료/설정·UI·의존성·Commit/Push 변경 없음. 실제 Source 전체 수집·실물·장시간·새 Annotation/DataGen actual·4/8환경 actual은 이번에 재검증하지 않았다. **6c-2a/b/c/d 경계는 완료, 전체 기능 단위 리팩터링은 미완료**다. 상세 호출자/검증/한계는 [6c-2d 보고서](../../outputs/workflow_validation/functional_refactor/isaac_boundaries/REPORT.md)와 해당 CALLERS.md를 따른다.

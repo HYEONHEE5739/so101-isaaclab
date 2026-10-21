@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from soarm101_lab.workflow.artifacts import fingerprint
+from soarm101_lab.utils.artifact_identity import fingerprint
 from soarm101_lab.workflow.operations import mujoco_request
 
 
-@pytest.mark.parametrize('stage', ['prepare', 'convert', 'annotate', 'datagen', 'train'])
+@pytest.mark.parametrize('stage', ['convert', 'annotate', 'datagen'])
 def test_worker_request_preserves_payload_and_option_ownership(tmp_path, stage):
     dataset = tmp_path / 'dataset'
     dataset.mkdir()
@@ -39,7 +39,7 @@ def test_worker_request_preserves_payload_and_option_ownership(tmp_path, stage):
     ({}, 'Input must be a canonical MiniVLA dataset directory'),
 ])
 def test_worker_request_validation_order_and_messages(change, message):
-    args = dict(stage='prepare', python=sys.executable, workspace='/missing/workspace',
+    args = dict(stage='convert', python=sys.executable, workspace='/missing/workspace',
                 input_path='/missing/dataset', config='', checkpoint='', renderer='none', options={})
     args.update(change)
     with pytest.raises(ValueError) as error:
@@ -51,7 +51,7 @@ def test_custom_training_camera_contract_and_convert_id_are_still_required(tmp_p
     (tmp_path / 'manifest.json').write_text(json.dumps({'cameras': ['side']}))
     config = tmp_path / 'config.json'
     config.write_text(json.dumps({'cameras': ['wrist']}))
-    with pytest.raises(ValueError, match='Model config camera contract differs'):
+    with pytest.raises(ValueError, match='Unsupported workflow worker stage'):
         mujoco_request('train', sys.executable, '', str(tmp_path), str(config), '', 'none', {})
     with pytest.raises(ValueError, match='Dataset repo_id required'):
         mujoco_request('convert', sys.executable, '', str(tmp_path), '', '', 'none', {})

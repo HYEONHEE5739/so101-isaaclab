@@ -13,8 +13,7 @@ from soarm101_lab.real2sim.runtime import Runtime
 @pytest.fixture(autouse=True)
 def isolated_workflow_registry(tmp_path,monkeypatch):
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'workflow_registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
 
 
 @pytest.mark.parametrize('state', ['CONNECTING', 'BUILDING_ENVIRONMENT'])
@@ -65,10 +64,9 @@ def test_mujoco_startup_ignores_previous_isaac_status(tmp_path, monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.real2sim.ui import Window
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     app = QApplication.instance() or QApplication([])
-    registry = Registry(tmp_path / 'registry')
-    monkeypatch.setattr(ui, 'Registry', lambda: registry)
+    registry=tmp_path/'outputs/workflow'
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     w = Window(tmp_path / 'live')
     try:
         w.live_backend.setCurrentIndex(w.live_backend.findData('mujoco'))
@@ -228,10 +226,9 @@ def test_capture_start_is_explicit_and_always_real_only(tmp_path,monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.real2sim.ui import Window
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.real2sim import launcher
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     monkeypatch.setattr(launcher.ctypes.util,'find_library',lambda name:None)
     spawn=Mock();monkeypatch.setattr(launcher.subprocess,'Popen',spawn)
     w=Window(tmp_path/'live')

@@ -21,8 +21,7 @@ def pump(app, window, predicate, timeout=15):
 
 def test_fake_ui_joint_reference_review_save_activate_restore(tmp_path,monkeypatch):
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path/'real2sim');p=w.precision_panel
     w.workflow_panel.worker_python = sys.executable;w.show();app.processEvents()
     assert w.tabs.count()==4 and w.runtime_launcher.process is None
@@ -128,8 +127,7 @@ def test_fake_ui_joint_reference_review_save_activate_restore(tmp_path,monkeypat
 
 def test_calibration_refuses_to_steal_live_teleop_bus(tmp_path,monkeypatch):
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path)
     monkeypatch.setattr(w.bus,'owner_alive',lambda:True);monkeypatch.setattr(w.bus,'status',lambda:{'backend':'mujoco','state':'RUNNING'})
     try:
@@ -141,8 +139,7 @@ def test_calibration_refuses_to_steal_live_teleop_bus(tmp_path,monkeypatch):
 def test_live_before_after_and_unrecorded_positions_without_hardware(tmp_path, monkeypatch):
     from soarm101_lab.real2sim.precision import FakeCalibrationDevice, fit_joint, review_joint, native_from_raw
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path/'real2sim');p=w.precision_panel
     spec=FakeCalibrationDevice('follower').motor_spec('shoulder_pan')
     refs=[dict(joint='shoulder_pan',raw=raw,legacy_position=native_from_raw(raw,spec),angle_rad=math.radians(deg),split='train',calibration_hash=spec['calibration_hash'])

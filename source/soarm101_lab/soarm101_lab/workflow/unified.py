@@ -25,8 +25,17 @@ def execute(request):
             inspect_resume_input('datagen',request['options']['resume_data'])
     output=Path(request['output']).resolve()
     if output.exists():raise FileExistsError('Choose a new workflow output directory')
-    output.mkdir(parents=True,exist_ok=False);original=Path(request['input']).resolve();reader=EpisodeDataset(original)
-    if reader.legacy or not reader.common:reader=EpisodeDataset(migrate(original,output/'imported.hdf5'))
+    original=Path(request['input']).resolve()
+    path_stage=request['stage'] in ('replay','annotate','datagen')
+    context=None
+    if path_stage:
+        from .worker_request import episode_context
+        context=episode_context(original,request['workspace'],request['stage'],request['options'])
+        if output.is_relative_to(context['workspace']['root']) or (original.is_dir() and output.is_relative_to(original)):
+            raise ValueError('Output must be outside input Dataset and immutable Workspace')
+    reader=context['reader'] if context else EpisodeDataset(original)
+    output.mkdir(parents=True,exist_ok=False)
+    if reader.legacy or not reader.common:reader=EpisodeDataset(migrate(original,output/('.input/imported.hdf5' if path_stage else 'imported.hdf5')))
     if request.get('include'):
         indexes=set()
         for token in request['include']:
@@ -45,9 +54,13 @@ def execute(request):
     validate_dataset(reader,require_annotations=request['stage']=='datagen')
     input_validation_s=time.perf_counter()-validation_started
     from ..real2sim.workspaces.package import load,metadata
-    workspace=load(request['workspace'])
+    workspace=context['workspace'] if context else load(request['workspace'])
     if reader.args['workspace']!=metadata(workspace):raise ValueError('Input Workspace identity differs')
     opts=copy.deepcopy(request['options']);backend=request['backend'];stage=request['stage']
+    if context:
+        # Bind freshly read native evidence, never a GUI/Registry snapshot.
+        opts.update(tasks=context['tasks'],task_definition=context['scene']['task_definition'],
+                    instruction=context['scene']['task_definition']['language_instruction'],active_object_ids=context['scene']['active_object_ids'])
     from ..utils.artifact_identity import fingerprint
     opts['source_pool_sha256']=fingerprint(original)
     from ..real2sim.workspaces.reset import datagen_seed
@@ -88,9 +101,10 @@ def execute(request):
             else:bridge=attach(native)
         elif backend=='mujoco':
             boundary=deferred_interrupt()
-            from .mujoco import _environment
+            from .worker_request import prepare_mujoco
+            from ..simulation.environment import create_mujoco
             from .adapters import MujocoAdapter
-            native=_environment(request,output,hz=reader.hz)
+            native=create_mujoco(**prepare_mujoco(request,hz=reader.hz,workspace=workspace))
             adapter=MujocoAdapter(native.backend,reader.hz,output,opts['generation_seed'],threading.Event())
             from .presentation import current
             bridge=current()
@@ -123,7 +137,8 @@ def execute(request):
             if backend=='isaac':result=run_isaac(native,request,reader,output,bridge,boundary)
             else:
                 adapter.buffer.abort();adapter=None
-                result=run_mujoco(request,reader,output,bridge,parent=native,boundary=boundary);native=None
+                parent=native;native=None
+                result=run_mujoco(request,reader,output,bridge,parent=parent,boundary=boundary)
         elif stage not in ('replay','annotate'):raise ValueError('Unsupported common episode stage')
         result.update(backend=backend,stage=stage,episode_schema=SCHEMA)
         atomic(output/'report.json',result)

@@ -382,9 +382,8 @@ def test_tab_changes_share_streams_and_do_not_connect_hardware(tmp_path,monkeypa
     from PyQt6.QtWidgets import QApplication
     from PIL import Image
     from soarm101_lab.workflow import ui
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.real2sim.ui import Window
-    monkeypatch.setattr(ui,'Registry',lambda:Registry(tmp_path/'workflow_registry'))
+    monkeypatch.setattr(ui,'ROOT',tmp_path)
     app=QApplication.instance() or QApplication([]);w=Window(tmp_path)
     try:
         w.runtime_launcher.connect=Mock(side_effect=AssertionError('Tab change tried to Connect'))

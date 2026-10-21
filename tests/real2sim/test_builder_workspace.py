@@ -364,10 +364,9 @@ def test_review_import_runtime_and_workflow_denial(exported,tmp_path):
     w=package.load(destination)
     assert w['manifest']['mapper']==DEFAULT_MAPPER.metadata()
     assert 'cup_print' in (destination/'scene/static.usda').read_text()
-    from soarm101_lab.workflow.artifacts import Registry
     from soarm101_lab.workflow.operations import Operations
-    registry=Registry(tmp_path/'workflow');artifact=registry.register('workspace',destination)
-    ready,reason=Operations(registry).readiness('source',artifact,str(destination))
+    registry=tmp_path/'workflow';artifact=str(destination)
+    ready,reason=Operations(root=registry).readiness('source',artifact,str(destination))
     assert ready=='NOT_READY' and 'Geometry review' in str(reason)
     code="""
 import sys,numpy as np

@@ -1,4 +1,4 @@
-"""Stable file/directory identities shared by Registry and learning consumers.
+"""Stable file/directory identities shared by Dataset and learning consumers.
 
 Names and payload bytes both count. HDF5 identities include each referenced MP4
 once; directory identities ignore .cache. No Registry, UI or engine is loaded.

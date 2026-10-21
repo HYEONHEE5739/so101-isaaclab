@@ -22,6 +22,35 @@ SCHEMA = 'so101.common-episode/2'
 SEMANTICS = 'absolute_target_after_observation'
 
 
+def dataset_metadata(path, format: str) -> dict:
+    """Header-only description for one explicitly selected path in a worker.
+
+    This is not readiness/Coordinate validation. No arrays, videos, parent
+    provenance or Workspace are loaded. Large metadata is left to full readers.
+    """
+    if format not in ('hdf5','canonical','lerobot','evaluation'):raise ValueError('Unknown dataset format')
+    path=Path(path).expanduser().resolve();result={'path':str(path),'format':format}
+    if format=='hdf5':
+        import h5py
+        with h5py.File(path,'r') as h:
+            data=h['data'];args=data.attrs.get('env_args','{}')
+            if len(args)>1024*1024:raise ValueError('Episode header exceeds display limit')
+            args=json.loads(args)
+            if not isinstance(args,dict):raise ValueError('Episode header must be an object')
+            result.update(format=args.get('dataset_schema','isaac-hdf5'),backend=args.get('backend'),
+                          control_hz=args.get('control_hz'),action_semantics=args.get('action_semantics'))
+        return result
+    marker=path/('meta/info.json' if format=='lerobot' else 'manifest.json' if format=='canonical' else 'evaluation_datasets.json')
+    with marker.open('rb') as stream:raw=stream.read(1024*1024+1)
+    if len(raw)>1024*1024:raise ValueError('Dataset header exceeds display limit')
+    header=json.loads(raw)
+    if not isinstance(header,dict):raise ValueError('Dataset header must be an object')
+    if format=='canonical':result.update(episodes=len(header.get('episodes',[])),control_hz=header.get('control_hz'))
+    elif format=='lerobot':result.update(episodes=header.get('total_episodes'),fps=header.get('fps'),features=header.get('features'))
+    else:result.update(schema=header.get('schema'),datasets=header.get('datasets'))
+    return result
+
+
 class LegacyEpisodeWriter:
     """Own Legacy NPY/MP4 metadata and manifest publication, never simulation.
 

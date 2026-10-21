@@ -31,3 +31,22 @@ def create_isaac(workspace: dict, scene: dict, coordinates: dict, *,
     except BaseException:
         native.close();raise
     return native
+
+
+def create_mujoco(workspace: dict, *, renderer='egl', control_hz=30,
+                  width=640, height=480, closed_rad=None, open_rad=None,
+                  measured_gripper_limits=None, task_definition=None,
+                  full_workspace=True, viewer=False, physics_profile='isaac_matched',
+                  simulation_configuration=None, active_object_ids=None):
+    """Construct a worker-owned MuJoCo policy environment from explicit inputs.
+
+    No Request, Dataset, Resume, calibration selection or Workspace loading here.
+    PolicyEnvironment owns its Backend and closes it on post-construction failure;
+    the worker owns normal close. Engine/GL imports remain construction-only.
+    """
+    from .mujoco_backend import PolicyEnvironment
+    return PolicyEnvironment(workspace=workspace,renderer=renderer,control_hz=control_hz,
+        width=width,height=height,closed_rad=closed_rad,open_rad=open_rad,
+        measured_gripper_limits=measured_gripper_limits,task_definition=task_definition,
+        full_workspace=full_workspace,viewer=viewer,physics_profile=physics_profile,
+        simulation_configuration=simulation_configuration,active_object_ids=active_object_ids)

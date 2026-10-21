@@ -2,7 +2,8 @@
 import copy,json,shutil
 from pathlib import Path
 import h5py,numpy as np,pytest
-from soarm101_lab.workflow.episodes import source_split,source_catalog,export_source_splits,split_episodes,validate_partition_episode
+from soarm101_lab.workflow.episodes import source_catalog,validate_partition_episode
+from soarm101_lab.workflow.curation import split_dataset,export_splits
 from soarm101_lab.workflow.curation import export_subset,analyze
 from soarm101_lab.so101_dataset_contract import current_contract,MIMIC_SPACE,write_contract,read_contract
 
@@ -30,57 +31,61 @@ def source_fixture(path,count=30,workspace=None):
     write_contract(path,contract);return args
 
 
-def test_source_30_split_seed_export_registry_and_renumber(tmp_path):
-    from soarm101_lab.workflow.artifacts import Registry
-    src=tmp_path/'source.hdf5';source_fixture(src);before=src.read_bytes()
-    a=source_split(src,seed=9);b=source_split(src,seed=9)
-    assert a==b and a['counts']=={'train':24,'val':6}
-    assert source_split(src,seed=10)['assignments']!=a['assignments']
-    result=export_source_splits(src,tmp_path/'split',seed=9)
-    sets=[set(result['partitions'][s]['source_ids']) for s in ('train','val')]
-    assert not sets[0]&sets[1] and src.read_bytes()==before
-    registry=Registry(tmp_path/'registry')
-    for split,path in result['outputs'].items():
-        artifact=registry.register('source',path);assert artifact['source_partition']['split']==split
-        records,p=source_catalog(path);assert len(records)==result['counts'][split]
-        chosen=list(records)[-2:];out=export_subset(path,tmp_path/(split+'_curated.hdf5'),chosen)
-        after,_=source_catalog(out)
-        assert {x['source_id'] for x in after.values()}=={records[n]['source_id'] for n in chosen}
-        assert read_contract(src)==read_contract(out)
-    copied=tmp_path/'renamed.hdf5';shutil.copyfile(src,copied)
-    assert {r['source_id'] for r in source_catalog(copied)[0].values()}=={r['source_id'] for r in source_catalog(src)[0].values()}
+def historical_plan(source,assignments=None):
+    # Fixture for immutable old proofs, not a production splitting path.
+    from soarm101_lab.real2sim.precision import fingerprint
+    records,_=source_catalog(source)
+    assignments=assignments or {n:'train' if i<2 else 'val' for i,n in enumerate(records)}
+    inventory={r['source_id']:r['source'] for r in records.values()}
+    by_id={records[n]['source_id']:v for n,v in assignments.items()};parts={}
+    for role in ('train','val'):
+        value=dict(schema='so101.source-partition/1',split=role,seed=0,train_fraction=.5,inventory=inventory,assignments=by_id,source_ids=[k for k,v in by_id.items() if v==role])
+        parts[role]={**value,'sha256':fingerprint(value)}
+    return dict(records=records,partitions=parts)
 
 
-def test_manual_assignments_duplicate_group_leakage_and_locked_partition(tmp_path):
+def test_free_selection_split_and_repeat_preserve_order(tmp_path):
+    src=tmp_path/'source.hdf5';source_fixture(src,50);before=src.read_bytes()
+    names=[f'demo_{i}' for i in range(45)]
+    subset=export_subset(src,tmp_path/'subset.hdf5',list(reversed(names)))
+    with h5py.File(src) as a,h5py.File(subset) as b:
+        assert len(b['data'])==45
+        for i in range(45):np.testing.assert_array_equal(a[f'data/demo_{i}/joint_targets'],b[f'data/demo_{i}/joint_targets'])
+    result=export_splits(subset,tmp_path/'split',.6,3)
+    assert result['counts']=={'train':27,'val':18}
+    assert split_dataset(subset,.6,3)['assignments']==result['assignments']
+    again=export_splits(result['outputs']['train'],tmp_path/'again',.5)
+    assert sum(again['counts'].values())==27
+    assert not source_catalog(result['outputs']['train'])[1] and src.read_bytes()==before
+
+
+def test_shared_group_warns_but_never_forces_assignment(tmp_path):
     src=tmp_path/'source.hdf5';source_fixture(src,4)
     with h5py.File(src,'a') as h:
-        for i in (0,1):h[f'data/demo_{i}'].attrs['source_group']='same_original'
+        for i in (0,1):h[f'data/demo_{i}'].attrs['source_group']='same'
     assignments={'demo_0':'train','demo_1':'val','demo_2':'train','demo_3':'val'}
-    with pytest.raises(ValueError,match='leakage'):source_split(src,assignments=assignments)
-    assignments['demo_1']='train';plan=source_split(src,assignments=assignments)
-    result=export_source_splits(src,tmp_path/'split',assignments=assignments)
-    with pytest.raises(ValueError,match='locked'):source_split(result['outputs']['train'])
-    assert plan['counts']=={'train':3,'val':1}
-    assert plan['group_members']['demo_0']==['demo_0','demo_1']
+    plan=split_dataset(src,assignments=assignments)
+    assert plan['warnings'] and plan['assignments']==assignments
+    result=export_splits(src,tmp_path/'split',assignments=assignments)
+    assert result['counts']=={'train':2,'val':2}
 
 
-def test_identical_source_content_copied_into_another_file_has_same_identity(tmp_path):
-    first=tmp_path/'a.hdf5';second=tmp_path/'b.hdf5';source_fixture(first,4);source_fixture(second,3)
-    with h5py.File(first) as a,h5py.File(second,'a') as b:
-        del b['data/demo_0'];a.copy(a['data/demo_2'],b['data'],name='demo_0')
-    a,_=source_catalog(first);b,_=source_catalog(second)
-    assert a['demo_2']['source_id']==b['demo_0']['source_id']
-    plan=source_split(second,seed=2)
-    duplicate_names=[n for n,r in plan['records'].items() if r['source_id']==a['demo_2']['source_id']]
-    assert len({plan['assignments'][n] for n in duplicate_names})==1
-
-
-def test_seed_partition_is_stable_after_unsplit_subset_renumber(tmp_path):
-    source=tmp_path/'source.hdf5';source_fixture(source,6)
-    copied=export_subset(source,tmp_path/'copied.hdf5',[f'demo_{i}' for i in reversed(range(6))])
-    plans=[source_split(p,.5,seed=17) for p in (source,copied)]
-    by_source=[{plan['records'][n]['source_id']:split for n,split in plan['assignments'].items()} for plan in plans]
-    assert by_source[0]==by_source[1]
+def test_historical_partition_is_not_resigned_or_used_as_current_role(tmp_path):
+    src=tmp_path/'source.hdf5';source_fixture(src,4);plan=historical_plan(src)
+    # Construct a historical Train dataset with its original signed proof.
+    with h5py.File(src,'a') as h:
+        args=json.loads(h['data'].attrs['env_args']);args['source_partition']=plan['partitions']['train']
+        h['data'].attrs['env_args']=json.dumps(args)
+        for name in list(h['data']):
+            if name not in ('demo_0','demo_1'):del h['data'][name]
+            else:h['data'][name].attrs['source_lineage']=json.dumps(plan['records'][name])
+    before=src.read_bytes();result=export_splits(src,tmp_path/'resplit',assignments={'demo_0':'val','demo_1':'train'})
+    with h5py.File(result['outputs']['val']) as h:
+        assert json.loads(h['data'].attrs['env_args'])['source_partition']==plan['partitions']['train']
+        assert json.loads(h['data'].attrs['curation'])['role']=='val'
+    subset=export_subset(result['outputs']['val'],tmp_path/'one.hdf5',['demo_0'])
+    assert len(analyze(subset))==1 and analyze(subset)[0]['split'] is None
+    assert src.read_bytes()==before
 
 
 def training_entry(plan,name,split,id):
@@ -88,22 +93,11 @@ def training_entry(plan,name,split,id):
             'source_partition':plan['partitions'][split],'source_lineage':plan['records'][name]}
 
 
-def test_shared_original_across_independently_created_partitions_is_rejected(tmp_path):
-    src=tmp_path/'source.hdf5';source_fixture(src,4)
-    a=source_split(src,assignments={'demo_0':'train','demo_1':'train','demo_2':'val','demo_3':'val'})
-    b=source_split(src,assignments={'demo_0':'val','demo_1':'train','demo_2':'train','demo_3':'val'})
-    with pytest.raises(ValueError,match='leakage'):
-        split_episodes([training_entry(a,'demo_0','train','a'),training_entry(b,'demo_0','val','b')])
-    entries,_=split_episodes([training_entry(a,'demo_0','train','a'),training_entry(a,'demo_2','val','b')])
-    assert [e['split'] for e in entries]==['train','val']
-    assert all(e['source_group']=='UNKNOWN:original_subtasks' for e in entries)
-    with pytest.raises(ValueError,match='overwritten'):split_episodes(entries,{'a':'val','b':'train'})
-    with pytest.raises(ValueError,match='evidence'):split_episodes([{**e,'source_lineage':None} for e in entries])
 
 
 def test_mimic_generated_unknown_requires_real_input_partition_evidence(tmp_path):
     from soarm101_lab.real2sim.precision import fingerprint
-    src=tmp_path/'source.hdf5';source_fixture(src,4);p=source_split(src)['partitions']['train']
+    src=tmp_path/'source.hdf5';source_fixture(src,4);p=historical_plan(src)['partitions']['train']
     lineage={'kind':'partition','partition_sha256':p['sha256'],'exact_source_ids':None}
     with pytest.raises(ValueError,match='unverifiable'):validate_partition_episode(p,lineage)
     proof={'verification':'source_only_input','sha256':'recorded_input_bytes','source_ids':p['source_ids']}
@@ -116,10 +110,9 @@ def test_mimic_generated_unknown_requires_real_input_partition_evidence(tmp_path
 def test_curation_split_preview_and_manual_ui(tmp_path,monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([]);src=tmp_path/'source.hdf5';source_fixture(src)
-    dialog=CurationDialog(Registry(tmp_path/'registry'))
-    monkeypatch.setattr(dialog,'run_job',lambda fn,done:done(fn()))
+    dialog=CurationDialog(tmp_path/'workflow')
+    monkeypatch.setattr(dialog,'run_job',lambda fn,done,**kw:done(fn()))
     dialog.rows=analyze(src);dialog.path=str(src);dialog.kind='source';dialog.count.setMaximum(30)
     dialog.preview_source_split();assert dialog.split_plan['counts']=={'train':24,'val':6}
     name=next(n for n,s in dialog.split_plan['assignments'].items() if s=='val')
@@ -134,9 +127,8 @@ def test_curation_selection_split_preview_state_is_clear_and_not_saved(tmp_path,
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.curation_ui import CurationDialog,SPLIT_COLORS
     app=QApplication.instance() or QApplication([]);src=tmp_path/'source.hdf5';source_fixture(src,20);before=src.read_bytes()
-    from soarm101_lab.workflow.artifacts import Registry
-    d=CurationDialog(Registry(tmp_path/'registry'))
-    monkeypatch.setattr(d,'run_job',lambda fn,done:done(fn()))
+    d=CurationDialog(tmp_path/'workflow')
+    monkeypatch.setattr(d,'run_job',lambda fn,done,**kw:done(fn()));d.job=type('Job',(),{'isInterruptionRequested':lambda self:False,'isRunning':lambda self:False})()
     d.rows=analyze(src);d.path=str(src);d.kind='source';d.count.setMaximum(20);d.count.setValue(20);d.refresh_list()
     d.auto_select();assert not d.excluded # Keeping all 20 does not create Train/Val assignments.
     assert not d.split_plan and not any(r.get('split') for r in d.rows)
@@ -161,9 +153,8 @@ def test_curation_selection_split_preview_state_is_clear_and_not_saved(tmp_path,
 def test_curation_ignores_split_preview_computed_for_old_settings(tmp_path,monkeypatch):
     from PyQt6.QtWidgets import QApplication
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([]);src=tmp_path/'source.hdf5';source_fixture(src,20)
-    d=CurationDialog(Registry(tmp_path/'registry'));d.rows=analyze(src);d.path=str(src);queued=[]
+    d=CurationDialog(tmp_path/'workflow');d.rows=analyze(src);d.path=str(src);queued=[]
     monkeypatch.setattr(d,'run_job',lambda fn,done:queued.append((fn,done)))
     d.preview_source_split();fn,done=queued.pop();old_plan=fn();d.train_ratio.setValue(70);done(old_plan)
     assert not d.split_plan and not any(r.get('split') for r in d.rows)
@@ -174,14 +165,13 @@ def test_curation_ignores_split_preview_computed_for_old_settings(tmp_path,monke
 def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(tmp_path,monkeypatch,mode):
     from PyQt6.QtWidgets import QApplication,QFileDialog,QPushButton
     from soarm101_lab.workflow.curation_ui import CurationDialog
-    from soarm101_lab.workflow.artifacts import Registry
     app=QApplication.instance() or QApplication([])
     original=tmp_path/'source.hdf5';source_fixture(original,6);original_bytes=original.read_bytes()
-    src=Path(export_source_splits(original,tmp_path/'existing_split',.5)['outputs']['train']) if mode=='locked' else original
+    src=Path(export_splits(original,tmp_path/'existing_split',.5)['outputs']['train']) if mode=='locked' else original
     before=src.read_bytes();records,partition=source_catalog(src)
-    registry=Registry(tmp_path/'registry');parent=registry.register('source',str(src))
+    registry=tmp_path/'workflow'
     d=CurationDialog(registry);errors=[]
-    monkeypatch.setattr(d,'run_job',lambda fn,done:done(fn()))
+    monkeypatch.setattr(d,'run_job',lambda fn,done,**kw:done(fn()));d.job=type('Job',(),{'isInterruptionRequested':lambda self:False,'isRunning':lambda self:False})()
     monkeypatch.setattr(d,'error',errors.append)
     assert not d.export_button.isEnabled()
     d.rows=analyze(src);d.path=str(src);d.kind='source'
@@ -190,35 +180,85 @@ def test_curation_single_save_exports_selection_or_plan_and_preserves_partition(
     if mode=='planned':d.preview_source_split()
     d.storage_name.setText('분할_1' if mode=='planned' else '선별_1')
     assert not errors and d.export_button.isEnabled()
-    assert [b for b in d.findChildren(QPushButton) if '저장' in b.text()]==[d.export_button]
+    assert [b for b in d.findChildren(QPushButton) if b.text() in ('데이터 저장','Train / Val 저장')]==[d.export_button]
     assert d.export_button.text()==('Train / Val 저장' if mode=='planned' else '데이터 저장')
     dest=tmp_path/('new_split' if mode=='planned' else 'curated.hdf5');requests=[]
     def choose_destination(*args):
         requests.append(args);return str(dest),''
     monkeypatch.setattr(QFileDialog,'getSaveFileName',choose_destination)
     d.export_button.click()
-    dest=Path(d.saved_collection) if mode=='planned' else Path(registry.latest({'source'})['path'])
+    dest=Path(d.saved_collection) if mode=='planned' else d.curation_destination()
     assert not errors and not requests and dest.exists()
     if mode=='planned':
-        result=json.loads((dest/'source_split.json').read_text())
+        result=json.loads((dest/'curation_split.json').read_text())
         assert result['assignments']==d.split_plan['assignments']
         outputs={s:source_catalog(dest/s/'dataset.hdf5') for s in ('train','val')}
         for split,(saved,saved_partition) in outputs.items():
             expected={records[n]['source_id'] for n in names if d.split_plan['assignments'][n]==split}
             assert {r['source_id'] for r in saved.values()}==expected
-            assert saved_partition==d.split_plan['partitions'][split]
+            assert saved_partition is None
     else:
         saved,saved_partition=source_catalog(dest)
         expected={records[n]['source_id'] for n in names}
         assert {r['source_id'] for r in saved.values()}==expected
         if partition:
             assert saved_partition['split']==partition['split']
-            assert saved_partition['parent_partition_sha256']==partition['sha256']
-            assert set(saved_partition['source_ids'])==expected
+            assert saved_partition==partition
         else:assert saved_partition is None
-    registered=[a for a in registry.all() if a['id']!=parent['id'] and not a.get('execution',{}).get('origin_source_id')]
-    assert len(registered)==(2 if mode=='planned' else 1)
-    origin=next((a for a in registry.all() if a.get('execution',{}).get('origin_source_id')==parent['id']),parent)
-    assert all(a['parents']==[origin['id']] for a in registered)
+    assert not (registry/'artifacts').exists()
     assert src.read_bytes()==before and original.read_bytes()==original_bytes
     d.close()
+
+
+def test_cancel_collision_and_failure_do_not_publish(tmp_path,monkeypatch):
+    from soarm101_lab.workflow import curation
+    from soarm101_lab.so101_dataset_contract import sidecar
+    src=tmp_path/'source.hdf5';source_fixture(src,4);before=src.read_bytes()
+    out=tmp_path/'out.hdf5';counter=[]
+    def cancel():counter.append(1);return len(counter)>3
+    with pytest.raises(InterruptedError):export_subset(src,out,['demo_0','demo_1'],cancel=cancel)
+    assert not out.exists() and not sidecar(out).exists()
+    import soarm101_lab.so101_dataset_contract as contract
+    def fail(*args):raise OSError('disk full')
+    with monkeypatch.context() as patch:
+        patch.setattr(contract,'write_contract',fail)
+        with pytest.raises(OSError,match='disk full'):export_subset(src,out,['demo_0'])
+    assert not out.exists() and not list(tmp_path.glob('.out*'))
+    export_subset(src,out,['demo_0']);saved=out.read_bytes()
+    with pytest.raises(ValueError):export_subset(src,out,['demo_1'])
+    assert out.read_bytes()==saved and src.read_bytes()==before
+    with pytest.raises(ValueError):export_subset(src,src,['demo_1'])
+    with pytest.raises(ValueError):split_dataset(src,names=['demo_0','demo_0'])
+    with pytest.raises(ValueError):export_subset(src,tmp_path/'empty.hdf5',[])
+
+
+def test_async_ui_save_reopen_and_cancel(tmp_path,monkeypatch):
+    import threading
+    from PyQt6.QtWidgets import QApplication
+    from test_curation import wait_qt
+    from soarm101_lab.workflow import curation_ui
+    app=QApplication.instance() or QApplication([])
+    src=tmp_path/'source.hdf5';source_fixture(src,6)
+    d=curation_ui.CurationDialog(tmp_path/'workflow');errors=[]
+    monkeypatch.setattr(d,'error',errors.append)
+    try:
+        d.load_data(str(src));wait_qt(lambda:d.job is None and len(d.rows)==6)
+        d.exclude_all.click();assert len(d.excluded)==6 and not d.export_button.isEnabled()
+        d.restore_all();d.set_excluded({'demo_1','demo_3'})
+        d.output_parent=str(tmp_path/'chosen');d.storage_name.setText('saved');d.save()
+        wait_qt(lambda:d.job is None)
+        saved=tmp_path/'chosen/saved.hdf5';assert saved.exists() and not errors
+        d.load_data(str(saved));wait_qt(lambda:d.job is None and len(d.rows)==4)
+        d.preview_source_split();wait_qt(lambda:d.job is None)
+        assert d.split_plan and d.plan_split.isEnabled()
+        d.cancel_source_split();d.set_excluded({'demo_0'});d.storage_name.setText('cancelled')
+        entered=threading.Event();release=threading.Event();real=curation_ui.export_subset
+        def blocked(*args,**kwargs):entered.set();release.wait(3);return real(*args,**kwargs)
+        monkeypatch.setattr(curation_ui,'export_subset',blocked)
+        d.save();wait_qt(entered.is_set);assert d.cancel_job.isEnabled()
+        d.cancel_job.click();release.set();wait_qt(lambda:d.job is None)
+        assert not (tmp_path/'chosen/cancelled.hdf5').exists() and not errors
+        assert '취소' in d.info.text()
+    finally:
+        if d.job is not None:d.job.requestInterruption();wait_qt(lambda:d.job is None)
+        d.close();app.processEvents()

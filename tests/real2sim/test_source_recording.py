@@ -176,7 +176,8 @@ def source_fixture(env,monkeypatch,common):
         def read(self):return DEFAULT_MAPPER.urdf_to_calibrated(dict(zip(JOINTS,env.backend.home))),{}
         def close(self):closed.append(True)
     monkeypatch.setattr(hardware,'Leader',Leader)
-    monkeypatch.setattr(worker,'_environment',lambda *args:env)
+    monkeypatch.setattr(worker,'prepare_mujoco',lambda *args,**kwargs:{})
+    monkeypatch.setattr(worker.simulation_environment,'create_mujoco',lambda *args,**kwargs:env)
     monkeypatch.setattr(worker.time,'sleep',lambda *args:None)
     monkeypatch.setattr('soarm101_lab.utils.voice.log_say',lambda *args,**kwargs:None)
     return worker,closed

@@ -11,9 +11,82 @@ from PIL import Image, ImageOps, ImageEnhance
 import torch
 from torch.nn import functional as F
 from .config import MiniVLAConfig
-from .data import Episodes, collate
+from ...data.legacy import load_manifest,episode_arrays,lerobot_reader,lerobot_storages
+from collections import OrderedDict
+from torch.utils.data import Dataset
+import hashlib
 from .policy import RobotPreprocessor
-from .train import seed_all
+from lerobot.utils.random_utils import set_seed as seed_all
+
+def training_fingerprint(m):
+    payload = {'joints': m['joint_names'], 'units': m['units'], 'hz': m['control_hz'],
+               'episodes': [{k:v for k,v in e.items() if not k.startswith('_')} for e in m['episodes'] if e['split']=='train']}
+    if m.get('storage'):payload['storage']=m['storage']
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+class Episodes(Dataset):
+    def __init__(self, manifest, stats, cfg, split):
+        self.manifest = load_manifest(manifest)
+        self.cfg = cfg
+        if stats['fingerprint'] != training_fingerprint(self.manifest): raise ValueError('Stats/manifest train mismatch')
+        self.pre = RobotPreprocessor(stats)
+        self.episodes = [e for e in self.manifest['episodes'] if e['split']==split]
+        if not self.episodes: raise ValueError(f'No episodes in split {split}')
+        self.readers=[lerobot_reader(s) for s in lerobot_storages(self.manifest)]
+        self.reader=self.readers[0] if self.readers else None
+        if any(not set(cfg.cameras).issubset(s['camera_keys']) for s in lerobot_storages(self.manifest)):
+            raise ValueError('Configured cameras are absent from the LeRobot dataset')
+        self.decoders=OrderedDict();self.frame_cache=OrderedDict();self.cache_bytes=0
+        self.arrays = [episode_arrays(e, cfg.cameras, self.manifest['control_hz'],self.readers[e.get('source_index',0)] if self.readers else None) for e in self.episodes]
+        self.index = [(i,t) for i,a in enumerate(self.arrays) for t in range(len(a['state']))]
+        self.weights = torch.tensor([1/len(self.arrays[i]['state']) for i,t in self.index], dtype=torch.double)
+    def __len__(self): return len(self.index)
+    def images(self,i,t):
+        if self.reader is None:return [np.array(self.arrays[i][c][t]) for c in self.cfg.cameras]
+        from torchcodec.decoders import VideoDecoder
+        entry=self.episodes[i];storage=entry['_storage'];ep=entry['dataset_episode_index'];reader=self.readers[entry.get('source_index',0)]
+        info=reader.meta.episodes[ep];images=[]
+        for camera in self.cfg.cameras:
+            key=storage['camera_keys'][camera]
+            path=str(Path(storage['root'])/reader.meta.get_video_file_path(ep,key))
+            stamp=float(info[f'videos/{key}/from_timestamp'])+float(self.arrays[i]['timestamp'][t])
+            cache_key=(path,stamp)
+            if cache_key not in self.frame_cache:
+                try:
+                    if path not in self.decoders:
+                        self.decoders[path]=VideoDecoder(path,device='cpu',num_ffmpeg_threads=1,seek_mode='exact')
+                        while len(self.decoders)>2:self.decoders.popitem(last=False)
+                    self.decoders.move_to_end(path);decoder=self.decoders[path]
+                    frame_index=round(stamp*decoder.metadata.average_fps)
+                    batch=decoder.get_frames_at(indices=[frame_index])
+                    value=batch.data
+                    if abs(float(batch.pts_seconds[0])-stamp)>1e-4:raise ValueError('Video/observation timestamp mismatch')
+                    if value.dtype!=torch.uint8 or value.ndim!=4 or value.shape[:2]!=(1,3):raise ValueError('Decoder must return RGB uint8 NCHW')
+                    rgb=np.ascontiguousarray(value[0].permute(1,2,0).numpy())
+                except Exception as exc:raise ValueError(f'Video decode failed: {path}, episode {ep}, frame {t}: {exc}') from exc
+                self.frame_cache[cache_key]=rgb;self.cache_bytes+=rgb.nbytes
+                while len(self.frame_cache)>8 or self.cache_bytes>16*2**20:
+                    _,old=self.frame_cache.popitem(last=False);self.cache_bytes-=old.nbytes
+                images.append(rgb.copy())
+            else:self.frame_cache.move_to_end(cache_key);images.append(self.frame_cache[cache_key].copy())
+        return images
+    def __getitem__(self, idx):
+        i,t = self.index[idx]; a=self.arrays[i]; h=self.cfg.horizon
+        count=min(h,len(a['action'])-t)
+        actions=np.zeros((h,6), np.float32)
+        actions[:count]=self.pre.normalize(a['action'][t:t+count], 'action')
+        return {'images': self.images(i,t),
+                'instruction': self.episodes[i]['instruction'],
+                'state': torch.from_numpy(self.pre.normalize(a['state'][t], 'state')),
+                'actions': torch.from_numpy(actions), 'mask': torch.arange(h)<count,
+                'episode': self.episodes[i]['id'], 'frame':t}
+
+def collate(samples):
+    out={k:torch.stack([s[k] for s in samples]) for k in ('state','actions','mask')}
+    out.update({k:[s[k] for s in samples] for k in ('images','instruction','episode','frame')})
+    return out
+
 
 def build(cfg, pretrained=True):
     from lerobot.policies.act.configuration_act import ACTConfig
