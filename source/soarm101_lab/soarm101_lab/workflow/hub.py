@@ -42,3 +42,34 @@ def publish(artifact, options, output, api=None):
               'local_path': str(folder), 'source_path': artifact['path']}
     atomic(output, result)
     return result
+
+
+def import_dataset(repo_id, destination, revision=None):
+    """Download into private staging, validate native data, then publish a new Path."""
+    import shutil,tempfile,os
+    from huggingface_hub import HfApi,snapshot_download
+    from ..learning.datasets import inspect_dataset
+    destination=Path(destination).expanduser().resolve()
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    lock=destination.with_name('.'+destination.name+'.workflow-lock')
+    fd=os.open(lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    staging=None
+    try:
+        os.close(fd)
+        if destination.exists():raise FileExistsError(destination)
+        info=HfApi().dataset_info(repo_id,revision=revision)
+        staging=Path(tempfile.mkdtemp(prefix='.'+destination.name+'.import-',dir=destination.parent))
+        snapshot_download(repo_id,repo_type='dataset',revision=info.sha,local_dir=staging,
+                          ignore_patterns=['.git/**','.env*','*.pt','*.safetensors'])
+        inspect_dataset(staging)
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        dataset=LeRobotDataset(repo_id,root=staging,revision=info.sha,download_videos=False)
+        dataset[0]  # Official schema, Task and first image/video sample.
+        del dataset
+        atomic(staging/'hf_import.json',dict(repo_id=repo_id,revision=info.sha))
+        if destination.exists():raise FileExistsError(destination)
+        staging.rename(destination);staging=None
+        return str(destination)
+    finally:
+        if staging is not None:shutil.rmtree(staging)
+        lock.unlink(missing_ok=True)

@@ -78,7 +78,7 @@ def test_ik_combobox_is_single_authority_and_datagen_only():
     form.setPlainText('{"ik_solver":"scipy_ls"}')
     assert form.editors['ik_solver'][1].currentData()=='scipy_ls'
     with pytest.raises(ValueError,match='Unknown ik_solver'):form.setPlainText('{"ik_solver":"invalid"}')
-    form.set_stage('replay');form.setPlainText('{}')
+    form.set_stage('annotate');form.setPlainText('{}')
     assert 'ik_solver' not in form.editors
     form.close()
 

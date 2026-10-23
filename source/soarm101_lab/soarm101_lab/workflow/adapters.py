@@ -28,14 +28,79 @@ class SimulationAdapter:
         self.workspace=workspace;self.hz=hz;self.device='cpu';self.num_envs=1;self.seed=seed;self.stop=stop
         self.camera_names=workspace['task'].get('observation_cameras',['side','wrist'])
         if require_standard_cameras and self.camera_names!=['side','wrist']:raise ValueError('Common collection requires Side and Wrist')
-        self.cfg=configuration(workspace['task']['pick'],workspace['task']['place'],seed)
+        self.grasp_object=workspace['task']['pick'];self.place_target=workspace['task']['place'];self.place_condition=None
+        self.cfg=configuration(self.grasp_object,self.place_target,seed) if self.grasp_object else None
         self.base_world=np.asarray(workspace['profile']['robot_base']['T_world'])
         self.buffer=recording.EpisodeBuffer(output,hz,self.base_world,self.camera_names);self.recorder_manager=_RecorderProtocol(self)
         self.scene=SimpleNamespace(get_state=lambda is_relative=True:self.initial_state())
         self.obs_buf={};self.reset_count=0;self.step_index=0;self.pending_pose=None;self.metrics=defaultdict(float)
         self.ik_solver="scipy_ls";self.ik_failure_policy="strict";self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
         self.grasp_reference=None;self.grasp_command=None;self.release_commanded=False;self.loss_steps=0;self.drop_step=None
-        self.tracker=StableGrasp(1/hz,workspace['profile']['objects'][workspace['task']['pick']]['dimensions_m'])
+        self.tracker=StableGrasp(1/hz,workspace['profile']['objects'][self.grasp_object]['dimensions_m']) if self.grasp_object else None
+
+    def bind_followup(self, runtime):
+        """Bind a pure acceptance refinement to this existing episode Adapter only."""
+        self.followup_runtime = runtime
+        if runtime and runtime['contract'].get('schema')=='so101.scene-terms/1':
+            from ..simulation.task_context import TaskContext
+            from .mimic import subtask_configuration
+            declaration=runtime['contract']['declaration'];spec=declaration['annotation']
+            ctx=TaskContext(self.backend,adapter=self)
+            objects=list(declaration['scene']['objects'])
+            ctx.validate_bindings({'OBJECT_IDS':objects,'CAMERA_IDS':self.camera_names})
+            self.processing_context=ctx;self.processing_runtime=runtime
+            self.processing_failure=None;self.event_boundaries={};self.event_latches={}
+            self.buffer.signal_names=spec.get('signals',[]);self.buffer.final_events=spec.get('final_events',[])
+            diagnostics=spec.get('diagnostics')
+            if diagnostics:
+                previous_object=self.grasp_object
+                self.grasp_object=diagnostics['object_id'];self.place_target=diagnostics.get('target_id');self.place_condition=diagnostics.get('condition')
+                if previous_object!=self.grasp_object or self.tracker is None:
+                    self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.grasp_object]['dimensions_m'])
+            else:self.grasp_object=self.place_target=None;self.tracker=None
+            self.processing_events={name:fn for name,(fn,factory) in runtime['terms'].items() if not factory}
+            mimic=declaration.get('mimic')
+            if runtime['stage']=='datagen':
+                if not mimic:raise ValueError('DataGen requires an explicit Mimic contract')
+                self.cfg=(configuration(self.grasp_object,self.place_target,self.seed) if mimic.get('recipe')=='pick_place/1'
+                             else subtask_configuration(mimic['subtasks'],self.seed))
+            return
+        if hasattr(self,'followup_acceptance'):del self.followup_acceptance
+        if runtime and runtime['acceptance']:
+            from ..simulation.task_context import TaskContext
+            ctx = TaskContext(self.backend, adapter=self)
+            ctx.validate_bindings({'OBJECT_IDS': [runtime['contract']['pick_object'], runtime['contract']['target_object']],
+                                   'CAMERA_IDS': self.camera_names})
+            self.followup_acceptance = (ctx, runtime['acceptance'])
+
+    def accept_followup(self):
+        """Pure result-adoption hook; native physics/grasp success stays Adapter-owned."""
+        term = getattr(self, 'followup_acceptance', None)
+        if term is None:return True
+        result = term[1](term[0])
+        if not isinstance(result,(bool,np.bool_)):raise ValueError('Annotation acceptance term must return a Boolean')
+        return bool(result)
+
+    def _term_value(self, fn, observation=None):
+        """One borrowed pre-step observation while invoking a term; no retained cache."""
+        ctx=self.processing_context
+        ctx._observation=observation
+        try:return fn(ctx)
+        finally:ctx._observation=None
+
+    def term_boolean(self,fn,observation=None):
+        result=self._term_value(fn,observation)
+        if not isinstance(result,(bool,np.bool_)):raise ValueError('Event/acceptance terms must return Boolean')
+        return bool(result)
+
+    def _check_term_failure(self, observation=None):
+        """Latch the first explicit category; a final post-step check can catch drops."""
+        fn=self.processing_runtime.get('failure')
+        if fn is None:return
+        reason=self._term_value(fn,observation)
+        if reason is not None and reason is not False and (not isinstance(reason,str) or not reason):
+            raise ValueError('Failure term must return None/False or a category string')
+        if reason:self.processing_failure=self.processing_failure or reason
 
     def configure_ik(self,solver,failure_policy="strict"):
         from ..simulation.ik import validate_solver,validate_failure_policy
@@ -77,10 +142,12 @@ class SimulationAdapter:
 
     def update_grasp(self):
         from scipy.spatial.transform import Rotation
-        s=self.state();ee=s['eef_pose'];obj=s['object_poses'][self.workspace['task']['pick']]
-        rel=np.linalg.inv(ee)@obj;left,right=self.contacts()
-        self.tracker.update(self.step_index,rel[:3,3],Rotation.from_matrix(rel[:3,:3]).as_quat(),ee[:3,3],obj[:3,3],left,right)
-        self._update_failure_evidence(rel[:3,3],left,right)
+        s=self.state();ee=s['eef_pose']
+        if self.tracker is not None:
+            obj=s['object_poses'][self.grasp_object]
+            rel=np.linalg.inv(ee)@obj;left,right=self.contacts()
+            self.tracker.update(self.step_index,rel[:3,3],Rotation.from_matrix(rel[:3,:3]).as_quat(),ee[:3,3],obj[:3,3],left,right)
+            self._update_failure_evidence(rel[:3,3],left,right)
         if self.pending_pose is not None:
             from ..simulation.ik import pose_error
             position,rotation=pose_error(ee,self.pending_pose)
@@ -98,7 +165,20 @@ class SimulationAdapter:
                     'measured_after':s['joint_pos'].tolist(),'motion_rad':movement})
         self.step_index+=1
 
-    def check_success(self):return bool(self.place_success() and self.tracker.completed)
+    def check_success(self):
+        if getattr(self,'processing_runtime',None):
+            self._check_term_failure()
+            native_recipe=(self.processing_runtime['contract']['declaration'].get('mimic') or {}).get('recipe')=='pick_place/1'
+            if native_recipe:
+                from ..task_terms.annotation import native_acceptance
+                if not self.native_success():return False
+                if self.processing_runtime['accept'] is native_acceptance:return not self.processing_failure
+            return self.term_boolean(self.processing_runtime['accept']) and not self.processing_failure
+        return SimulationAdapter.native_success(self)
+
+    def native_success(self):
+        return bool(self.place_success() and self.tracker.completed)
+
     def _update_failure_evidence(self,relative,left,right):
         # Diagnostics only: do not change the latched grasp or place success gate.
         if not self.tracker.completed:return
@@ -111,17 +191,36 @@ class SimulationAdapter:
         if self.loss_steps/self.hz>=HOLD_SECONDS and self.drop_step is None:self.drop_step=self.step_index
 
     def failure_category(self):
+        if getattr(self,'processing_runtime',None):
+            if self.processing_failure:return self.processing_failure
+            if self.tracker is not None and (not self.tracker.completed or self.place_target is not None and not self.place_success()):return self.native_failure_category()
+            return 'task_condition_not_met'
+        return self.native_failure_category()
+
+    def native_failure_category(self):
+        if self.tracker is None:return 'task_condition_not_met'
         if not self.tracker.completed:return 'grasp_failure'
         return 'drop_failure' if self.drop_step is not None else 'place_failure'
 
     def failure_diagnostics(self):
-        return dict(grasp_confirmed=bool(self.tracker.completed),release_commanded=self.release_commanded,
-                    drop_step=self.drop_step,contact_loss_steps=self.loss_steps,grasp=dict(self.tracker.details))
+        result=dict(grasp_confirmed=bool(self.tracker and self.tracker.completed),release_commanded=self.release_commanded,
+                    drop_step=self.drop_step,contact_loss_steps=self.loss_steps,grasp=dict(self.tracker.details) if self.tracker else {})
+        if getattr(self,'processing_runtime',None):result['events']=dict(self.event_boundaries)
+        return result
     def after_reset(self):
         self.reset_count+=1;self.step_index=0;self.pending_pose=None
         self.last_ik=None;self.ik_attempt=defaultdict(float);self.ik_motion_evidence=[]
         self.grasp_reference=None;self.grasp_command=None;self.release_commanded=False;self.loss_steps=0;self.drop_step=None
-        self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.workspace['task']['pick']]['dimensions_m'])
+        self.tracker=StableGrasp(1/self.hz,self.workspace['profile']['objects'][self.grasp_object]['dimensions_m']) if self.grasp_object else None
+        self.event_boundaries={};self.event_latches={};self.processing_failure=None
+        if getattr(self,'processing_runtime',None):
+            import inspect
+            for name,(fn,factory) in self.processing_runtime['terms'].items():
+                term=fn() if factory else fn
+                if not callable(term):raise ValueError('Event factory must return a callable')
+                inspect.signature(term).bind(self.processing_context)
+                self.processing_events[name]=term
+                if hasattr(term,'reset'):term.reset(self.processing_context)
         self.buffer.begin(self.initial_state());self.obs_buf={}
         state=self.state()
         self.initial_configuration={'joint_rad':state['joint_pos'].tolist(),
@@ -146,8 +245,20 @@ class SimulationAdapter:
         t=time.perf_counter();images=self.images() if images is None else images
         self.buffer.metrics['render_s']+=time.perf_counter()-t
         self.last_images=images
-        self.buffer.append(joints,target,state,images,grasp=self.tracker.completed,
-            place=self.place_success(),ik=self.last_ik)
+        events=None;measured_place=bool(self.place_success())
+        if getattr(self,'processing_runtime',None):
+            self.processing_context._native_placement=measured_place
+            try:
+                events={}
+                for name,fn in self.processing_events.items():
+                    value=self.term_boolean(fn,state)
+                    if value:
+                        self.event_latches[name]=True;self.event_boundaries.setdefault(name,len(self.buffer.rows))
+                    events[name]=self.event_latches.get(name,False) if name in self.buffer.signal_names else value
+                self._check_term_failure(state)
+            finally:del self.processing_context._native_placement
+        self.buffer.append(joints,target,state,images,grasp=bool(self.tracker and self.tracker.completed),
+            place=measured_place,ik=self.last_ik,events=events)
 
     def close(self):self.buffer.abort()
 
@@ -160,6 +271,9 @@ class MujocoAdapter(SimulationAdapter):
 
     def reset(self,env_id=0):
         self._check_stop();self.backend.reset(seed=int(self.rng.integers(2**32)))
+        if getattr(self,'processing_runtime',None) and self.workspace.get('scene_configuration',{}).get('scene_only'):
+            from ..simulation.task_context import reset_objects
+            reset_objects(self.backend,self.processing_runtime['contract']['declaration']['scene']['objects'],self.processing_runtime['resetters'])
         self.previous=self.backend.home.copy();self.after_reset()
 
     def restore(self,values,attrs):
@@ -189,8 +303,12 @@ class MujocoAdapter(SimulationAdapter):
             velocities[name]=np.r_[twist[3:],twist[:3]]
         s['object_velocities_world']=velocities;return s
     def images(self):return {name:self.backend.get_rgb(name) for name in self.camera_names}
-    def contacts(self):return self.backend.finger_contacts()
-    def place_success(self):return self.backend.is_success()
+    def contacts(self):return self.backend.finger_contacts(self.grasp_object)
+    def place_success(self):
+        if getattr(self,'processing_runtime',None):
+            if self.place_target is None:return None
+            return self.backend.success_details(object_id=self.grasp_object,target_id=self.place_target,condition=self.place_condition)['success']
+        return self.backend.is_success()
 
     def target_eef_pose_to_action(self,target_eef_pose_dict,gripper_action_dict,action_noise_dict=None,env_id=0):
         self._check_stop();self._check_step_limit()

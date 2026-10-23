@@ -1,325 +1,56 @@
-# 실제 시스템 실행 흐름
+# 현재 실행 및 데이터 흐름
 
-## 2026-10-21 — Curation 자유 선별·분할 완료
-
-`workflow.curation.split_dataset/export_splits/export_subset`가 Episode 단위 선택·선택적 Train/Val 배정·재선별을 소유한다. 기존 `episodes.source_split/export_source_splits` 강제 Group 연결 성분 분할은 삭제했다. 과거 Partition/Lineage는 변경 없이 검증·보존하며 새 배정은 `curation_split.json`/`curation.role`로 분리한다. UI에 전체 제외·출력 폴더 선택·저장 취소를 연결했다. 지원 편집 형식은 기존 HDF5와 Legacy NPY/MP4이며 LeRobot 직접 편집·평가 묶음 전체 편집은 지원하지 않는다. 기존 Training/LeRobot Merge 정책은 후속이다. [검증/지원 범위](../../outputs/workflow_validation/functional_refactor/curation_independent/REPORT.md). 아래 이전 완료 기록은 당시 상태다.
-
-
-## 2026-10-21 — Registry 제거 / 전체 Stage Path 실행
-
-현재 모든 Workflow Stage의 공개 입력은 Path다. `workflow/artifacts.py`와 Registry 등록·조회·promote·ID CLI는 삭제했다. 기존 `artifacts/*.json`은 사용자 과거 자료로 그대로 남지만 실행에서 읽지 않는다. 아래 이전 단계 기록은 당시 상태이며 현재 경계는 이 절을 따른다.
-
-- `workflow/paths.py`: native marker 탐색·저장 이름·출력 경계. 목록에서 payload/모델을 읽지 않는다.
-- `worker_request.stage_input/episode_context`: Path에서 Dataset/Checkpoint/Workspace 계약을 읽고 기존 Stage 실행에 전달한다. `dataset.inspect_dataset`와 `policy.inspect_checkpoint`가 형식별 검사를 소유한다.
-- `Operations`: Path 요청·출력 예약/Lock·process/Cancel·runs 로그·완료 결과 Path. UI의 선택/상세/READY는 기존 executor에서 처리한다.
-- Curation은 원본 Path를 직접 열어 새 결과를 저장한다. 과거 Group/Partition 정책과 MiniVLA 학습/Val 정책은 이번에 바꾸지 않았다. 공식 ACT/SmolVLA Trainer/Resume도 유지한다.
-- 필수 provenance/좌표가 없는 Checkpoint는 발견되더라도 평가 불가 오류를 낸다. Registry·다른 Checkpoint로부터 정보를 복원하거나 원본을 고치지 않는다.
-
-상세 결과와 검증 한계: [Registry 제거 보고서](../../outputs/workflow_validation/functional_refactor/registry_removal/REPORT.md).
-
-
-## 7b-1 — 실제 Path 실행 흐름
+기준: 2026-10-23. [모듈 지도](PROJECT_STRUCTURE.md), [공개 Script 문법](../task_sdk/SCRIPT_GUIDE.md), [Native 학습/Hub](../real2sim/NATIVE_LEROBOT.md).
 
 ```mermaid
-flowchart LR
-    U[UI/CLI Dataset Path] --> O[기존 Operations / process·예약·로그·취소]
-    U --> H[기존 executor / 목록·선택 header]
-    O --> W[Worker / native 재검증·full validation]
-    W --> R[기존 Replay / Annotation]
-    R --> S[Playback·Adapter·Simulation]
-    R --> D[Writer / native report]
-    D --> P[Path 결과 / discovery]
-    REST[나머지 Stage] --> REG[기존 Registry]
+flowchart TB
+ UI[Qt UI / CLI] --> O[Operations / Path·예약·Process·Cancel]
+ O --> W[execute_request / 독립 Worker]
+ W --> S[MuJoCo 또는 Isaac Source]
+ W --> U[unified / Annotation·DataGen]
+ W --> E[evaluate_sim / Native·Script 평가]
+ S --> R[SourceEpisode / snapshot·영상]
+ U --> A[SimulationAdapter / Tracker·Event]
+ A --> P[공통 Playback 또는 Mimic reference / 기존 Physics·IK]
+ A --> B[EpisodeBuffer / 배열·Signal·영상]
+ R --> D[DatasetWriter 또는 LegacyEpisodeWriter]
+ B --> D
+ E --> B
+ D --> C[Curation / Conversion / Merge]
+ C --> T[learning.training / 공식 LeRobot CLI]
+ HF[Native Local / HF snapshot] --> T
+ T --> CK[공식 Checkpoint·processor·training_state]
+ CK --> V[독립 Offline Validation]
+ CK --> E
 ```
 
-목록은 실행 허가가 아니다. Workspace/Scene/좌표는 실제 파일에서 확인하고 Worker가 다시 검사한다. Source 원본은 불변이며 결과는 별도 사용자 이름에 저장한다. Annotation Cancel의 완료분은 STOPPED로 보존한다. [호출자·형식·제약](../../outputs/workflow_validation/functional_refactor/path_execution/CALLERS.md).
+UI 목록은 native marker만 읽고 상세 검사·저장은 background에서 한다. Python AST 조회와 명시 Worker 실행을 구분한다. 출력 Lock·충돌 거부·완성분 게시·Cancel은 기존 Operations/Writer가 소유한다. runs는 실행 기록이며 Registry가 아니다.
 
-## 7a의 실제 Path 선택 흐름 (2026-10-21)
+## 실제 호출 경로와 합류 지점
 
-```mermaid
-flowchart LR
-    U[기존 Resume 목록] --> X[기존 executor / 요청 세대]
-    X --> P[Paths scandir·stat / native 후보]
-    U --> C[선택 config 비동기 읽기]
-    CLI[CLI discover] --> P
-    PICK[Curation Picker marker] --> JOB[기존 분석 QThread]
-    OLD[일반 Stage 입력·실행] --> REG[기존 Registry / 후속7b]
-```
+패키지 루트는 `source/soarm101_lab/soarm101_lab/`다. 엔진·App 수명은 기존 Worker/Runtime이 소유한다.
 
-반환 Path는 후보 identity, 상대 이름은 표시다. 이름으로 Train/Val/Task를 추측하지 않는다. HDF5 schema·관절/좌표·영상·Processor·Resume 허가는 실행 검사에서 결정한다. Resume 입력 설정을 읽는 동안 READY를 보류하며 이전 선택/닫힌 창의 결과는 적용하지 않는다. [전체 경계](../../outputs/workflow_validation/functional_refactor/path_discovery/REPORT.md).
-
-UI는 명령을 만들고 별도 process가 장치·engine·학습을 실행한다. 파일은 두 process 사이의 계약이다.
-이 문서는 **현재 구현된 호출 경로**다. 이번 검증에서 실제 모터/GPU 학습/정책 성공을 수행했다는 뜻은 아니다.
-장치 없는 검사·물리 검사·미실행 구간은 마지막 표와 [검증 기록](REFACTOR_VALIDATION.md)을 구분해 읽는다.
-
-파일 경로를 짧게 쓰기 위해 아래에서 `패키지/`는 `source/soarm101_lab/soarm101_lab/`를 뜻한다.
-Python dict의 JSON 저장 표현, HDF5 numeric 배열, MP4 RGB, Torch tensor는 서로 다른 데이터 단계다.
-
-## 공통 저장 수명 — 실제6b-1/2
-
-```text
-Source save_common / Isaac native recorder ─→ data.episodes.DatasetWriter
-Annotation / DataGen / Sim 평가
-  → SimulationAdapter.record_frame (state/RGB/events, command 적용 전)
-  → data.recording.EpisodeBuffer.append (숫자 rows + 기존 bounded VideoEpisode)
-  → finish(attrs, success=실제 판정) (values/attrs/video staging)
-  → DatasetWriter.commit (기존 배열/시각/PTS/SHA 검사·private group·staging adopt)
-  → close(publish=기존 Stage 정책) (독점 게시 또는 자기 private 결과 폐기)
-```
-
-DatasetWriter는 Engine/Stage를 읽지 않는다. 모든 env는 Buffer 하나를 소유하고 중앙 Writer commit은 기존 직렬화 경계를 유지한다. 이미지가 이미 읽혔으면 record_frame에 그대로 전달한다. 마지막 post-step 배치 판정의 최종 frame 매핑과 action 이전 측정 state 의미는 같다. 종료/취소/예외의 기존 finally에서 abort/close한다.6a Reader의 수명과 구현은 바꾸지 않았다.
-
-Source의 EpisodeWriter 결합은6b-3에서 교체했다. 아래 Source 흐름과 [Source 저장 보고서](../../outputs/workflow_validation/functional_refactor/source_writer/REPORT.md)를 본다. Isaac native normalization과 legacy Dataset reader/정책은 workflow.dataset에 남아 있다. 이전6b-1/2 수명은 [보고서](../../outputs/workflow_validation/functional_refactor/dataset_writer/REPORT.md)를 따른다.
-
-## Replay/Annotation 공통 재생 — 실제6c-1
-
-`unified.execute`가 기존 Reader·환경·Adapter를 준비한 뒤 Replay와 Annotation을 각각 dispatch한다. 두 Stage는 서로 import하지 않고 `simulation.playback`만 공유한다.
-
-1. `restore_episode(adapter,values,attrs)`가 기존 Adapter.restore를1회 호출하고 base/joint/object 복원 오차를 같은 허용 오차로 검사한다. Reset/native state 구현은 Adapter/engine에 그대로 있다.
-2. `replay_steps`가 중단 경계·Stage의 before hook→이미 측정한 pre-command state와 오차→Annotation의 record hook→command를 yield한다. hook은 snapshot을 빌리며 재관측하지 않는다.
-3. Worker는 `step_targets`로 기존 MuJoCo step 또는 Isaac 활성 slot 명령을 적용한다. 다중 Isaac coordinator는 기존대로 전체 action tensor를1tick step한다.
-4. Iterator는 이전 command snapshot과 Stage의 after hook(기존 update_grasp)을 처리한 뒤 None barrier를 yield한다. 모든 slot이 post-step을 마친 후 Annotation coordinator가 빈 slot을 재배정한다.
-5. Replay가 기존 task/평가 Playback 결과를, Annotation이 성공 조건·Manual boundary·HDF5/MP4 출력을 처리한다. Iterator에는 성공/저장/UI/Mimic 정보가 없다.
-
-환경/Adapter 생성·종료는 기존 Worker, 다중 환경 추가 자원은 기존 Annotation executor가 소유한다. Playback은 close/reset 자원을 만들지 않고 iterator 종료만 담당한다. 상세 계약/실제 Isaac 영상 차이는 [6c-1 보고서](../../outputs/workflow_validation/functional_refactor/playback/REPORT.md)를 본다.
-
-## 1. UI 시작 → Runtime → 카메라/SO-101
-
-```mermaid
-sequenceDiagram
-    participant U as 사용자
-    participant W as real2sim.ui.Window
-    participant L as RuntimeLauncher
-    participant B as storage.Bus / 파일
-    participant R as Runtime worker
-    participant H as Hardware / CameraReader
-    U->>W: UI 시작
-    W->>W: 위젯·설정 로드 (장치 연결 없음)
-    U->>W: Connect
-    W->>L: connect(payload, python, backend, renderer)
-    L->>R: real2sim_sim.py subprocess
-    L->>B: connect JSON 명령
-    R->>B: commands()
-    R->>R: command → connect(payload)
-    R->>H: Leader/Follower.connect · CameraReader.start
-    R->>B: publish 상태/preview
-    U->>W: Start
-    W->>B: start 명령
-    R->>R: start → tick / tick_real
-    R->>H: 기존 activation 및 목표 명령
-```
-
-진입점 `scripts/real2sim/real2sim_ui.py`는 `real2sim.ui.Window`를 만든다.
-`Window.connect_hw`는 hardware port/ID, profile/Workspace, precision 옵션을 dict로 만들고
-`real2sim.launcher.RuntimeLauncher.connect`에 전달한다. launcher는 `worker_environment`로 GUI의
-site-packages를 제외하고 `scripts/real2sim/real2sim_sim.py`를 실행한다.
-
-Runtime CLI는 backend가 `real/calibration/mujoco`이면 선택한 경로를, Isaac이면 `AppLauncher` 뒤 `Runtime.run`을 사용한다.
-`storage.Bus`의 owner lock/session/command/reply/status가 worker 생존과 명령 수명을 구분한다.
-`Runtime.command('connect')`→`Runtime.connect`는 profile·포트·보정 identity를 검사하고 장치/카메라를 연다.
-Connect와 모터 Start는 다르다. `Runtime.start` 이후 기존 activate/명령 전송이 가능해진다.
-
-카메라 packet은 RGB uint8와 `read_start/read_end`의 monotonic/unix 시각·sequence다.
-`CameraReader.nearest`가 packet을 복사해 전달한다. host read interval은 실제 exposure timestamp가 아니다.
-실물 observation은 native degree/percent와 raw encoder 증거를 보존한다.
-`Runtime.command_target`는 기존 mapping/가능한 goal 범위·SDK 정수 encoding을 거쳐 Real/Sim에 같은 q를 전달한다.
-측정 q와 명령 q는 별개다. heartbeat loss와 loop stall은 기존 Stop을 수행한다.
-
-Snapshot은 `Runtime.command`에서 state/image를 복사해 freeze→`save_snapshot_requests`→single writer의
-`SnapshotDataset.save`로 간다. `prepare_snapshot`이 freshness/영상/측정 정합을 확인하고 shared robot/calibration과
-개별 snapshot을 원자 저장한다. Disconnect의 finish는 진행 중 save 뒤에 예약된다. UI thread에서 디스크 저장을 기다리지 않는다.
-
-## 2. Calibration → Workspace 선택 → 엔진 적용
-
-보정 UI `real2sim/precision_ui.py`→`Window.connect_precision`은 exclusive calibration Runtime을 시작한다.
-`Runtime.connect`→`precision.Calibration.connect/command/tick`에서 명시 선택한 device와 reference를 처리한다.
-`fit_joint/review_joint`는 raw/각도 reference로 계수를 계산·검토하고, `ProfileStore.save/activate/restore`는
-identity/URDF hash와 승인 기록을 검사한다. 단순히 Scene을 고르는 것으로 새 보정을 만들지 않는다.
-
-Workspace 생성은 Builder의 책임이다. `workflow.py import-builder`→`builder.import_scene`가 export checksum,
-frame graph/robot mapping/task·asset을 검사하고 versioned package를 만든다. `package.load`가 파일 증거를 재검사한다.
-`WorkflowPanel.select_workspace`/`Window.select_live_scene`는 내부 Scene 선택을 공유하며 장치를 시작하지 않는다.
-
-`precision.simulation_configuration`은 active/기록된 보정·URDF·Scene residual binding을 검사한 **실행 dict**를 만든다.
-새 Source는 검증된 수집 mapping을 기록하고, Replay/DataGen/Evaluation은 기록된 model 계약을 상속한다.
-현재 보정으로 과거 dataset의 숫자를 바꾸지 않는다.
-
-- Isaac: `Runtime.build_environment` 또는 `unified.execute→simulation.environment.create_isaac`→`workspaces.environment.make_config`→기존 task cfg/MDP→`ManagerBasedEnv`.
-- MuJoCo: `Runtime.build_environment` 또는 `workflow.mujoco._environment`→`PolicyEnvironment/MujocoBackend`→`mjcf.build_scene`의 XML 문자열/include bytes→`MjModel.from_xml_string`→model/data. 결과·임시 폴더에 생성된 Scene 파일을 저장하지 않는다.
-
-Workspace object/task 선택은 `workflow.tasks.configured`가 만든 copy와 `scene_configuration`에 반영된다.
-물성은 `physics.compile_physics`, reset은 `WorkspaceRandomizer/reset_workspace`가 담당한다.
-보정용 실측 pose 표시와 학습용 randomized reset을 혼동하지 않는다. 기존 published package는 수정하지 않는다.
-
-## 3. Source 수집 → HDF5 → Registry
-
-`WorkflowPanel.execute`→`Operations.run`은 현재 입력/옵션을 실행 계획으로 만든다.
-`Operations.plan`은 Registry/Workspace/좌표/장치 옵션을 검사하고 `artifacts.output_location`으로 경로를 결정한다.
-`runs/<Run ID>`의 request/state/log/presentation과 실제 결과 경로는 별개다.
-
-- **MuJoCo Source:** `mujoco_plan`이 `worker_request.mujoco_request`로 요청 dict를 검사→공통 Workflow CLI worker→
-  `execute_request`→`mujoco.execute/source`→`_environment`→Leader 입력→기존 `_target/observe`→`PolicyEnvironment.recording_sample`→`SourceEpisode.append`→기존 `backend.step`.
-  Recording은 다음 step 전에 numeric leaf/물체 pose를 복사하고 RGB는 기존 bounded encoder queue가 복사한다. reset 직후 native 초기 state도 episode당 한 번 복사한다.
-  표준 Side/Wrist 수집은 `source.save_common`→저장 시 `recording_geometry`의 FK/정적 pose→순수 `source_episode_values`→기존 `DatasetWriter.commit/close`다.
-  Legacy 카메라 수집은 `LegacyEpisodeWriter.save`: MP4/NPY/replay/outcome staging 완성→episode 디렉터리→provenance→manifest 순으로 게시한다.
-  Source Stage가 begin/Discard/quit/Resume를 제어하고 finally에서 Recording.abort→Common Writer.close→Leader.close→env.close한다. Legacy Writer에는 열린 handle이 없어 별도 close가 없다.
-- **Isaac Source:** plan의 기존 `scripts/teleoperation/record_mimic_dataset.py`→Workspace task/environment→
-  `mdp/so101_mimic_recorders.py`의 native EpisodeData→`dataset`의 recording 변환→공통 `DatasetWriter`.
-  새 수집에 Legacy HDF5를 거쳐 재변환하는 경로를 추가하지 않는다.
-
-공통 파일은 `so101.common-episode/2`: `data/demo_N`의 numeric/annotation/attrs와 상대 경로 MP4다.
-`obs/policy/joint_pos[T,6]`는 명령 전 측정 model rad, `joint_targets[T,6]`는 그 직후 적용한 목표 rad다.
-`actions[T,7]`는 Mimic EE delta+gripper 표현이다. 학습 action에는 `joint_targets`를 사용한다.
-
-저장 검증이 끝나면 `Operations.run`→`inspect_artifact`→`Registry.register`로 ID/부모/path/SHA/provenance를 기록한다.
-단순히 worker가 종료됐다는 이유로 성공 record를 만들지 않는다. 취소는 기존 SIGINT/process group 및 저장 완료 경계를 따른다.
-새 Source는 `outputs/workflow/sources/<이름>/origin`에 저장하고, Source 선별·분할은 Curation에서
-사용자가 지정한 이름 아래 저장한다. 분할은 그 안의 `train/val`이다. 이후 단계의 새 결과는
-각 저장소의 `<저장 이름>/` 아래에 바로 저장하며 Source/split/앞 입력 이름을 경로로 중첩하지 않는다.
-
-## 4. Annotation → DataGen → Curation → LeRobot
-
-```text
-선택 Artifact + Workspace + options
- → Operations.unified_plan → request.json
- → workflow.py worker → execute_request → unified.execute
- → EpisodeDataset (Legacy일 때만 migrate하여 새 공통 파일)
- ├ Replay: replay.run → Playback.restore_episode/replay_steps → 기존 보고·Preview/status
- ├ Annotation: annotation.run → annotate_episode → Playback.restore_episode/replay_steps
- │              → 기존 grasp·place/Manual mark·skip(Annotation hook)
- │              → MuJoCo 독립 worker / Isaac vector tick → 빈 슬롯 즉시 재배정
- │              → 원본 Source 순서로 DatasetWriter (수동 mark는1환경)
- └ DataGen: run_mujoco 또는 run_isaac
-      → worker별 Source Pool 1회 → 시도별 MimicGenerator/RNG
-      → 공식 Mimic EE 목표 → Adapter → solve_selected → 선택 IK/정책 → Physics
-      → 기존 grasp/drop/place 판정 → GenerationScheduler.finish
-      → 성공 슬롯 예약 → Writer lock → DatasetWriter.commit → 성공 확정
-```
-
-**DataGen 실행 전에 Source 전체 자동 물리 재생을 하지 않는다.** 명시 Replay/Annotation의 재생과
-Annotation 실행은 별도다. 실사용하지 않는 cached_replay/replay_cache_identity는6c-1에서 삭제했다. 두 engine은 공식 Mimic 생성 본문을 공유한다.
-MuJoCo는 thread별 독립 MjData, Isaac은 환경별 coroutine와 하나의 batch physics step이다.
-환경 수4는 카메라4분할을 의미하지 않는다. 기존 Overall+Env0 Side/Wrist 표시를 유지한다.
-이 영상 구성은 DataGen에 적용한다. Annotation은 미리보기 대신 `annotation_progress` 상태 IPC를
-`view.AnnotationProgress`에서 진행률/저장/실패/환경별 frame/경과 시간으로 표시한다. 결과 Side/Wrist MP4와
-수동 mark/skip/pause는 유지하며, Annotation의 RGB/JPEG 전송과 Isaac Overview sensor는 생성하지 않는다.
-
-실패 이유는 adapter의 measured contact/pose 증거와 attempt category에, 성공/시도/실패/시간은 scheduler/report/
-presentation 상태에 남는다. IK 수렴 여부와 최종 grasp/place 성공은 다르다. strict/hold/best_effort, seed·성공 예약·Resume는 바꾸지 않는다.
-
-`WorkflowPanel.open_curation`→`CurationDialog.load_data`→기존 Job의 `curation.analyze`→`data.episodes.EpisodeReader`가 저장 파일을 읽는다. 분석/events/plot 읽기는 context 종료에 닫고, UI frame Reader는 에피소드 전환/창 종료 시 마지막 frame Job 완료 뒤 닫는다.
-`load_episode`는 plot 표본을 읽고, 정확한 프레임은 기존 비동기 `start_frame_job`→`EpisodeReader.frame`으로 읽는다. 생성 시 payload는 열지 않으며 HDF5 handle/group·타임스탬프의 중복 읽기를 줄였다.
-Curation의 영상/관절/물체 telemetry는 검토용이며 model tensor에 새 feature를 추가하지 않는다.
-`preview_source_split`→`episodes.source_split`, `save_source_split`→`export_source_splits`는 원본 Source group 단위로
-분할한다. 이미 Train/Val인 입력은 재분할을 잠근다. `curation.export_subset`은 제외 episode를 새 저장본에 넣지 않는다.
-Registry는 저장한 결과를 등록하며 다른 Stage의 입력 폴더/선택을 바꾸지 않는다.
-Workflow의 **데이터 선택**은 `Registry.input_directory`의 단계별 저장소에서 폴더를 고르고
-`WorkflowPanel.select_data` → `Registry.discover_collection`으로 내부 입력을 찾는다. 하나면 자동 선택한다.
-Source는 READY 버전 폴더, Annotation은 origin/선별/분할 하위 목록, DataGen은 Annotation 폴더가 입력이다.
-MiniVLA 별도 Val 폴더는 Train을 보존하며 실제 계약 검사를 통과한 경우 연결한다. Scene/Builder Import의 기존
-실행은 Workflow 선택기에서 제거하고 Real/Sim의 `Window.browse_scene`이 소유한다.
-
-변환은 기존 `scripts/tools/convert_isaac2lerobot.py`가 공통 HDF5/Legacy의 joint state/target·MP4를
-LeRobot Parquet+MP4+meta로 mapping한다. `episodes.convert_dataset`의 Canonical 경로도 여기에 위임한다.
-좌표 계약·Source lineage/partition/task·FPS·카메라를 보존하고 학습용 state/action은 model rad다.
-`repo_id`는 변환 Dataset 식별 값이며 변환만으로 Hub 업로드를 실행하지 않는다.
-
-## 5. Dataset 선택 → 학습 → Checkpoint
-
-**현재 구현 상태:** 아래 Registry/Source Group/MiniVLA 전용 학습 연결은 아직 실제로 사용 중이다. 승인된 후속 교체 대상이며 이미 제거된 것으로 해석하지 않는다. ACT/SmolVLA 공식 Trainer는 유지한다.
-
-UI Train은 Artifact ID와 MiniVLA 별도 Validation Artifact ID, 설정 JSON/override/Resume를 options로 전달한다.
-`Operations.plan`에서 호환성과 Train/Val 계보를 검사하고 기존 worker가 실제 bytes를 다시 검사한다.
-같은 Source의 생성 변형을 다른 독립 Source로 꾸며 Train/Val에 나누지 않는다.
-
-### MiniVLA
-
-`execute_request`→`workflow.policy.train`→`mujoco.train_from_lerobot`→`validate_training_inputs`와
-manifest/statistics 준비→`mujoco.train`→`python -m soarm101_lab.learning.minivla.train`.
-현재 이 연결 함수가 `mujoco.py`에 있어도 LeRobot Dataset의 학습은 MuJoCo physics를 step하지 않는다.
-Legacy Canonical worker도 같은 `mujoco.train`을 호출한다.
-
-작은 manifest는 원본 LeRobot Parquet/MP4의 경로·SHA/좌표와 episode frame 범위를 참조한다.
-`data.load_manifest`는 `utils.artifact_identity.fingerprint`로 bytes identity를 검사한다.
-`Episodes`는 raw model rad→`RobotCoordinates.to_policy`→train-only 통계 z-score와 action chunk/mask를 만든다.
-`collate` 출력은 state `[B,6]`, actions `[B,40,6]`, mask `[B,40]`, B개의 이미지/문장 목록이다.
-`backbone.QwenBackbone`은 letterbox·토큰화·선택층 feature를, `head.ActionHead`는 기존 Flow-DiT를 수행한다.
-`train.compute_loss/main`은 기존 수식/optimizer/validation을 사용한다.
-
-신규 UI Batch8/accumulation1은 실제 한 Batch의 forward/backward와 한 optimizer update다.
-옛 checkpoint에 batch_size가 없으면1이며 저장 accumulation8을 유지한다. OOM 시 자동 batch 축소는 없다.
-`save_checkpoint`는 config/통계/모델/optimizer/step/identity를 담는 best.pt/last.pt/번호별 파일을 쓴다.
-`validate_resume`는 구조·dataset/stats/frequency/기존 batch 조건을 검사한다. 새 출력에 재개하며 원본 파일을 고치지 않는다.
-metrics.jsonl은 실제 측정 loss/시각을 기록하고 기존 Loss Plot이 증분 읽기한다.
-
-### ACT / SmolVLA
-
-`workflow.policy.train`→기존 `lerobot.scripts.lerobot_train` subprocess.
-Workflow는 dataset root/repo_id·policy type·batch/steps/checkpoint 옵션을 JSON으로 넘기고 공식 trainer를 실행한다.
-완료 후 `checkpoints/last/pretrained_model`의 config/safetensors와 coordinate/provenance를 검증·등록한다.
-Resume은 기존 `resume_checkpoint`의 optimizer/config 경로 계약을 따른다. MiniVLA의 Batch/Resume 규칙을 여기로 복제하지 않는다.
-
-## 6. Checkpoint 선택 → Rollout → 평가 결과
-
-MiniVLA 추론의 실제 import는 `policy.MiniVLA`→`checkpoint.require_architecture/restore_adapter`와 모델 `RobotPreprocessor`→`head/config`다. Trainer나 전용 Dataset 준비를 import하지 않는다. 모든 모델의 명령 제한은 `workflow.policy.ActionGuard`가 소유한다. 구형 config의 batch1/accumulation8·저장된 정규화 의미는 CPU fixture로 보존 확인했으며 새 GPU 추론은 하지 않았다.
-
-UI의 MiniVLA `selected_minivla_checkpoint`는 best/last/번호별 **선택 파일**을 확인한다.
-`Operations.plan`→`execute_request`에서 아래 engine/실물 경로로 분기한다.
-
-| 경로 | 구현된 호출과 데이터 |
+| 입력 | 실행 경로 |
 |---|---|
-| MuJoCo Sim | `mujoco.execute(stage='rollout')`→`evaluation.evaluate_sim`→`policy.batch_actions`→공유 model/독립 data 병렬 step→기존 task/grasp/drop metrics→성공/실패 DatasetWriter |
-| Isaac Sim | `evaluation.evaluate`→AppLauncher→`evaluate_sim`의 make_config/ManagerBasedEnv→`policy.batch_actions`→vector joint action→기존 task/grasp/drop metrics→성공/실패 DatasetWriter |
-| Real | UI `Real 평가 시작`의 내부 enable_motion 지정(CLI는 명시 opt-in)→`evaluation.evaluate(stage='real_eval')`→계약/보정 검증→기존 follower/camera observation→정책 action→strict hardware inverse→기존 SDK 명령 |
+| MuJoCo Legacy Source | operations → mujoco.execute/source → 기존 reset/관측·명령 → SourceEpisode → 형식별 Writer |
+| Isaac Native Source | operations의 기존 argv → scripts/teleoperation/record_mimic_dataset → native Episode/telemetry·stream_observation_rgb → VideoHDF5DatasetFileHandler. App/Recorder 수명이 달라 SourceEpisode로 바꾸지 않음 |
+| Scene-only Source | task_scripts.script_inputs/resolve_script/load_execution_script → 같은 mujoco.source → Backend.reset + 명시 reset_objects → 같은 SourceEpisode/Writer |
+| Legacy Annotation | worker_request.episode_context → unified.execute → annotate_episode → playback.restore_episode/replay_steps → Adapter.update_grasp/check_success → EpisodeBuffer/Writer |
+| Annotation Terms | 같은 native 입력 경계 → load_followup → Adapter.bind_followup/after_reset → 같은 Playback/record_frame의 Event·Acceptance → 같은 Buffer/Writer |
+| Legacy Mimic | unified → datagen.run_* → mimic.configuration → source_pool/execute_trial → reference DataGenerator → 기존 IK/Adapter/Writer |
+| Mimic Terms | 같은 datagen → Adapter.bind_followup의 recipe 또는 subtask_configuration → 같은 reference/IK/scheduler; 기록된 Annotation Signal 재사용 |
+| Native Evaluation | mujoco.execute의 rollout 또는 Isaac Worker → evaluate_sim → load_policy/batch_actions/ActionGuard → 기존 환경·Recorder/Writer |
+| Script Evaluation | task_scripts.load_execution_script → 같은 evaluate_sim의 Task quota/Hook → 같은 Policy/Physics/Recorder. 사용자 성공과 물리 진단 구분 |
+| Native Training | Operations → execute_request → learning.training.train/training_command → 공식 lerobot_train subprocess → native Checkpoint; Resume도 공식 optimizer/RNG 복원 |
 
-평가에는 실제 선택 checkpoint path/step·seed·task/scene·회별 결과가 남는다. HDF5/MP4 상세 기록과 요약 JSON의
-위치는 engine별 계획 계약을 따른다. 실물 평가를 simulator 성공처럼 자동 판정하지 않는다.
-`Operations.run`은 결과를 검사해 평가 Artifact와 하위 `evaluation_dataset`을 등록한다.
-`evaluation_datasets.json`이 있는 실행 폴더는 Curation에서 성공/실패 분포·영상·EE 경로를 함께 열 수 있다.
-개별 성공/실패 HDF5는 Replay 입력이다. 실패 기록의 재생 완료와 task 성공을 구분한다.
-`mujoco.rollout/rollout_lerobot` 직접 호출은 과거 개발/fixture 호환용이며 Workspace UI는 공통 평가 실행을 사용한다.
-Hub publication은 별도 `hf_dataset/hf_policy` 작업의
-`hub.publish`이며 학습/변환/평가로 자동 업로드하지 않는다.
+Source Recorder의 streaming snapshot과 재생/생성 EpisodeBuffer는 입력 시점·형식이 달라 하나로 합치지 않는다. 평가의 Recorder는 Dataset 형식을 만들기 위해 같은 Adapter/Buffer를 사용한다. Policy 루프는 Annotation/Mimic 루프와 다르다.
 
-## 7. 이번에 무엇을 실행해서 확인했는가
+## 독립 Dataset·모델 경로
 
-| 구간 | 이번 작업의 확인 방식 | 이번에 하지 않은 것 |
-|---|---|---|
-| UI/Runtime·Calibration | Qt 동작, fake device, file IPC/subprocess, Snapshot fixture | 실제 port/camera/모터 연결 |
-| Workspace/Simulation | Builder fixture hash, USD asset/cfg, MuJoCo CPU/IK tests | 실제 Isaac Kit/PhysX 새 장시간 실행 |
-| DataGen/storage | 기존 parity·RNG/슬롯/rollback/Resume/영상 계약 tests | 새 실제 Source 수집·GPU 다환경 생성 |
-| 학습/평가 | CPU tensor/임시 checkpoint/LeRobot fixture·명령 계획 | pretrained GPU 학습, 실물/정책 성공률·실제 Hub 업로드 |
+Curation은 HDF5/Legacy를 자유 선별하고 선택적으로 분할한다. 현재 배정과 역사 Lineage/Partition은 구분한다. LeRobot 직접 Curation은 미지원이며 Converter를 사용한다. Source/Task SDK 없이 Native Local 또는 HF Dataset으로 학습할 수 있다.
 
-실행 명령과 성공/실패/skip의 정확한 기록은 [REFACTOR_VALIDATION](REFACTOR_VALIDATION.md)을 본다.
-2026-10-19 첫 묶음의 최신 회귀/실제 임시 MuJoCo 비교는 [functional_refactor 보고서](../../outputs/workflow_validation/functional_refactor/REPORT.md)를 본다. Task/active object 구성은 `workspaces.tasks`, 공통 pause/step/취소는 `simulation.control`을 직접 사용한다.
+Native 학습은 Train 전체와 선택 Val을 받으며 자동 Split이 없다. Fine-tune은 새 optimizer, Resume는 원래 train_config/optimizer/scheduler/RNG/step·Dataset identity·출력 위치를 유지한다. 일반 모델 로딩과 SO-101 Sim/Real 호환성 검사는 별개다. 외부 Dataset/Checkpoint에 가짜 보정·provenance를 추가하지 않는다. Hub 업로드는 명시 사용자 실행에서만 한다.
 
-과거 outputs 보고서의 실제 학습·생성 성공은 역사적 증거이며 이번 리팩터링 검증으로 재실행한 것처럼 표시하지 않는다.
+## 상태 소유권
 
-## 6c-2a 진행 상태 — 2026-10-20
-
-기록 Scene의 Isaac 생성만 `simulation/environment.py:create_isaac`로 이동하고 unified._native_isaac를 삭제했다. Worker가 identity 검사에 사용한 Workspace를 재사용한다. 105개 계약 회귀 통과, 설정/reset/close 본문은 입력 치환 외 AST 동일. 실제 Isaac baseline부터 GPU OOM으로 실패하여 native A/B 및 성능은 미검증이다. MuJoCo 생성, Source/평가의 별도 Isaac 경로, make_config의 기존 Presentation 간접 참조는 남아 있다. **6c-2 전체 완료 아님.** 근거: `outputs/workflow_validation/functional_refactor/environment/REPORT.md`.
-
-## 6c-2b 실제 소유권 — 2026-10-21
-
-`real2sim.workspaces.environment.make_config(..., overview_camera=False, grasp_observations=False)`는 전달된 요구만 사용한다. Workspace/Simulation의 Presentation.current/INSPECTION_STAGES 참조는 삭제했다. `workflow.unified.execute`는 연결된 DataGen의 Overview, `workflow.evaluation.evaluate_sim`은 연결된 평가의 Overview/Grasp 관측을 결정한다. 독립 Script/Source/Runtime은 false/false다. 정책 카메라 목록은 기존 Task가 소유한다. framing은 `simulation.workspace_scene.framing` 한 곳에 있고 이전 `workflow.presentation.framing`은 없다. MuJoCo는 같은 순수 구도 함수를 쓴다.
-
-삭제 edge: workspaces.environment→workflow.presentation/stages, simulation.workspace_scene→workflow.presentation. 새 edge: workspaces.environment→simulation.workspace_scene. 다른 Stage/I/O 역참조나 전체 SCC 해소를 뜻하지 않는다. 실제8종 설정/32회 UI독립 구성·Isaac2환경 Annotation/평가·MuJoCo 모델/물리/RGB 비교 근거는 `outputs/workflow_validation/functional_refactor/presentation_config/REPORT.md`다. 이전6c-2a의 간접 UI 결합 문구는 당시 상태다. 전체6c-2는 미완료다.
-
-## 6c-2c 실제 소유권 — 2026-10-21
-
-- Request/파일/Source Resume/보정/Physics Profile 선택: `workflow.worker_request.prepare_mujoco(request, coordinates=..., hz=..., workspace=...) → kwargs`. 이미 검증한 원본 Workspace를 재사용하며 compiler에 구성 copy 대신 원본을 전달한다. Task/Active Objects/Simulation.reset은 명시 kwargs다.
-- 실제 생성: `simulation.environment.create_mujoco(**kwargs) → 기존 PolicyEnvironment`. Stage/Dataset/Registry/Resume를 해석하지 않는다. Worker가 정상 close, PolicyEnvironment가 Backend 획득 후 초기화 실패 close를 소유한다.
-- 기존 `workflow.mujoco._environment`와 output 인수·export는 없다. Unified/DataGen/Evaluation의 생성용 mujoco import를 삭제했다. Source/옛 rollout/환경검사 caller도 새 경계를 직접 사용한다.
-- 계속 쓰는 Legacy/Common provenance 읽기는 `workflow.dataset.recording_provenance`로 이동했다. 새 형식·새 Writer·Wrapper는 없다. DataGen의 제공 Parent는 소유권을 이전받아 닫고 Parent가 없으면 직접 생성한다. 공유 MjModel/독립 MjData·ThreadPool·RNG·수치 알고리즘은 그대로다.
-- `workspaces.reset.source_workspace → workflow.tasks/artifacts` 및 Legacy reader 위치는 남은 결합이다. Registry/Path/Training/Isaac 생성 통합을 완료했다는 뜻이 아니다.
-
-실제 전후 결과·load/compile/close·DataGen 첫 환경 배정 차이와 검증용 배정 고정의 한계는 `outputs/workflow_validation/functional_refactor/mujoco_environment/REPORT.md`를 따른다. 숫자/MP4 일치에서 실측 timing·새 Source UUID·private 경로는 구분했다. 기존 6c-2a/b의 MuJoCo factory 미완료 문구는 당시 상태다.
-
-
-## 2026-10-21 — 6c-2d 완료 / 6c-2 환경 생성 경계 완료
-
-Isaac 설정/생성 호출35곳과 Gym 경로를 점검했다. Recorded Scene의 create_isaac, Source/Teleop, Sim 평가, Live Runtime, 독립 검사/고정 Scene CLI는 센서·Reset·수명이 달라 별도 진입을 유지한다. 공통 cfg는 기존 make_config이며 새 Factory/Manager/Wrapper를 추가하지 않았다. Source/평가/Runtime/물리 CLI는 이미 준비한 Workspace dict를 재사용한다. Runtime.build_environment(p, *, workspace=None)는 connect의 검증 snapshot을 빌리며 standalone 호출은 필요 시 현재 파일을1회 읽는다. Runtime profile 적용에는 파생 Task copy가 아닌 원본 Workspace를 사용한다. Source는 장치 연결 뒤 실제 mapping Hash 검사를 유지했다.
-
-실제 Isaac A/B: 평가2환경×6step의 설정·3trace/72numeric·24frame/PTS·Preview3파일, Runtime/Source 생성 경계6step과 물리CLI120step의 설정·초기/명령/관절·물체속도 trace가 같다. Source는 가상 Leader이며 Recorder 전 경계만 검증했다. load는 평가생성1→0(상위1회 별도), Runtime connect3→1/standalone build2→1, Source2→1, 물리CLI3→1이다. 평가 baseline 반복과 전후 RGB 차이는 따로 기록했으며 pixel/통계적 동등성·보편적 속도향상은 주장하지 않는다. GUI/Runtime137PASS·인접57PASS·입력6PASS, core 완료 로그는 보고서 참조(중복합산 금지). 설정32회 UI독립 비교도 통과했다.
-
-환경 생성·실제 reset event·Camera/framing에는 Workflow/UI/Registry import가 없다. 기존 workspaces.reset.source_workspace/demo.verify_dataset의 상위 입력 정책 역참조와 Task 생략 시 요청 파일 fallback은 남으며 전체 Workspace/Registry 정리 완료가 아니다. 사용자자료/설정·UI·의존성·Commit/Push 변경 없음. 실제 Source 전체 수집·실물·장시간·새 Annotation/DataGen actual·4/8환경 actual은 이번에 재검증하지 않았다. **6c-2a/b/c/d 경계는 완료, 전체 기능 단위 리팩터링은 미완료**다. 상세 호출자/검증/한계는 [6c-2d 보고서](../../outputs/workflow_validation/functional_refactor/isaac_boundaries/REPORT.md)와 해당 CALLERS.md를 따른다.
+Backend: Physics/실제 Reset RNG·native snapshot. Adapter: Episode seed stream·StableGrasp 한 개·Drop/Release·Event factory/Boundary/실패 latch. Context: 빌린 Metadata/Runtime 조회. Buffer: Episode 데이터/영상 staging. Writer: 파일 검증·Atomic 게시. Operations/Worker: Process·취소/환경 close. 자세한 Reset 순서와 호환 API는 [TASK_SDK_DESIGN](TASK_SDK_DESIGN.md)을 따른다.

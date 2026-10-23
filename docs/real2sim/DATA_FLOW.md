@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22: 아래 저장/Registry 설명은 과거 기록입니다. 현재 데이터 흐름은 [SYSTEM_FLOW](../architecture/SYSTEM_FLOW.md)를 따릅니다.
+
 # SO-101 Real2Sim Data Flow
 
 ## 단계별 저장 경로·입력 선택 — 2026-10-19

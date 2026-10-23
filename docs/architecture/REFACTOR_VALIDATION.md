@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22. 과거 감사 기록입니다. 현재 코드는 [PROJECT_STRUCTURE](PROJECT_STRUCTURE.md)를 따릅니다.
+
 # 전체 구조 리팩터링 검증
 
 2026-10-18 · 기준/최종 HEAD `7d02d9cf029c27aac3b2c03767e85961bfb650cb`. Commit/Push하지 않았다.

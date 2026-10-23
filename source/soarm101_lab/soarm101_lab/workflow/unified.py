@@ -1,4 +1,4 @@
-"""Common episode stages; DataGen starts without an automatic Source replay."""
+"""Annotation and DataGen workers."""
 import copy
 import json
 import signal
@@ -13,6 +13,9 @@ from ..real2sim.storage import atomic
 
 
 def execute(request):
+    if request['stage'] not in ('annotate','datagen'):raise ValueError('Unsupported common episode stage')
+    if request['options'].get('followup_python') and request['backend']!='mujoco':
+        raise ValueError('Explicit followup Python currently requires MuJoCo')
     if request['stage']=='annotate':
         count=request['options'].get('num_envs',1)
         if type(count) is not int or count not in (1,2,4,8):raise ValueError('Annotation num_envs must be 1,2,4 or 8')
@@ -26,16 +29,16 @@ def execute(request):
     output=Path(request['output']).resolve()
     if output.exists():raise FileExistsError('Choose a new workflow output directory')
     original=Path(request['input']).resolve()
-    path_stage=request['stage'] in ('replay','annotate','datagen')
-    context=None
-    if path_stage:
-        from .worker_request import episode_context
-        context=episode_context(original,request['workspace'],request['stage'],request['options'])
-        if output.is_relative_to(context['workspace']['root']) or (original.is_dir() and output.is_relative_to(original)):
-            raise ValueError('Output must be outside input Dataset and immutable Workspace')
-    reader=context['reader'] if context else EpisodeDataset(original)
+    from .worker_request import episode_context
+    context=episode_context(original,request['workspace'],request['stage'],request['options'])
+    if output.is_relative_to(context['workspace']['root']) or (original.is_dir() and output.is_relative_to(original)):
+        raise ValueError('Output must be outside input Dataset and immutable Workspace')
+    reader=context['reader']
+    from .task_scripts import load_followup
+    followup=context['followup']
+    followup_runtime=load_followup(followup,request['stage']) if followup else None
     output.mkdir(parents=True,exist_ok=False)
-    if reader.legacy or not reader.common:reader=EpisodeDataset(migrate(original,output/('.input/imported.hdf5' if path_stage else 'imported.hdf5')))
+    if reader.legacy or not reader.common:reader=EpisodeDataset(migrate(original,output/'.input/imported.hdf5'))
     if request.get('include'):
         indexes=set()
         for token in request['include']:
@@ -53,14 +56,13 @@ def execute(request):
     validation_started=time.perf_counter()
     validate_dataset(reader,require_annotations=request['stage']=='datagen')
     input_validation_s=time.perf_counter()-validation_started
-    from ..real2sim.workspaces.package import load,metadata
-    workspace=context['workspace'] if context else load(request['workspace'])
+    from ..real2sim.workspaces.package import metadata
+    workspace=context['workspace']
     if reader.args['workspace']!=metadata(workspace):raise ValueError('Input Workspace identity differs')
     opts=copy.deepcopy(request['options']);backend=request['backend'];stage=request['stage']
-    if context:
-        # Bind freshly read native evidence, never a GUI/Registry snapshot.
-        opts.update(tasks=context['tasks'],task_definition=context['scene']['task_definition'],
-                    instruction=context['scene']['task_definition']['language_instruction'],active_object_ids=context['scene']['active_object_ids'])
+    # Bind freshly read native evidence, never a GUI/Registry snapshot.
+    opts.update(tasks=context['tasks'],task_definition=context['scene']['task_definition'],
+                instruction=(context['scene']['task_definition'] or {}).get('language_instruction',''),active_object_ids=context['scene']['active_object_ids'])
     from ..utils.artifact_identity import fingerprint
     opts['source_pool_sha256']=fingerprint(original)
     from ..real2sim.workspaces.reset import datagen_seed
@@ -70,8 +72,12 @@ def execute(request):
     opts.setdefault('num_envs',1);opts.setdefault('max_attempts',10000);opts.setdefault('num_successful_demos',10)
     if opts['num_envs'] not in (1,2,4,8):raise ValueError('num_envs must be 1,2,4 or 8')
     scene=reader.args['scene_configuration'];opts.update(task_definition=scene['task_definition'],active_object_ids=scene['active_object_ids'],
-        width=640,height=480,control_hz=reader.hz)
+        width=640,height=480,control_hz=reader.hz,scene_objects=scene.get('object_ids'),scene_only=scene.get('scene_only',False),
+        script_scene={'objects':scene.get('objects',{})})
     request={**request,'input':str(reader.path),'options':opts}
+    request['_followup_runtime']=followup_runtime
+    if followup and (followup.get('source_reference') is not None or followup['python'] is not None):
+        opts['task_followup']=followup
     from .presentation import current
     app=None;native=None;adapter=None;bridge=current();writer=None;keyboard=None
     if stage=='datagen' and bridge:
@@ -109,6 +115,7 @@ def execute(request):
             from .presentation import current
             bridge=current()
         else:raise ValueError('Unknown execution backend')
+        adapter.bind_followup(followup_runtime)
         adapter.realtime=opts.get('realtime',False)
         adapter.interrupt_boundary=boundary
         if bridge:bridge.interrupt_boundary=boundary
@@ -118,20 +125,14 @@ def execute(request):
                 raise ValueError('Manual annotation requires Workflow controls or the Isaac developer window')
             from .presentation import annotation_keyboard
             keyboard=annotation_keyboard(adapter)
-        # Physical Source replay is an explicit operation, not a generation preflight.
-        if stage in ('replay','annotate'):
-            if stage=='annotate':
-                args=copy.deepcopy(reader.args);args.update(backend=backend,source_backend=reader.backend,annotated_from=str(original))
-                writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
-                from .annotation import run
-                proof=run(adapter,reader,output,bridge,writer,opts['num_envs'],input_validated=True)
-            else:
-                from .replay import run
-                proof=run(adapter,reader,output,bridge,evaluation_playback=True)
-            if writer:
-                writer.close();result={**proof,'passed':writer.count>0,'dataset':str(writer.path)}
-                result['annotation_profile']['input_validation_s']=input_validation_s
-            elif stage=='replay':result=proof
+        if stage=='annotate':
+            args=copy.deepcopy(reader.args);args.update(backend=backend,source_backend=reader.backend,annotated_from=str(original))
+            if opts.get('task_followup'):args['task_followup']=opts['task_followup']
+            writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
+            from .annotation import run
+            proof=run(adapter,reader,output,bridge,writer,opts['num_envs'],input_validated=True)
+            writer.close();result={**proof,'passed':writer.count>0,'dataset':str(writer.path)}
+            result['annotation_profile']['input_validation_s']=input_validation_s
         if stage=='datagen':
             from .datagen import run_isaac,run_mujoco
             if backend=='isaac':result=run_isaac(native,request,reader,output,bridge,boundary)
@@ -139,10 +140,16 @@ def execute(request):
                 adapter.buffer.abort();adapter=None
                 parent=native;native=None
                 result=run_mujoco(request,reader,output,bridge,parent=parent,boundary=boundary)
-        elif stage not in ('replay','annotate'):raise ValueError('Unsupported common episode stage')
+        elif stage!='annotate':raise ValueError('Unsupported common episode stage')
         result.update(backend=backend,stage=stage,episode_schema=SCHEMA)
+        if opts.get('task_followup'):result['task_followup']=opts['task_followup']
         atomic(output/'report.json',result)
-        if not result['passed'] and not result.get('stopped'):raise RuntimeError('Common episode stage validation failed')
+        if not result['passed'] and not result.get('stopped'):
+            if stage=='annotate':
+                failures='; '.join(f"{row['episode']}: {row.get('category','unknown')} ({row.get('reason','')})"
+                                  for row in result.get('episodes',[])[:5])
+                raise RuntimeError('Annotation 저장 가능 episode가 없습니다. 기록된 Task의 집기/놓기 조건을 확인하세요. '+failures)
+            raise RuntimeError('Common episode stage validation failed')
         return result
     except KeyboardInterrupt:
         if stage=='datagen':

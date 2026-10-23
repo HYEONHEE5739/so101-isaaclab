@@ -46,6 +46,7 @@ def _output_args(reader,backend,opts):
         ik_configuration=solver_configuration(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict')),
         ik_failure_policy=validate_failure_policy(opts.get('ik_failure_policy','strict')),
         ik_policy_configuration=policy_configuration(opts.get('ik_failure_policy','strict')))
+    if opts.get('task_followup'):args['task_followup']=opts['task_followup']
     return args
 
 
@@ -57,6 +58,7 @@ def _resume(writer,opts):
     if previous.args.get('generation_provenance',{}).get('source_sha256')!=writer.args['generation_provenance']['source_sha256']:
         raise ValueError('Resume Source pool changed')
     if previous.contract!=writer.contract:raise ValueError('Resume coordinates/model differ')
+    if previous.args.get('task_followup')!=writer.args.get('task_followup'):raise ValueError('Resume followup contract differs')
     if previous.args.get('generation_seed')!=opts['generation_seed']:raise ValueError('Resume generation seed differs')
     old=previous.args.get('generation_configuration',{})
     new=writer.args.get('generation_configuration',{})
@@ -88,11 +90,16 @@ def _save_trial(writer,reader,adapter,generator,seed):
     attrs={'success':True,'success_source':'simulation_stable_grasp_and_place','source_lineage':json.dumps(lineage),
         'source_group':'mimic:'+','.join(sorted({s['source'].get('source_id','UNKNOWN') for s in lineage['segments']})),
         'mimic_source_segments':json.dumps(lineage['segments']),'seed':seed,
-        'task_definition':json.dumps(reader.args['task_definitions'][0]),'scene_configuration':json.dumps(reader.args['scene_configuration']),
+        'task_definition':json.dumps(reader.args['task_definitions'][0] if reader.args['task_definitions'] else None),'scene_configuration':json.dumps(reader.args['scene_configuration']),
         'split':partition['split'] if partition else '',
         'failure_reason':'','simulation_backend':writer.args['backend'],'episode_metrics':json.dumps(dict(adapter.buffer.metrics))}
     attrs.update(ik_failure_policy=adapter.ik_failure_policy,ik_policy_configuration=json.dumps(policy_configuration(adapter.ik_failure_policy)),ik_solver=adapter.ik_solver,ik_configuration=json.dumps(solver_configuration(adapter.ik_solver,adapter.ik_failure_policy)),
         ik_summary=json.dumps(dict(adapter.ik_attempt)))
+    if getattr(adapter,'followup_acceptance',None):attrs['success_source']='simulation_stable_grasp_and_place_and_followup_term'
+    if getattr(adapter,'processing_runtime',None):
+
+        attrs['success_source']='script_mimic_terms'
+        adapter.buffer.final_event_values={key:adapter.term_boolean(adapter.processing_events[key]) for key in adapter.buffer.final_events}
     values,attrs,videos=adapter.buffer.finish(attrs,success=adapter.check_success())
     # Save exactly the pre-IK generated target trajectory and subtask transitions.
     values['mimic_plan']={str(i):{'target_eef_pose':t['poses'],'gripper_action':t['gripper'],'action_noise':t['noise']} for i,t in enumerate(generator.trace)}
@@ -114,6 +121,11 @@ def _run_one(adapter,reader,writer,scheduler,index,attempt,seed,pool):
         scheduler.set_state(index,'running')
         result=asyncio.run(execute_trial(adapter,generator))
         category='success' if result['success'] and adapter.check_success() else adapter.failure_category()
+        if category=='success':
+            try:
+                if not adapter.accept_followup():category='task_condition_not_met'
+            except (ValueError,RuntimeError) as exc:category='task_contract_error';reason=str(exc)
+        if category=='task_condition_not_met':reason='Explicit Annotation acceptance term was not satisfied'
     except GenerationStopped:category='interrupted'
     except TimeoutError as exc:category='timeout';reason=str(exc)
     except ValueError as exc:
@@ -129,6 +141,8 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
     from ..simulation.mujoco_backend import MujocoBackend
     writer=None
     try:
+        if (reader.args.get('task_followup',{}).get('python') or request['options'].get('followup_python')) and request.get('_followup_runtime') is None:
+            raise ValueError('Explicit followup Python must be validated/loaded by the Annotation/Mimic Worker')
         opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));num_envs=opts.get('num_envs',1);seed=opts['generation_seed']
         if parent is None:parent=create_mujoco(**prepare_mujoco(request,hz=reader.hz))
         args=_output_args(reader,'mujoco',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
@@ -151,6 +165,8 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
         adapter=None
         try:
             adapter=MujocoAdapter(backend,reader.hz,output,_seed(seed,index),scheduler.stop)
+
+            adapter.bind_followup(request.get('_followup_runtime'))
             adapter.configure_ik(opts.get('ik_solver','scipy_ls'),opts.get('ik_failure_policy','strict'))
             adapter.control=scheduler.control;adapter.worker_index=index
             adapter.max_episode_steps=opts.get('max_episode_steps',2000)
@@ -158,9 +174,13 @@ def run_mujoco(request,reader,output,bridge=None,parent=None,boundary=None):
             def preview(a):
                 scheduler.set_state(index,'running',steps=a.step_index)
                 if a.step_index%50==0:print(f'[MIMIC] Env {index} step {a.step_index}',flush=True)
-                if index==0 and time.monotonic()-last_preview[0]>.1:
+                if bridge and index==0 and not previews.full() and time.monotonic()-last_preview[0]>.1:
                     last_preview[0]=time.monotonic()
-                    try:previews.put_nowait((a.step_index,a.last_images))
+                    # Render on the owning worker thread; recording keeps only policy cameras.
+                    images=dict(a.last_images)
+                    if 'overview' in backend.metadata.get('cameras',{}):
+                        images['overview']=backend.get_rgb('overview')
+                    try:previews.put_nowait((a.step_index,images))
                     except queue.Full:pass
             adapter.preview=preview
             with state_lock:model_ids.append(id(backend.model));data_ids.append(id(backend.data))
@@ -288,6 +308,8 @@ def _isaac_loop(native,adapters,reader,writer,scheduler,seed,bridge,boundary=Non
 
 
 def run_isaac(native,request,reader,output,bridge=None,boundary=None):
+    if reader.args.get('task_followup',{}).get('python') or request['options'].get('followup_python'):
+        raise ValueError('Explicit followup Python currently requires the MuJoCo Worker')
     opts=request['options'];validate_solver(opts.get('ik_solver','scipy_ls'));seed=opts['generation_seed'];count=opts['num_envs']
     args=_output_args(reader,'isaac',opts);args['generation_seed']=seed;writer=DatasetWriter(request.get('dataset_output') or output/'dataset.hdf5',args,reader.contract)
     writer.args['execution_physics']={'backend':'isaac','physics_dt':float(native.physics_dt),'control_decimation':native.cfg.decimation,

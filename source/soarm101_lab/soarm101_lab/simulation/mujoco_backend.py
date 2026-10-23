@@ -63,7 +63,8 @@ class MujocoBackend(SimBackend):
         if shared_backend is None:
             xml, assets, self.workspace, self.metadata = build_scene(
                 workspace, width, height, timestep, decimation, task_definition, full_workspace, physics_profile, identity_sim, active_object_ids,
-                reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'))
+                reset=((simulation_configuration or {}).get('scene_configuration') or {}).get('reset'),
+                scene_objects=((simulation_configuration or {}).get('scene_configuration') or {}).get('object_ids'))
             if identity_sim:self.metadata['simulation_joint_frame']='urdf'
             if simulation_configuration is not None:self.metadata['simulation_configuration']=simulation_configuration
             self.model = mujoco.MjModel.from_xml_string(xml, assets=assets)
@@ -84,7 +85,7 @@ class MujocoBackend(SimBackend):
         self.v_indices = self.model.jnt_dofadr[self.joint_ids]
         self.actuator_ids = np.array([self._id(mujoco.mjtObj.mjOBJ_ACTUATOR, 'target_' + n) for n in JOINTS])
         self.eef_id = self._id(mujoco.mjtObj.mjOBJ_SITE, 'tool0')
-        review = self.workspace['task'].get('mode') == 'geometry_review'
+        review = self.workspace['task'].get('mode') in ('geometry_review','scene_recording')
         self.object_joint = None if review else self._id(mujoco.mjtObj.mjOBJ_JOINT, 'object_free')
         self.object_q = None if review else int(self.model.jnt_qposadr[self.object_joint])
         self.object_v = None if review else int(self.model.jnt_dofadr[self.object_joint])
@@ -133,11 +134,12 @@ class MujocoBackend(SimBackend):
                 if type(seed) is not int or not 0 <= seed < 2**32:
                     raise ValueError('Seed must be integer in [0, 2**32)')
                 self.randomizer = WorkspaceRandomizer(self.workspace, seed)
-            sample = self.randomizer.sample()
+            scene_only=self.workspace['task'].get('mode')=='scene_recording'
+            sample = None if scene_only else self.randomizer.sample()
             self.mj.mj_resetData(self.model, self.data)
             self.data.qpos[self.q_indices] = self._target(self.home)
             self.data.ctrl[self.actuator_ids] = self.home
-            for name, point in sample['cube_positions'].items():
+            for name, point in (sample['cube_positions'] if sample else {}).items():
                 pose = np.eye(4)
                 pose[:3, 3] = point
                 self.set_object_pose(name, pose)
@@ -168,7 +170,7 @@ class MujocoBackend(SimBackend):
                 'joint_targets': self.data.ctrl[self.actuator_ids].copy(),
                 'eef_pose': self.get_eef_pose(),
                 'object_poses': {n: self.get_object_pose(n) for n in self.metadata['dynamic_objects'] + self.metadata['target_objects']},
-                'timestamp_s': float(self.data.time), 'success': self.is_success(),
+                'timestamp_s': float(self.data.time), 'success': None if self.workspace['task'].get('mode')=='scene_recording' else self.is_success(),
                 'physics_device': 'cpu', 'frame': 'workspace', 'joint_unit': 'rad'}
 
     def set_joint_state(self, joint_pos):
@@ -209,11 +211,15 @@ class MujocoBackend(SimBackend):
         self.data.qacc_warmstart[:] = 0
         self.mj.mj_forward(self.model, self.data)
 
-    def success_details(self):
+    def success_details(self, *, object_id=None, target_id=None, condition=None):
         self._open()
         task, p = self.workspace['task'], self.workspace['profile']
-        if task.get('mode') == 'geometry_review':
+        if task.get('mode') in ('geometry_review','scene_recording') and object_id is None and target_id is None:
             return {'success': None, 'definition': 'not applicable: geometry review'}
+        if object_id is not None or target_id is not None or condition is not None:
+            from ..real2sim.workspaces.tasks import placement_condition
+            condition = placement_condition(self.workspace, object_id, target_id, condition)
+            task = {**task, 'pick': object_id, 'place': target_id, 'success': condition}
         cup = p['objects'][task['targets'][task['place']]]
         relative = np.linalg.inv(self.get_object_pose(task['place'])) @ self.get_object_pose(task['pick'])
         size = np.asarray(p['objects'][task['pick']]['dimensions_m'])
@@ -249,9 +255,9 @@ class MujocoBackend(SimBackend):
     def is_success(self):
         return self.success_details()['success']
 
-    def finger_contacts(self):
+    def finger_contacts(self, object_id=None):
         """Target-filtered contacts for the same two finger bodies used by Isaac."""
-        target = self._id(self.mj.mjtObj.mjOBJ_BODY, self.metadata['pick'])
+        target = self._id(self.mj.mjtObj.mjOBJ_BODY, object_id or self.metadata['pick'])
         fingers = [self._id(self.mj.mjtObj.mjOBJ_BODY, n) for n in ('robot_gripper', 'robot_jaw')]
         contact = [False, False]
         for c in self.data.contact:
@@ -450,7 +456,7 @@ class PolicyEnvironment:
         """Detached scene/coordinate facts; no output path or file-format policy."""
         from ..real2sim.workspaces.tasks import selected,configured
         b=self.backend;w=b.workspace;scene=copy.deepcopy(b.metadata)
-        if not scene.get('task_definition'):scene['task_definition']=selected(w)
+        if not scene.get('task_definition') and w['task'].get('mode')!='scene_recording':scene['task_definition']=selected(w)
         if not scene.get('scene_configuration'):
             scene['scene_configuration']=configured(w,scene['task_definition'],scene['dynamic_objects'],backend='mujoco')['scene_configuration']
         scene['robot_base_T_world']=copy.deepcopy(w['profile']['robot_base']['T_world'])

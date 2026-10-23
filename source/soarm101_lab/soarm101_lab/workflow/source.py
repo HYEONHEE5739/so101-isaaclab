@@ -45,6 +45,11 @@ def resume_common(writer,provenance:dict,source)->None:
     if previous.args['workspace']!=provenance['workspace'] or previous.contract!=provenance['coordinate_contract']:
         raise ValueError('Resume Workspace/calibration/model differs')
     if previous.args.get('source_partition'):raise ValueError('Cannot append new Source to an immutable partition')
+    old=previous.provenance.get('source_script') or previous.args.get('source_script') or {}
+    new=provenance.get('source_script') or {}
+    if provenance['scene_configuration'].get('scene_only'):
+        if old.get('declaration')!=new.get('declaration') or old.get('source_code_sha256')!=new.get('source_code_sha256'):
+            raise ValueError('Resume Scene/Reset script identity differs')
     records=source_catalog(source,allow_unknown=True)[0]
     for old in previous.names:
         values,attrs,videos=previous.episode(old)
@@ -52,6 +57,7 @@ def resume_common(writer,provenance:dict,source)->None:
         if not previous.legacy:videos={k:{**v,'file':str(previous.path.parent/v['file'])} for k,v in videos.items()}
         writer.commit(values,attrs,videos)
     provenance['resumed_from']=str(source)
+    if old!=new:provenance['source_script_history']=[*previous.provenance.get('source_script_history',[]),old]
 
 
 def save_common(writer,recording,env,provenance:dict,outcome:dict)->str:
@@ -69,4 +75,5 @@ def save_common(writer,recording,env,provenance:dict,outcome:dict)->str:
         success=bool(outcome['success']),validation_only=outcome.get('validation_only',False),success_source=outcome.get('success_source','unknown'),
         legacy_initial_state=json.dumps(recording.initial),task_definition=json.dumps(provenance['scene']['task_definition']),
         scene_configuration=json.dumps(provenance['scene_configuration']))
+    if outcome.get('success_source')=='recording_only':attrs.pop('success')
     return writer.commit(values,attrs,videos,video_staging=recording.video)

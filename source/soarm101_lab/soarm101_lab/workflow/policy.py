@@ -28,7 +28,8 @@ def checkpoint_metadata(path) -> dict:
     config=read(model/'config.json')
     train=read(model/'train_config.json') if (model/'train_config.json').is_file() else {}
     architecture=config.get('type') or train.get('policy',{}).get('type')
-    if architecture not in ('act','smolvla'):raise ValueError('Unsupported checkpoint policy type')
+    from ..learning.datasets import installed_policies
+    if architecture not in installed_policies():raise ValueError('Policy type absent from installed LeRobot')
     return dict(path=str(model),architecture=architecture,steps=train.get('steps'))
 
 
@@ -81,9 +82,12 @@ def load_policy(path, expected, device):
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
     require_policy(path, expected)
     cfg = PreTrainedConfig.from_pretrained(path)
-    if cfg.type not in ('act', 'smolvla'):
-        raise ValueError('Workflow supports ACT and SmolVLA policies')
-    policy = get_policy_class(cfg.type).from_pretrained(path)
+    if cfg.type not in ('act','smolvla','diffusion'):
+        raise ValueError('SO-101 evaluation currently supports ACT/SmolVLA/Diffusion; other native policies remain available for Training')
+    from ..learning.datasets import validate_sim_features
+    validate_sim_features(cfg,path)
+    cfg.device=device
+    policy = get_policy_class(cfg.type).from_pretrained(path,config=cfg)
     policy.to(device).eval()
     pre, post = make_pre_post_processors(policy.config, pretrained_path=path,
                                          preprocessor_overrides={'device_processor': {'device': device}})

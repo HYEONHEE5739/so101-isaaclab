@@ -61,7 +61,8 @@ def placement_region(workspace, composition, pick, base_to_workspace):
 def _events(reader,annotation=None,signal_keys=None):
     events={}
     if annotation:
-        if annotation.get('boundaries'):events.update(annotation['boundaries'])
+        if annotation.get('events'):events.update(annotation['events'])
+        elif annotation.get('boundaries'):events.update(annotation['boundaries'])
         else:events.update({k:annotation[k] for k in ('grasp','place','transport') if k in annotation})
     for name,key in (signal_keys or {}).items():
         if name in events:continue
@@ -241,7 +242,7 @@ def analyze(path):
                         if len(value.shape)==4 and value.shape[-1]>=3:
                             if value.shape[0]!=frames:raise ValueError('Legacy RGB/observation frame count mismatch')
                             cameras.setdefault(key.removesuffix('_cam'),{'path':'obs/camera/'+key,'timestamp_key':args.get('observation_timestamp_path')})
-                signal_keys={label:key for label,key in [('grasp','obs/events/grasp'),('place','obs/events/place'),('grasp','obs/datagen_info/subtask_term_signals/grasp')] if key in g}
+                signal_keys={name:prefix+'/'+name for prefix in ('obs/events','obs/datagen_info/subtask_term_signals') if prefix in g for name in g[prefix]}
                 annotation=_json(g.attrs.get('annotation'))
                 row=dict(name=name,data_ref={'path':str(path),'episode':name},frames=frames,dt=dt,
                     action_key='joint_targets',action_timestamp_key=args.get('observation_timestamp_path'),
@@ -252,12 +253,11 @@ def analyze(path):
                     source_group=_group_id(path,name,g.attrs,args),cameras=cameras,object_telemetry=telemetry,
                     source_partition=args.get('source_partition'),source_lineage=_json(g.attrs.get('source_lineage')))
                 row['legacy_pose_alignment']='initial[0] + post_state[:-1]' if any(d.get('post_step') for d in telemetry.values()) else None
-        from .episodes import validate_partition,validate_partition_episode
+        from .episodes import validate_partition
         partition=validate_partition(row['source_partition']) if row.get('source_partition') else None
-        if partition:validate_partition_episode(partition,row.get('source_lineage'),args.get('source_partition_input'))
         kind=(row.get('source_lineage') or {}).get('kind')
-        lineage_status=('Verified Source Partition / exact subtask Source' if kind=='mimic_segments' else
-            'Verified Source Partition / exact subtask lineage UNKNOWN' if kind!='source_episode' else 'Verified Source Partition') if partition else 'Not partitioned'
+        lineage_status=('Historical Source Partition / exact subtask Source' if kind=='mimic_segments' else
+            'Historical Source Partition / exact subtask lineage UNKNOWN' if kind!='source_episode' else 'Historical Source Partition') if partition else 'Not partitioned'
         row.update(split=None,historical_split=partition['split'] if partition else None,lineage_status=lineage_status,leakage_status='historical evidence only')
         if row['frames']<3 and not args.get('evaluation_schema'):raise ValueError('At least three frames required for motion quality metrics')
         ids=(composition or {}).get('active_object_ids',scene.get('dynamic_objects') if canonical else active_ids)
@@ -340,7 +340,7 @@ def select_distribution(rows,count):
 def _selection(source, names=None):
     """Read episode headers in stored order; historical proofs remain authoritative history."""
     import h5py
-    from .episodes import validate_partition, validate_partition_episode
+    from .episodes import validate_partition
     source=Path(source).resolve()
     if any(p.name and p.with_name('.'+p.name+'.workflow-lock').exists() for p in (source,*source.parents)):
         raise ValueError('Dataset 저장 중에는 Curation을 실행할 수 없습니다.')
@@ -360,7 +360,7 @@ def _selection(source, names=None):
     for name,entry in entries:
         partition=_json(entry.get('source_partition'),None) or args.get('source_partition')
         lineage=_json(entry.get('source_lineage'),None)
-        if partition:validate_partition_episode(validate_partition(partition),lineage,args.get('source_partition_input'))
+        if partition:validate_partition(partition)
         if names is None or name in names:
             selected.append((name,lineage or {'source_id':entry.get('curation_origin')},entry.get('source_group',entry.get('group_id')) or args.get('source_groups',{}).get(name)))
     return selected

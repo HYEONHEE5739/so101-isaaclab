@@ -10,6 +10,34 @@ sys.path.insert(0, str(ROOT / 'source/soarm101_lab'))
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='lerobot-info':
+        import importlib.metadata
+        from soarm101_lab.learning.datasets import installed_policies
+        print(json.dumps(dict(version=importlib.metadata.version('lerobot'),policies=installed_policies(),training_module='lerobot.scripts.lerobot_train'),indent=2));return
+    if len(sys.argv)>1 and sys.argv[1]=='task-template':
+        parser=argparse.ArgumentParser(description='Generate a Task file; does not execute user code or create an engine')
+        parser.add_argument('--workspace',required=True)
+        parser.add_argument('--output',required=True)
+        parser.add_argument('--task-id',help='Explicit existing Pick & Place definition; omit for generic unimplemented success')
+        parser.add_argument('--task-ids',nargs='+',help='Multiple existing Metadata tasks for an Evaluation Script')
+        parser.add_argument('--script-stage',choices=['source','sim_eval'])
+        parser.add_argument('--checkpoint',help='Policy path for generated Evaluation Script')
+        args=parser.parse_args(sys.argv[2:])
+        from soarm101_lab.real2sim.workspaces.package import load
+        from soarm101_lab.real2sim.workspaces.tasks import catalog,generate_template
+        workspace=load(args.workspace)
+        definition=None
+        if args.task_id:
+            choices={d['task_id']:d for d in catalog(workspace)}
+            if args.task_id not in choices:parser.error('Unknown Workspace task ID')
+            definition=choices[args.task_id]
+        definitions=None
+        if args.task_ids:
+            if args.task_id or args.script_stage!='sim_eval':parser.error('--task-ids requires sim_eval and cannot be combined with --task-id')
+            choices={d['task_id']:d for d in catalog(workspace)}
+            if set(args.task_ids)-set(choices):parser.error('Unknown Workspace task ID')
+            definitions=[choices[k] for k in args.task_ids]
+        print(generate_template(workspace,args.output,definition,script_stage=args.script_stage,checkpoint=args.checkpoint,evaluation_definitions=definitions));return
     if len(sys.argv)>1 and sys.argv[1]=='discover':
         parser=argparse.ArgumentParser(description='Read-only native Dataset/Policy paths; candidates require execution validation')
         parser.add_argument('--path',default=str(ROOT/'outputs/workflow'))
@@ -31,12 +59,16 @@ def main():
     from soarm101_lab.workflow.operations import Operations, STAGES, MUJOCO_STAGES, MODEL_ROOT, execute_request
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('task-template', help='Generate Metadata-bound Python; see task-template --help')
     commands.add_parser('discover', help='Read-only Dataset/Checkpoint paths; see discover --help')
     for name in ('run','ready'):
         sub = commands.add_parser(name)
         sub.add_argument('--stage', choices=sorted(STAGES),required=True)
-        sub.add_argument('--input',help='Native Dataset/Model/Workspace Path',required=True)
+        sub.add_argument('--input',help='Native Dataset/Model/Workspace Path',default='')
+        sub.add_argument('--execution-script',help='Source/Evaluation Python with a literal SCRIPT declaration')
         sub.add_argument('--root',help='Output and runs root; native Path discovery needs no registration')
+        sub.add_argument('--task-python',help='Trusted Python for MuJoCo Sim Evaluation; executed only by the worker')
+        sub.add_argument('--followup-python',help='Explicit Annotation/Mimic contract; executed only by Worker')
         sub.add_argument('--workspace', default='')
         sub.add_argument('--options', help='JSON options file')
         sub.add_argument('--ik-solver', choices=['scipy_ls','pinocchio_dls'], help='DataGen only; overrides options JSON')
@@ -65,7 +97,20 @@ def main():
     builder.add_argument('--workspace-id')
     builder.add_argument('--version', type=int, default=1)
     builder.add_argument('--task', help='Optional existing workspace task JSON, including provisional physics')
+    hf=commands.add_parser('import-hf-dataset',help='Download a native Dataset into a new local directory')
+    hf.add_argument('repo_id');hf.add_argument('output');hf.add_argument('--revision')
+    model=commands.add_parser('import-hf-model',help='Resolve a native Policy to a pinned official cache snapshot')
+    model.add_argument('repo_id');model.add_argument('--revision')
     args = parser.parse_args()
+    if args.command=='import-hf-model':
+        from soarm101_lab.learning.datasets import resolve_model
+        path,identity=resolve_model(args.repo_id,args.revision)
+        from soarm101_lab.learning.datasets import inspect_policy
+        record=inspect_policy(path)
+        print(json.dumps(dict(path=path,hub=identity,architecture=record['format']['type'])));return
+    if args.command=='import-hf-dataset':
+        from soarm101_lab.workflow.hub import import_dataset
+        print(import_dataset(args.repo_id,args.output,args.revision));return
     if args.command == 'import-builder':
         from soarm101_lab.real2sim.workspaces.builder import import_scene
         task = json.loads(Path(args.task).read_text()) if args.task else None
@@ -82,8 +127,8 @@ def main():
         else:
             if args.backend not in ('mujoco','isaac') or not args.stage or not args.output:
                 worker.error('--request or simulation --stage and --output are required')
-            if args.backend=='isaac' and args.stage not in ('replay','annotate','datagen'):
-                worker.error('Explicit Isaac worker supports replay, annotate and datagen; other stages use --request')
+            if args.backend=='isaac' and args.stage not in ('annotate','datagen'):
+                worker.error('Explicit Isaac worker supports annotate and datagen; other stages use --request')
             request = {'backend': args.backend, 'stage': args.stage, 'workspace': args.workspace,
                        'input': args.input, 'config': args.config, 'checkpoint': args.checkpoint,
                        'renderer': args.renderer, 'options': json.loads(args.options), 'output': args.output}
@@ -102,6 +147,9 @@ def main():
     options=json.loads(Path(args.options).read_text()) if args.options else {}
     if not isinstance(options,dict):parser.error('Options must be a JSON object')
     if args.storage_name is not None:options['storage_name']=args.storage_name
+    if args.task_python is not None:options['task_python']=str(Path(args.task_python).expanduser().resolve())
+    if args.followup_python is not None:options['followup_python']=str(Path(args.followup_python).expanduser().resolve())
+    if args.execution_script is not None:options['execution_script']=str(Path(args.execution_script).expanduser().resolve())
     for name in ('ik_solver','ik_failure_policy'):
         value=getattr(args,name)
         if value is not None:

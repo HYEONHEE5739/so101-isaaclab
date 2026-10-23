@@ -44,7 +44,7 @@ class SourceEpisode:
             row={k:np.array(sample[k],copy=True) for k in ('state','action','raw_state','raw_action','requested_action','eef_pose')}
             row['timestamp']=float(sample['timestamp'])
             row['object_poses']={name:np.array(sample['object_poses'][name],copy=True) for name in self.object_names}
-            row['object_pose']=row['object_poses'][self.pick]
+            if self.pick is not None:row['object_pose']=row['object_poses'][self.pick]
             self.rows.append(row)
         except BaseException:self.abort();raise
 
@@ -102,14 +102,14 @@ class EpisodeBuffer:
 
     def begin(self,initial_state:dict):self.abort();self.initial=initial_state
 
-    def append(self,joints,target,state:dict,images:dict,*,grasp:bool,place:bool,ik=None)->None:
+    def append(self,joints,target,state:dict,images:dict,*,grasp:bool,place:bool,ik=None,events=None)->None:
         from ..utils.async_video_writer import VideoEpisode
         if self.video is None:self.video=VideoEpisode(self.output,self.hz,18)
         t=time.perf_counter();self.video.append({k+'_cam':v for k,v in images.items()})
         self.metrics['video_enqueue_s']+=time.perf_counter()-t
         self.queue_peak=max(self.queue_peak,max((v._queue.qsize() for v in self.video.writers.values()),default=0))
         self.rows.append({'state':state,'joint_target':np.array(joints,copy=True),'eef_target':np.array(target,copy=True),
-            'grasp':bool(grasp),'place':bool(place),'ik':ik})
+            'grasp':bool(grasp),'place':bool(place),'ik':ik,**({'events':dict(events)} if events is not None else {})})
 
     def finish(self,attrs:dict,*,success:bool)->tuple[dict,dict,dict]:
         if not self.rows or self.video is None:raise ValueError('No completed episode frames')
@@ -122,7 +122,7 @@ class EpisodeBuffer:
         values={'actions':cartesian_actions(goals,ee[0],targets[:,5]),'joint_targets':targets,'action_timestamp':ts,
             'obs':{'timestamp':ts[:,None],'policy':{'joint_pos':q,'ee_state':as_pose7(ee)},
                 'object_poses':world,'datagen_info':{'eef_pose':{'tool0':ee},'target_eef_pose':{'tool0':goals},
-                    'object_pose':objects,'subtask_term_signals':{'grasp':np.array([r['grasp'] for r in self.rows],dtype=np.uint8)[:,None]}},
+                    'object_pose':objects,'subtask_term_signals':{}},
                 'camera_timestamps':{name:ts for name in self.camera_names}},'initial_state':self.initial}
         if all(r.get('ik') is not None for r in self.rows):
             values['ik']={key:np.asarray([r['ik'][key] for r in self.rows]) for key in
@@ -131,18 +131,25 @@ class EpisodeBuffer:
                  'orientation_error_deg','joint_limit_violation','common_pose_passed','command_applied')}
             values['ik']['candidate_joint_rad']=np.asarray([r['ik']['fitted_joint_rad'] for r in self.rows])
             values['ik']['failure_reason']=np.asarray([r['ik']['failure_reason'].encode() for r in self.rows],dtype='S64')
-        events={key:np.array([r[key] for r in self.rows],dtype=np.uint8)[:,None] for key in ('grasp','place')}
-        if success:events['place'][-1]=1
+        custom='events' in self.rows[0]
+        keys=self.rows[0]['events'] if custom else ('grasp','place')
+        events={key:np.array([(r['events'] if custom else r)[key] for r in self.rows],dtype=np.uint8)[:,None] for key in keys}
+        if success:
+            for key in (self.final_events if custom else ('place',)):
+                if not custom or self.final_event_values.get(key,False):events[key][-1]=1
+        signals=self.signal_names if custom else (['grasp'] if np.any(events['grasp']) else [])
         values['obs']['events']=events
+        values['obs']['datagen_info']['subtask_term_signals']={key:events[key] for key in signals}
         indices={key:int(np.flatnonzero(signal)[0]) for key,signal in events.items() if np.any(signal)}
-        if not np.any(events['grasp']):
-            values['obs']['datagen_info']['subtask_term_signals']={}
-        if 'grasp' in indices and 'place' in indices:
-            attrs={**attrs,'annotation':json.dumps({'schema':'so101.common-subtasks/1','frame_count':n,**indices,
+        attrs={k:v for k,v in attrs.items() if k!='annotation'}
+        if custom:
+            attrs['annotation']=json.dumps({'schema':'so101.event-annotation/1','frame_count':n,'events':indices,
+                'signals':list(signals),'timing':'first pre-step event; explicitly declared final events mapped to last action'})
+        # Native recipe and legacy recording retain identical schema/JSON ordering.
+        if set(events)=={'grasp','place'} and list(signals)==['grasp'] and 'grasp' in indices and 'place' in indices:
+            attrs['annotation']=json.dumps({'schema':'so101.common-subtasks/1','frame_count':n,**indices,
                 'method':attrs.get('annotation_method','stable_contact_replay'),
-                'timing':'first pre-step observation with event; final post-step placement mapped to last action'})}
-        else:
-            attrs={k:v for k,v in attrs.items() if k!='annotation'}
+                'timing':'first pre-step observation with event; final post-step placement mapped to last action'})
         t=time.perf_counter();specs=self.video.finish(n);self.metrics['video_finalize_s']+=time.perf_counter()-t
         videos={name:{**spec,'file':str((self.video.folder/spec['file']).resolve())} for name,spec in specs.items()}
         return values,attrs,videos

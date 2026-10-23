@@ -10,7 +10,7 @@ from pathlib import Path
 
 def fingerprint(path):
     p = Path(path).expanduser().resolve()
-    files = [p] if p.is_file() else sorted(f for f in p.rglob('*') if f.is_file() and '.cache' not in f.parts)
+    files = [p] if p.is_file() else sorted(f for f in p.rglob('*') if f.is_file() and '.cache' not in f.relative_to(p).parts)
     if p.is_file() and p.suffix in ('.hdf5','.h5'):
         import h5py
         from .async_video_writer import external_video_path

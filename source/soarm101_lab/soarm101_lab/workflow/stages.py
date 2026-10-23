@@ -1,13 +1,13 @@
 """Single presentation contract shared by UI and runtime diagnostics."""
-SIM_STAGES = {'source', 'replay', 'annotate', 'datagen', 'sim_eval'}
-PREVIEW_STAGES = {'source', 'replay', 'datagen', 'sim_eval'}
+SIM_STAGES = {'source', 'annotate', 'datagen', 'sim_eval'}
+PREVIEW_STAGES = {'source', 'datagen', 'sim_eval'}
 INSPECTION_STAGES = {'datagen', 'sim_eval'}
 
 
 def controls(stage, manual=False):
     if stage == 'source': return {'save', 'discard', 'quit'}
     if stage == 'annotate': return {'resume', 'pause'} | ({'mark', 'skip'} if manual else set())
-    if stage in ('replay', 'datagen', 'sim_eval'): return {'resume', 'pause', 'step'}
+    if stage in ('datagen', 'sim_eval'): return {'resume', 'pause', 'step'}
     if stage == 'real_eval': return {'resume', 'pause'}
     return set()
 

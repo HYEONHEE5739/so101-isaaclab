@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22. 전용 학습은 삭제됐습니다. [현재 MiniVLA 지원](../minivla/README.md)을 따릅니다.
+
 # MiniVLA — 기존 Workspace Pipeline 통합
 
 2026-10-16 통합 Workflow: 새 Source/Annotation/DataGen은 엔진 공통 HDF5+Side/Wrist MP4다.

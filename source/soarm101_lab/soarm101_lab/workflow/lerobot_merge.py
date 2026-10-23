@@ -16,32 +16,7 @@ from ..representation import require_compatible
 from ..so101_dataset_contract import JOINT_SPACE, write_contract
 from ..utils.artifact_identity import fingerprint
 from .dataset import inspect_dataset
-from .episodes import partition_evidence, validate_partition, validate_partition_episode
-
-
-def combine_partitions(partitions):
-    """Union compatible Source inventories; keep each episode's original proof."""
-    if any(p is None for p in partitions):
-        if not all(p is None for p in partitions):
-            raise ValueError('미분할 데이터와 Train/Val 데이터를 함께 병합할 수 없습니다. 같은 분할 상태끼리 선택하세요.')
-        return None
-    partitions = [validate_partition(p) for p in partitions]
-    if len({p['split'] for p in partitions}) != 1:
-        raise ValueError('Train과 Val은 함께 병합할 수 없습니다. Train끼리, Val끼리 선택하세요.')
-    if all(p == partitions[0] for p in partitions):
-        return copy.deepcopy(partitions[0])
-    inventory, assignments = {}, {}
-    for partition in partitions:
-        for source, record in partition['inventory'].items():
-            if source in inventory and (inventory[source] != record or assignments[source] != partition['assignments'][source]):
-                raise ValueError('Source Partition 충돌: 같은 원본의 계보 또는 Train/Val 배정이 다릅니다.')
-            inventory[source] = record
-            assignments[source] = partition['assignments'][source]
-    payload = dict(schema='so101.source-partition/1', split=partitions[0]['split'],
-                   inventory=inventory, assignments=assignments,
-                   source_ids=sorted({s for p in partitions for s in p['source_ids']}),
-                   merged_partitions=sorted({p['sha256'] for p in partitions}))
-    return validate_partition({**payload, 'sha256': evidence_hash(payload)})
+from .episodes import partition_evidence, validate_partition
 
 
 def merge_coordinates(records):
@@ -82,28 +57,6 @@ def merge_coordinates(records):
     return result
 
 
-def unpartitioned_sources(lineage):
-    """Require recorded Source identities without inventing a Train/Val role."""
-    if not isinstance(lineage, dict):
-        raise ValueError('미분할 데이터의 원본 Source 계보가 없습니다.')
-    if lineage.get('kind') == 'mimic_segments' and lineage.get('partition_sha256') is None:
-        sources = [s.get('source') for s in lineage.get('segments', [])]
-    else:
-        sources = [lineage]
-    if not sources:
-        raise ValueError('미분할 데이터의 Mimic Source 계보가 비어 있습니다.')
-    for source in sources:
-        if not isinstance(source, dict) or source.get('kind') != 'source_episode' or not source.get('source_id'):
-            raise ValueError('미분할 데이터의 원본 Source 계보를 확인할 수 없습니다.')
-        identity = source.get('source') or {}
-        if (not identity.get('dataset_sha256') or not identity.get('episode_id')
-                or not isinstance(identity.get('groups'), list) or not identity['groups']):
-            raise ValueError('미분할 데이터의 원본 Source 식별 정보가 불완전합니다.')
-        if identity.get('payload_sha256') and source['source_id'] != 'source:' + identity['payload_sha256']:
-            raise ValueError('원본 Source payload identity가 다릅니다.')
-    return sources
-
-
 def episode_origins(record):
     """Flatten prior merges so merging A with merge(A,B) cannot duplicate A."""
     prov = record['provenance']
@@ -124,7 +77,7 @@ def validate_inputs(records):
     if len(set(paths)) != len(paths):
         raise ValueError('같은 데이터셋을 중복 선택할 수 없습니다.')
     base = records[0]
-    seen, tasks, partitions, source_identities = set(), {}, [], {}
+    seen, tasks, identities = set(), {}, {}
     for record in records:
         info, prov = record.get('format'), record.get('provenance') or {}
         if record.get('type') != 'dataset' or not isinstance(info, dict) or not str(info.get('codebase_version', '')).startswith('v3.'):
@@ -142,45 +95,46 @@ def validate_inputs(records):
         p = prov.get('source_partition')
         if p is not None:
             validate_partition(p)
-        partitions.append(p)
         count = info['total_episodes']
         expected = {str(i) for i in range(count)}
-        for key in ('source_groups', 'episode_source_lineage'):
-            if set(prov.get(key, {})) != expected:
-                raise ValueError('Episode 계보 누락: ' + key)
         if {str(e['episode_index']) for e in prov.get('episodes', [])} != expected:
             raise ValueError('Episode Task 계보가 완전하지 않습니다.')
         for task in prov.get('task_definitions', []):
             if task['task_id'] in tasks and tasks[task['task_id']] != task:
                 raise ValueError('같은 Task ID의 정의가 다릅니다.')
             tasks[task['task_id']] = task
+        def check_identity(value):
+            if isinstance(value,dict):
+                if value.get('kind')=='source_episode':
+                    identity=value.get('source') or {}
+                    key=value.get('source_id')
+                    if key in identities and identities[key]!=identity:raise ValueError('Conflicting Source identity evidence')
+                    if key:identities[key]=identity
+                    payload=identity.get('payload_sha256')
+                    if payload and value.get('source_id')!='source:'+payload:
+                        raise ValueError('Source payload identity conflict')
+                for child in value.values():check_identity(child)
+            elif isinstance(value,list):
+                for child in value:check_identity(child)
+        check_identity(prov.get('episode_source_lineage'))
         origins = episode_origins(record)
         if set(origins) != expected:
             raise ValueError('병합 원본 episode 목록이 완전하지 않습니다.')
         for i in range(count):
             part, proof = partition_evidence(prov, i)
-            combine_partitions([p, part])
-            lineage = prov['episode_source_lineage'][str(i)]
-            if p is not None:
-                validate_partition_episode(part, lineage, proof)
-                if part['split'] != p['split'] or not set(part['source_ids']).issubset(p['source_ids']):
-                    raise ValueError('Episode의 Source Partition이 데이터셋과 다릅니다.')
-            else:
-                if proof is not None or not prov['source_groups'][str(i)] or str(prov['source_groups'][str(i)]).startswith('UNKNOWN'):
-                    raise ValueError('미분할 데이터의 원본 Group 또는 분할 증거가 일치하지 않습니다.')
-                for source in unpartitioned_sources(lineage):
-                    key, identity = source['source_id'], source['source']
-                    if key in source_identities and source_identities[key] != identity:
-                        raise ValueError('같은 원본 Source의 식별 정보가 다릅니다.')
-                    source_identities[key] = identity
+            if part is not None:validate_partition(part)
+            # Historical allocations are preserved per episode, never merged into a new proof.
             origin = origins[str(i)]
             keys = [('dataset', origin['dataset_sha256'], origin['episode_index'])]
+            lineage=prov.get('episode_source_lineage',{}).get(str(i)) or {}
+            if lineage.get('kind')=='source_episode' and lineage.get('source_id'):
+                keys.append(('source_episode',lineage['source_id']))
             if origin.get('source_dataset') and origin.get('source_episode'):
                 keys.append(('episode', origin['source_dataset'], origin['source_episode']))
             if any(key in seen for key in keys):
                 raise ValueError('중복 episode가 포함되어 있습니다. 원본과 그 병합본을 함께 선택하지 마세요.')
             seen.update(keys)
-    partition = combine_partitions(partitions)
+    partition = None
     coordinates = merge_coordinates(records)
     if not tasks:
         raise ValueError('Task 정의가 없는 데이터셋은 병합할 수 없습니다.')

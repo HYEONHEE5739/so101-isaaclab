@@ -29,3 +29,47 @@ Calibration, 데이터 저장·DataLoader, 모델 Tensor 입출력, Loss·학습
 같은 내용을 반복하거나 수십 개 테스트·파일을 본문에 열거하지 않는다. 전체 SHA256, 긴 로그,
 보존 인벤토리는 핵심 판단에 필요한 경우에만 싣고 상세 증거는 경로로 남긴다. 실행하지 않은
 검증을 통과했다고 표현하지 않으며 Fixture·실제 학습·실물 성공을 명확히 구분한다.
+
+## 플랫폼 설계 및 확장 원칙
+
+본 프로젝트는 SO-101 전용 Pick & Place 도구가 아니라, Real2Sim 환경 구성부터 데이터 생성·LeRobot 학습·평가·배포를 연결하는 확장 가능한 Workflow 플랫폼을 지향한다.
+
+SO-101과 기존 Pick & Place는 최초 지원 구현 및 회귀 검증 대상으로 유지한다.
+
+모든 코드 변경 시 다음 원칙을 따른다.
+
+1. **책임 분리**: Builder는 환경 정보를, Task는 작업 의미를, Simulation은 실행 상태를, Workflow는 단계별 실행을, LeRobot은 표준 학습을 담당한다.
+2. **단방향 의존성**: 하위 모듈이 UI·Workflow·Training을 역참조하지 않도록 한다. 순환 의존성을 새로 도입하지 않는다.
+3. **최소 추상화**: 실제 사용 사례가 없는 범용 Framework, 중복 Manager, Registry, Wrapper, Factory를 만들지 않는다.
+4. **기존 기능 재사용**: 공식 Isaac Lab, MuJoCo, Mimic, LeRobot 기능과 현재 구현된 Adapter·Reader·Writer를 우선 활용한다.
+5. **Metadata 단일 해석**: 검증된 Workspace 정보를 Environment와 Task가 함께 사용하며, 각 단계에서 임의로 다시 해석하지 않는다.
+6. **Task 확장성**: 새로운 Task를 추가할 때 공통 Workflow·UI의 Task별 조건문을 수정하지 않는 구조를 지향한다.
+7. **Path 기반 실행**: 기존 Path 입력, 독립 Worker, Lock·Cancel·저장 수명 계약을 유지한다.
+8. **안전한 확장**: 기존 Robot Mapping, 좌표계, 물리, Calibration, 저장 데이터 및 장치 안전 계약을 임의로 변경하지 않는다.
+9. **Training 독립성**: LeRobot Dataset을 이용하는 일반 학습은 Workspace·Simulation·사용자 Task 파일을 필수로 요구하지 않는다.
+10. **변경 최소화**: 기능을 추가하기 위해 프로젝트 전체를 재구성하지 않는다. 실제 문제와 필요한 경계가 확인된 부분만 수정한다.
+
+구현 전에는 다음 문서를 확인한다.
+
+- `docs/architecture/ENGINEERING_PRINCIPLES.md`: 모듈 책임, 의존성 방향, 확장 원칙
+- `docs/architecture/TASK_SDK_DESIGN.md`: Metadata 기반 Task SDK 설계 및 지원 범위
+- `docs/architecture/SYSTEM_FLOW.md`: 실제 구현된 실행 흐름
+- `docs/architecture/WHERE_TO_EDIT.md`: 기능별 수정 시작점
+
+설계 문서와 실제 코드가 다르면 실제 코드를 확인하고 차이를 보고한다. 계획된 기능을 구현된 기능처럼 취급하지 않는다.
+
+### Task SDK 최소 구현 경계 (2026-10-22)
+
+- TaskContext에는 이미 생성된 Backend만 전달한다. Context에서 Workspace 재load·Engine 생성/reset/step/close·관측 캐시를 추가하지 않는다.
+- Task Template은 검증된 Workspace의 실제 ID와 명시적 기존 Task Definition만 사용한다. 이름으로 물체 역할·Robot ID·성공 조건을 추측하지 않는다.
+- 사용자 Python은 신뢰한 코드이며 명시 Worker 실행에서만 읽어 실행한다. 목록/템플릿 생성/탭 전환에서 import하지 않는다.
+- 새 Task의 기본 success/Mimic hook은 임의 성공으로 대체하지 않는다. 미지원은 명시적으로 실패시킨다.
+- 현재 TaskContext는 단일 MuJoCo만 지원한다. 기존 Backend 성공은 기하학적 배치 판정이며 Annotation의 StableGrasp/Place·Mimic 전체 계약으로 승격하지 않는다.
+
+## 현재 Script / Terms 경계 — 2026-10-23
+
+- 공개 문법·지원 범위는 `docs/task_sdk/SCRIPT_GUIDE.md`, 내부 Reset/상태/API는 `docs/architecture/TASK_SDK_DESIGN.md`를 따른다. 과거 outputs 보고서는 당시 검증 이력이며 현재 지원 범위를 대체하지 않는다.
+- `task_scripts.read_script/read_followup/followup_context/load_followup`은 선언/identity/실행 경계다. 실제 binding·Term 호출·Tracker/Event 상태는 기존 `SimulationAdapter.bind_followup/after_reset/record_frame`이 소유하며 Adapter가 파서를 역참조하지 않는다.
+- Scene-only Source는 성공 Gate 없이 Builder Pose/명시 Pose·Reset을 기록한다. 기존 목록형 Source/FOLLOWUP은 호환 계약을 유지한다. Backend가 Physics/Reset RNG, Adapter가 Episode seed stream·Tracker, factory 반환 객체가 환경/Episode별 사용자 상태를 소유한다. TaskContext는 이를 빌린다.
+- Annotation은 저장된 초기 상태/Signal·Manual 채택을, Mimic은 기존 reference 알고리즘/IK/생성을 소유한다. Native recipe의 Placement AND latched StableGrasp를 우회하거나 Blue strict IK 실패를 완화하지 않는다.
+- Python은 UI 목록/탭 조회에서 실행하지 않는다. 명시 Worker의 entry bytes SHA 확인만 보장하며 외부 import pin/sandbox를 주장하지 않는다. Native LeRobot 학습/Hub는 이 SDK와 독립이다.

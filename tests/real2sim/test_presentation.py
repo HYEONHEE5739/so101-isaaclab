@@ -9,7 +9,7 @@ from soarm101_lab.real2sim.storage import atomic
 from test_workspaces import published
 
 
-def session(tmp_path, monkeypatch, stage='replay'):
+def session(tmp_path, monkeypatch, stage='datagen'):
     root = tmp_path / 'presentation'
     atomic(root / 'config.json', {'stage': stage, 'mode': 'operator'})
     monkeypatch.setenv(module.SESSION_ENV, str(root))
@@ -81,8 +81,8 @@ def test_ui_operator_default_frames_and_controls(tmp_path, monkeypatch):
     assert panel.mode.currentData() == 'operator'
     root = session(tmp_path, monkeypatch); bridge = module.current()
     bridge.publish({'sim_side': np.zeros((10, 10, 3), np.uint8)}, force=True)
-    panel.stage.setCurrentIndex(panel.stage.findData('replay'))
-    panel.service.session = root; panel.busy = True; panel.active_stage = 'replay'
+    panel.stage.setCurrentIndex(panel.stage.findData('datagen'))
+    panel.service.session = root; panel.busy = True; panel.active_stage = 'datagen'
     panel.poll_preview()
     assert panel.feeds['sim_side'].pixmap() is not None
     assert panel.feeds['real_side'].isHidden()
@@ -152,8 +152,11 @@ def test_annotation_job_view_never_reads_preview_files(tmp_path,monkeypatch):
     text=panel.annotation_progress.summary.text()
     assert '저장 성공 4' in text and '실패 2' in text and '1분 05초' in text and 'frame 20/400' in text
     assert panel.controls['mark'].isEnabled() and panel.controls['skip'].isEnabled()
-    for stage in ('source','replay','datagen','sim_eval','real_eval'):
+    panel.busy=False
+    for stage in ('source','datagen','sim_eval','real_eval'):
+        panel.section.setCurrentIndex(1 if stage=='real_eval' else 0)
         panel.stage.setCurrentIndex(panel.stage.findData(stage))
+        panel.scene_cameras=('side','wrist');panel.configure_stage()
         assert panel.visible_feeds and panel.annotation_progress.isHidden()
     panel.busy=False;panel.close()
 
@@ -246,6 +249,8 @@ def test_datagen_ui_uses_identical_progress_for_both_backends(tmp_path,monkeypat
         Qt.TextFlag.TextWordWrap,panel.task_state.text())
     assert 'IK: pinocchio_dls' in panel.task_state.text()
     assert panel.task_state.height()>=bounds.height()+16
+    assert panel.task_state_scroll.height()<=160
+    assert panel.task_state_scroll.verticalScrollBar().maximum()>0
     panel.busy=False;panel.close()
 
 

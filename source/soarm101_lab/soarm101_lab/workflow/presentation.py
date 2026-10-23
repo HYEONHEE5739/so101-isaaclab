@@ -351,7 +351,7 @@ class RecorderControls:
 
 
 def annotation_keyboard(adapter):
-    """Standalone Isaac CLI controls for the same common replay/annotation loop."""
+    """Standalone Isaac CLI controls for the Annotation loop."""
     from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
     keyboard=Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=.1,rot_sensitivity=.1))
     adapter.annotation_paused=True

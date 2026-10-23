@@ -17,15 +17,10 @@ from .mimic_reference.datagen_info_pool import DataGenInfoPool
 
 
 def configuration(pick,place,seed=1):
-    cfg=MimicEnvCfg();cfg.datagen_config.seed=seed
-    cfg.subtask_configs={'tool0':[
-        SubTaskConfig(object_ref=pick,subtask_term_signal='grasp',subtask_term_offset_range=(0,10),
-            selection_strategy='nearest_neighbor_object',selection_strategy_kwargs={'nn_k':3},
-            action_noise=0.,num_interpolation_steps=5,num_fixed_steps=0,apply_noise_during_interpolation=False),
-        SubTaskConfig(object_ref=place,subtask_term_signal=None,subtask_term_offset_range=(0,0),
-            selection_strategy='nearest_neighbor_object',selection_strategy_kwargs={'nn_k':3},
-            action_noise=0.,num_interpolation_steps=5,num_fixed_steps=0,apply_noise_during_interpolation=False)]}
-    return cfg
+    # The native recipe owns its fixed semantics; both APIs share cfg assembly.
+    return subtask_configuration([
+        dict(object=pick,end_event='grasp',offset=(0,10),selection='nearest_neighbor_object'),
+        dict(object=place,end_event=None,offset=(0,0),selection='nearest_neighbor_object')],seed)
 
 
 _RNG_LOCK=threading.RLock()
@@ -170,3 +165,13 @@ async def execute_trial(adapter,generator):
     from .mimic_reference.config import TerminationTermCfg
     return await generator.generate(0,TerminationTermCfg(func=lambda env:torch.tensor([env.check_success()],device=env.device)),
         env_reset_queue=ResetMailbox(),export_demo=False)
+
+
+def subtask_configuration(subtasks, seed):
+    """Configure the SAME reference Generator; no new trajectory algorithm."""
+    cfg=MimicEnvCfg();cfg.datagen_config.seed=seed
+    cfg.subtask_configs={'tool0':[SubTaskConfig(object_ref=s.get('object'),subtask_term_signal=s.get('end_event'),
+        subtask_term_offset_range=tuple(s.get('offset',[0,0])),selection_strategy=s.get('selection','nearest_neighbor_object' if s.get('object') else 'random'),
+        selection_strategy_kwargs={'nn_k':s.get('nn_k',3)} if s.get('selection','nearest_neighbor_object' if s.get('object') else 'random')!='random' else {},
+        action_noise=0.,num_interpolation_steps=s.get('interpolation',5),num_fixed_steps=s.get('fixed',0),apply_noise_during_interpolation=False) for s in subtasks]}
+    return cfg

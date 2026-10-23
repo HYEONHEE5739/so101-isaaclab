@@ -16,7 +16,8 @@ def create_isaac(workspace: dict, scene: dict, coordinates: dict, *,
     from isaaclab.sensors import ContactSensorCfg
     from ..real2sim.workspaces.environment import make_config
     from ..real2sim.workspaces.tasks import configured
-    w=configured(workspace,scene['task_definition'],scene['active_object_ids'],backend='isaac',reset=scene['reset'])
+    w=configured(workspace,scene['task_definition'],scene['active_object_ids'],backend='isaac',reset=scene['reset'],
+                 **({'scene_objects':scene['object_ids']} if 'object_ids' in scene else {}))
     cfg=make_config(w,device,num_envs,coordinates=coordinates,overview_camera=overview_camera)
     cfg.sim.dt = 1 / (control_hz * cfg.decimation)
     cfg.events.reset_episode.params['randomization_seed']=randomization_seed

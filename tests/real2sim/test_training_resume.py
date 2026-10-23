@@ -89,6 +89,8 @@ def test_workflow_resume_plan_reuses_training_output(tmp_path, monkeypatch, back
     root, artifact = checkpoint(tmp_path)
     dest = tmp_path / 'policy/checkpoints/040000'
     dest.parent.mkdir(parents=True); shutil.move(root, dest)
+    from soarm101_lab.learning.datasets import inspect_dataset
+    artifact.update(inspect_dataset(artifact['path']))
     artifact.update(type='dataset', id='dataset', tasks=[{'task_id': 'pick', 'language_instruction': 'Pick the cube'}])
     registry=tmp_path/'workflow'
     monkeypatch.setattr('soarm101_lab.workflow.worker_request.stage_input',lambda *a,**kw:artifact)

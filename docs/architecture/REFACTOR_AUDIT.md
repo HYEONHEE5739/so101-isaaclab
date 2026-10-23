@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22. 과거 감사 기록입니다. 현재 코드는 [PROJECT_STRUCTURE](PROJECT_STRUCTURE.md)를 따릅니다.
+
 # SO-101 전체 구조 감사
 
 2026-10-18 · 기준 `7d02d9cf029c27aac3b2c03767e85961bfb650cb` (`main`). 시작 시 remote main도 동일했다.

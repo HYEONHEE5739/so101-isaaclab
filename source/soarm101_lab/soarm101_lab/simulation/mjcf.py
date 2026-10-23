@@ -190,7 +190,7 @@ def robot_xml(urdf, base_pose, physics_profile='isaac_matched', joint_offsets=No
 
 
 def build_scene(workspace=None, width=320, height=240, timestep=.002, decimation=10,
-                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, reset=None):
+                task_definition=None, full_workspace=False, physics_profile='isaac_matched', identity_sim=False, active_object_ids=None, reset=None, scene_objects=None):
     if (type(width) is not int or type(height) is not int or width < 1 or height < 1
             or type(decimation) is not int or decimation < 1
             or not np.isfinite(timestep) or not 0 < timestep <= .01):
@@ -201,20 +201,20 @@ def build_scene(workspace=None, width=320, height=240, timestep=.002, decimation
     if identity_sim:
         w = copy.deepcopy(w)
         w['profile'].pop('simulation_joint_offsets_rad', None)
-    if task_definition is not None or active_object_ids is not None or w.get('scene_configuration') or reset is not None:
+    if task_definition is not None or active_object_ids is not None or w.get('scene_configuration') or reset is not None or scene_objects is not None:
         if workspace is None:
             raise ValueError('Task Definition requires a published workspace')
         from ..real2sim.workspaces.tasks import configured
-        w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco',reset=reset)
+        w = configured(w, task_definition or w.get('task_definition'), active_object_ids, backend='mujoco',reset=reset,scene_objects=scene_objects)
     p, task = w['profile'], w['task']
     builder_scene = bool(w.get('manifest', {}).get('builder'))
-    review = task.get('mode') == 'geometry_review'
+    review = task.get('mode') in ('geometry_review','scene_recording')
     if not review and task['success']['relation'] not in ('contained_and_settled','inside_region_and_settled'):
         raise ValueError('Only contained_and_settled supported')
     pick, target = task['pick'], task['place']
     cube = p['objects'][pick] if not review else None
     cup = p['objects'][task['targets'][target]] if not review else None
-    if not builder_scene and (cube['shape'] != 'box' or cup['shape'] not in ('cup', 'cup_proxy')):
+    if not builder_scene and not review and (cube['shape'] != 'box' or cup['shape'] not in ('cup', 'cup_proxy')):
         raise ValueError('Phase 2 requires a box and a cup target')
     workspace_pose = transform(p['workspace']['T_world'])
     robot, limits, hashes = robot_xml(urdf, p['robot_base']['T_world'], physics_profile,
@@ -319,7 +319,7 @@ def build_scene(workspace=None, width=320, height=240, timestep=.002, decimation
         'workspace_T_world': workspace_pose.tolist(), 'pick': pick, 'target': target,
         'primary_camera': primary_camera, 'physics_timestep_s': timestep, 'control_timestep_s': timestep * decimation,
         'decimation': decimation, 'camera': {**copy.deepcopy(camera), 'resolution': [width, height], 'K': k.tolist()},
-        'task': copy.deepcopy(task), 'scene_subset': [pick, target, 'table', support, 'SO101'],
+        'task': copy.deepcopy(task), 'scene_subset': (list(task['dynamic'])+list(task['targets'])+['table',support,'SO101'] if task.get('mode')=='scene_recording' else [pick, target, 'table', support, 'SO101']),
         'task_definition': copy.deepcopy(w.get('task_definition')),
         'scene_configuration': copy.deepcopy(w.get('scene_configuration')),
         'full_workspace': full_workspace,

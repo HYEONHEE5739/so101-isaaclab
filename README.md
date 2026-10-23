@@ -2,10 +2,11 @@
 
 전체 코드를 이해하려면 [프로젝트 구조](docs/architecture/PROJECT_STRUCTURE.md) →
 [실제 실행 흐름](docs/architecture/SYSTEM_FLOW.md) → [기능별 수정 시작점](docs/architecture/WHERE_TO_EDIT.md)을 읽습니다.
-구조 감사와 변경 근거는 [리팩터링 전후](docs/architecture/REFACTOR_BEFORE_AFTER.md)에 있습니다.
+외부 HF Dataset 가져오기·공식 Policy fine-tuning/Resume·Hub 저장 구조는 [현재 실행 흐름](docs/architecture/SYSTEM_FLOW.md)에 있습니다.
+[리팩터링 전후](docs/architecture/REFACTOR_BEFORE_AFTER.md)는 Historical 기록입니다.
 
 현재 Workspace Workflow의 구조는 [ARCHITECTURE](docs/real2sim/ARCHITECTURE.md), 공통 HDF5/MP4 계약과
-두 엔진의 실행 방법은 [DATA_FLOW](docs/real2sim/DATA_FLOW.md), 기능별 수정 위치는 [PROJECT_MAP](docs/real2sim/PROJECT_MAP.md)가 기준입니다.
+현재 실행 방법은 [SYSTEM_FLOW](docs/architecture/SYSTEM_FLOW.md), 기능별 수정 위치는 [PROJECT_MAP](docs/real2sim/PROJECT_MAP.md)가 기준입니다.
 Isaac/MuJoCo Workspace DataGen은 같은 공식 Mimic 코어를 사용합니다. 아래의 `--task`만 사용하는 고정 씬 예제는 개발/호환용이며,
 Workspace Production 실행은 UI 또는 `workflow.py run/worker`, 기존 Mimic CLI의 `--workspace` 옵션을 사용합니다.
 

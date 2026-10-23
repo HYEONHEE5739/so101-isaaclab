@@ -1,3 +1,7 @@
+> Historical / Archived — 2026-10-22: 당시 설계·구현 기록입니다. 현재 구조는 [PROJECT_STRUCTURE](PROJECT_STRUCTURE.md)와 [SYSTEM_FLOW](SYSTEM_FLOW.md)를 따릅니다.
+
+> 2026-10-22 요구 변경: 독립 Replay Stage/UI/CLI/전용 도구를 삭제했다. 아래 원래 Replay 목표는 폐기하며, Annotation의 Simulation Playback과 Curation 영상 Preview는 유지한다.
+
 # SO-101 기능 단위 아키텍처 재설계안
 
 ## 2026-10-21 — Curation 자유 선별·분할 완료

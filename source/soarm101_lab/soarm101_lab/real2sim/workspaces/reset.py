@@ -32,8 +32,10 @@ class WorkspaceRandomizer:
         self.rng=np.random.default_rng(self.seed)
         self.sample_index = 0
 
-    def sample(self):
-        p,t=self.workspace['profile'],self.workspace['task'];r=t['reset']
+    def sample(self, *, object_ids=None, reset=None, fixed_positions=None):
+        p,t=self.workspace['profile'],self.workspace['task'];r=t['reset'] if reset is None else reset
+        names=t['dynamic'] if object_ids is None else list(object_ids)
+        if not set(names)<=set(t['dynamic']):raise ValueError('Reset requires active dynamic objects')
         if t.get('mode') == 'geometry_review':
             self.sample_index += 1
             return {'sampling': {'mode': 'fixed', 'seed': self.seed, 'sample_index': self.sample_index},
@@ -41,15 +43,15 @@ class WorkspaceRandomizer:
                     'joint_positions': copy.deepcopy(t['robot_initial_joint_rad'])}
         support=p['objects'][r['support_object']]
         center=np.array(support['T_workspace'])[:3,3];half=np.array(support['dimensions_m'])/2
-        placed={};sizes={}
+        placed=copy.deepcopy(fixed_positions or {});sizes={n:np.array(p['objects'][n]['dimensions_m']) for n in placed}
         mode = r.get('mode', 'uniform')
         if mode not in ('uniform', 'four_anchors'):
             raise ValueError('Unknown reset sampling mode')
         anchors = np.array([[-1,-1], [-1,1], [1,-1], [1,1]], dtype=float)
         anchor_order = self.rng.permutation(4) if mode == 'four_anchors' else None
-        if mode == 'four_anchors' and len(t['dynamic']) > 4:
+        if mode == 'four_anchors' and len(names) > 4:
             raise ValueError('Four-anchor sampling supports up to four objects')
-        for index, name in enumerate(t['dynamic']):
+        for index, name in enumerate(names):
             size=np.array(p['objects'][name]['dimensions_m']);limit=half[:2]-size[:2]/2-r['margin_m']
             if np.any(limit <= 0): raise ValueError('Object does not fit reset support: '+name)
             for _ in range(1000):
@@ -68,7 +70,7 @@ class WorkspaceRandomizer:
             else:raise ValueError('Unable to place non-overlapping objects in workspace')
             placed[name]=[*xy,float(center[2]+half[2]+size[2]/2+r['clearance_m'])];sizes[name]=size
         self.sample_index += 1
-        return {'sampling': {'mode': mode, 'seed': self.seed, 'sample_index': self.sample_index, 'xy_jitter_m': r.get('xy_jitter_m', 0)}, 'frame':'workspace','cube_positions':placed,'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
+        return {'sampling': {'mode': mode, 'seed': self.seed, 'sample_index': self.sample_index, 'xy_jitter_m': r.get('xy_jitter_m', 0)}, 'frame':'workspace','cube_positions':{n:placed[n] for n in names},'joint_positions':copy.deepcopy(t['robot_initial_joint_rad'])}
 
 
 def reset_workspace(env,env_ids,workspace,random_state=None,randomization_seed=None):

@@ -1,3 +1,5 @@
+> 2026-10-22 현재: Workspace는 Path로 선택하며 import CLI는 검증된 immutable Workspace를 생성합니다. Workflow Registry 등록은 삭제됐습니다. 아래 이전 변경 기록의 Registry 조작은 Historical입니다. 현재 흐름은 [SYSTEM_FLOW](../architecture/SYSTEM_FLOW.md)를 따릅니다.
+
 # Builder export를 기존 Real/Sim과 Workflow에서 사용
 
 ## Workflow에서 사용할 물체 선택 (2026-10-15)

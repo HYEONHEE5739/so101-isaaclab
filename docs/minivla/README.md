@@ -1,41 +1,7 @@
-# MiniVLA
+# MiniVLA 현재 지원 범위
 
-Qwen3-VL-2B NF4 → 16번째 language block → token adapter → Small Flow-DiT 4blocks.
-출력은40×6 canonical absolute joint targets, Euler8회,4action 실행 후 replan이다.
-기존 패키지/Worker/UI를 그대로 사용한다. Deterministic/별도 UV head/구형 presets는 제거했다.
+기준: 2026-10-22. 기존 모델 핵심과 `.pt` Checkpoint 추론은 유지한다. 신규 학습·학습 Resume는 비활성화됐고 전용 train.py/data.py는 삭제됐다.
 
-구조는 [DESIGN.md](DESIGN.md), 데이터는 [DATA_CONTRACT.md](DATA_CONTRACT.md),
-검증은 [VALIDATION.md](VALIDATION.md), 평가법은 [EVALUATION.md](EVALUATION.md).
-기존 Source→Train/Sim Eval UI 연결은 [MINIVLA_INTEGRATION.md](../real2sim/MINIVLA_INTEGRATION.md).
+실제 소유자는 learning/minivla의 config.py·backbone.py·head.py·checkpoint.py·policy.py다. Workflow 추론/guard는 workflow/policy.py, Sim/Real 평가는 workflow/evaluation.py가 연결한다. probe/profile은 모델 진단이며 학습 실행 대체 경로가 아니다.
 
-기존 conda 환경을 사용한다. 설치/버전 변경은 하지 않았다.
-
-```bash
-export PYTHONPATH="$PWD/source/soarm101_lab"
-python -m soarm101_lab.learning.minivla.profile \
-  --config source/soarm101_lab/soarm101_lab/learning/minivla/configs/default.json \
-  --out /tmp/minivla-profile.json
-# 같은 config의 adaptation만 qlora로 비교
-python -m soarm101_lab.learning.minivla.profile \
-  --config source/soarm101_lab/soarm101_lab/learning/minivla/configs/default.json \
-  --adaptation qlora --out /tmp/minivla-qlora-profile.json
-```
-
-Dataset은 train/val source group 분리와 train-only normalization을 요구한다.
-원본640×480은 유지하고 입력 때만256×256 letterbox를 적용한다. 저장 관절/목표를 재보정하지 않는다.
-
-```bash
-python -m soarm101_lab.learning.minivla.train --config /path/config.json \
-  --manifest /path/manifest.json --stats /path/statistics.json --out /path/new-policy
-# total steps를 늘린 같은 config로 optimizer/weights/step 복원
-python -m soarm101_lab.learning.minivla.train --config /path/extended-config.json \
-  --manifest /path/manifest.json --stats /path/statistics.json \
-  --out /path/new-policy --resume /path/new-policy/last.pt
-```
-
-`best.pt/last.pt`는 새 architecture_schema를 포함한다. 구형 MiniVLA checkpoint와
-head_type 설정은 지원하지 않는다. 원본 파일은 삭제/덮어쓰지 않는다. ACT/SmolVLA는 별도
-기존 Workflow 모델로 유지된다.
-
-실제 성공률은 충분한 학습과 rollout으로 확인해야 한다. 개발용2-step 합성 checkpoint는
-배포·작업 수행용이 아니다. 현재 결과와 한계는 VALIDATION.md에 적었다.
+확장 위치는 [기능별 수정 위치](../architecture/WHERE_TO_EDIT.md), 현재 학습 계약은 [실행 흐름](../architecture/SYSTEM_FLOW.md)을 본다. 이 디렉터리의 DESIGN/DATA_CONTRACT/VALIDATION/EVALUATION은 과거 설계·실험 기록으로 보존한다. 과거 학습 명령·Source Group 강제를 현재 기능으로 사용하지 않는다.

@@ -21,12 +21,12 @@ def panel(source,tmp_path,monkeypatch):
     app=QApplication.instance() or QApplication([])
     p=ui.WorkflowPanel(lambda *a:pytest.fail('No implicit execution'),root=tmp_path/'empty registry')
     p.workspace_path=str(source[1]['root'])
-    p.stage.setCurrentIndex(p.stage.findData('replay'))
+    p.stage.setCurrentIndex(p.stage.findData('annotate'))
     yield p
     p.timer.stop();p.close();app.processEvents()
 
 
-@pytest.mark.parametrize('stage',['replay','annotate'])
+@pytest.mark.parametrize('stage',['annotate'])
 def test_path_header_ready_and_run_have_no_id_or_main_thread_hdf5(panel,source,monkeypatch,stage):
     path,w,*_=source;main=threading.get_ident();opened=[];real=h5py.File
     def hdf(*a,**kw):
@@ -47,6 +47,27 @@ def test_path_header_ready_and_run_have_no_id_or_main_thread_hdf5(panel,source,m
     panel.execute()
     assert calls and calls[0][1]==str(path) and calls[0][2]==str(w['root'])
     assert not (panel.root/'artifacts').exists()
+
+
+def test_followup_selection_preview_and_worker_request_never_executes_in_ui(panel,source,tmp_path,monkeypatch):
+    path,w,*_=source;d=w['task_definition'];marker=tmp_path/'executed'
+    contract=tmp_path/'followup.py'
+    contract.write_text('FOLLOWUP = '+repr(dict(schema='so101.pick-place-followup/1',pick_object=d['pick_object_id'],
+        target_object=d['target_object_id'],mimic='pick_place/1'))+f'\nopen({str(marker)!r},"w").write("worker")\n')
+    panel.backend.setCurrentIndex(panel.backend.findData('mujoco'))
+    panel.storage_name.setText('followup_annotation');panel.select_data(str(path))
+    panel.task_python.setText(str(contract));until(lambda:panel.run.isEnabled())
+    assert not panel.task_tools.isHidden() and not panel.task_create.isEnabled()
+    assert panel.task_kind.isHidden() and not marker.exists()
+    assert panel.stage_options()['followup_python']==str(contract)
+    assert 'active_object_ids' not in panel.stage_options()  # inherit actual input Scene, not hidden UI selection
+    assert 'tool0' in panel.task_preview.text()
+    calls=[]
+    monkeypatch.setattr(panel.service,'run',lambda *args:calls.append(args) or {'no_artifact':True})
+    panel.run_worker=lambda fn,done:done(fn(lambda *a:None));panel.execute()
+    assert calls[0][3]['followup_python']==str(contract) and not marker.exists()
+    panel.task_clear.click();until(lambda:panel.run.isEnabled())
+    assert 'followup_python' not in panel.stage_options()
 
 
 def test_input_scan_heartbeat_latest_request_and_stage_change(panel,tmp_path,monkeypatch):
@@ -83,7 +104,7 @@ def test_late_header_cannot_enable_run_for_other_stage_or_after_close(panel,sour
         panel.stage.setCurrentIndex(panel.stage.findData('train'));release.set()
         until(lambda:panel._ready_future is None)
         assert panel.stage.currentData()=='train' and not panel.run.isEnabled()
-        panel.stage.setCurrentIndex(panel.stage.findData('replay'));panel.select_data(str(path))
+        panel.stage.setCurrentIndex(panel.stage.findData('annotate'));panel.select_data(str(path))
         panel.close()
         assert panel._input_future is None and panel._ready_future is None
     finally:release.set()

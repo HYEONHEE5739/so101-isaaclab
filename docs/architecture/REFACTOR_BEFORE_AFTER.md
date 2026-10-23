@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22: 당시 설계·구현 기록입니다. 현재 구조는 [PROJECT_STRUCTURE](PROJECT_STRUCTURE.md)와 [SYSTEM_FLOW](SYSTEM_FLOW.md)를 따릅니다.
+
 # 리팩터링 전후: 바뀐 책임과 유지한 구조
 
 ## 2026-10-19 단위6c-1 — Replay/Annotation 공통 Playback

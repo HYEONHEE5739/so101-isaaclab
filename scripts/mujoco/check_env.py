@@ -36,6 +36,9 @@ def forbidden_imports():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--task-python', help='Explicit trusted Task Python file; executed only in this worker')
+    parser.add_argument('--full-workspace', action='store_true', help='Explicitly include the full supported Workspace scene')
+    parser.add_argument('--scene-task-id', help='Explicit catalog scene/reset definition, independent of Python Task')
     parser.add_argument('--workspace', required=True, help='Immutable published workspace directory')
     parser.add_argument('--output', default='outputs/workflow_validation/mujoco_phase2_' + time.strftime('%Y%m%d_%H%M%S'))
     parser.add_argument('--renderer', choices=['none', 'egl', 'osmesa', 'software-egl'], default='none')
@@ -61,15 +64,52 @@ def main():
     try:
         import numpy as np
         from soarm101_lab.simulation.mujoco_backend import MujocoBackend
-        env = MujocoBackend(workspace=args.workspace, render_backend=args.renderer,
-                            width=args.width, height=args.height)
+        task = context = None
+        if args.task_python:
+            import runpy
+            task=runpy.run_path(str(Path(args.task_python).resolve()))
+            from soarm101_lab.real2sim.workspaces.tasks import validate_task_module
+            validate_task_module(task)
+        from soarm101_lab.real2sim.workspaces.package import load
+        from soarm101_lab.real2sim.workspaces.tasks import catalog
+        workspace=load(args.workspace)
+        definition=None
+        if args.scene_task_id:
+            definition=next((d for d in catalog(workspace) if d['task_id']==args.scene_task_id),None)
+            if definition is None:raise ValueError('Unknown explicit scene task: '+args.scene_task_id)
+        env = MujocoBackend(workspace=workspace, render_backend=args.renderer,
+                            width=args.width, height=args.height,
+                            task_definition=definition, full_workspace=args.full_workspace)
+
         report['mujoco_version'] = env.mj.__version__
         report['samples'].append(memory_sample('physics_loaded_renderer_not_created'))
         initial = env.reset(seed=args.seed)
         saved = env.get_initial_state()
+        if task is not None:
+            from soarm101_lab.simulation.task_context import TaskContext
+            context=TaskContext(env)
+            context.validate_bindings(task)
+            task['setup'](context)
+            def sample_task():
+                observation=task['observe'](context)
+                outcome=task['success'](context)
+                if not isinstance(outcome,(bool,np.bool_)):
+                    raise ValueError('Task success(ctx) must return bool')
+                return {'observation':observation, 'success':bool(outcome)}
+            report['task_python']={'task_id':task['TASK_ID'], 'instruction':task['INSTRUCTION'],
+                'initial':sample_task(), 'robot_identity_scope':'Optional asset reference/manifest hash equality; no hardware identity certification'}
+            for _ in range(args.steps):env.step(env.home)
+            report['task_python']['final']=sample_task()
+            report['scene_metadata']=env.metadata
+            report['forbidden_imports']=forbidden_imports()
+            assert not report['forbidden_imports']
+            report['status']='PASSED'
+            return
+
         report['initial_eef_pose_workspace'] = initial['eef_pose'].tolist()
         report['initial_object_pose_workspace'] = initial['object_poses'][env.metadata['pick']].tolist()
-        assert env.model.nu == 6 and env.model.ncam == 1
+        assert env.model.nu == 6
+        assert env.model.ncam == (len(env.metadata.get('cameras',{})) or 1)
         target = env.home.copy()
         target[0] += .1
         begin = time.perf_counter()
@@ -123,14 +163,15 @@ def main():
         assert not report['forbidden_imports']
         report['scene_metadata'] = env.metadata
         report['status'] = 'PASSED'
-    except Exception as exc:
+    except BaseException as exc:
         report.update(status='FAILED', error=f'{type(exc).__name__}: {exc}', forbidden_imports=forbidden_imports())
         raise
     finally:
         if env is not None:
             env.close()
+        report['environment_closed']=env is None or env.closed
         report['samples'].append(memory_sample('worker_after_close'))
-        (output / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False))
+        (output / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False, default=lambda v: v.tolist() if hasattr(v,'tolist') else str(v)))
         print(json.dumps({'status': report['status'], 'report': str(output / 'report.json'),
                           'phase25_gate': report['phase25_gate']}, ensure_ascii=False), flush=True)
 

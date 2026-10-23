@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 
-INPUT_FOLDERS={'replay':'sources','annotate':'sources','datagen':'annotations',
+INPUT_FOLDERS={'annotate':'sources','datagen':'annotations',
                'convert':'datagen','merge':'datasets','train':'datasets',
                'validate':'models','sim_eval':'models','real_eval':'models','hf_dataset':'datasets','hf_policy':'models'}
 ROOT=Path(__file__).resolve().parents[4]
@@ -26,7 +26,7 @@ def browse_directory(kind: str, current='', *, root=None) -> str:
     if kind in ('workspace','profile'):
         return str(ROOT/('outputs/real2sim/environments' if kind=='workspace' else 'outputs/real2sim'))
     bucket={'source':'sources','annotated':'annotations','datagen':'datagen','dataset':'datasets',
-            'policy':'models','replay':'evaluations','sim_eval':'evaluations','evaluation_dataset':'evaluations'}[kind]
+            'policy':'models','sim_eval':'evaluations','evaluation_dataset':'evaluations'}[kind]
     return str(Path(root) / bucket if root is not None else ROOT/'outputs/workflow'/bucket)
 
 
@@ -54,7 +54,6 @@ def input_format(path) -> str | None:
         if path.stat().st_size==0:return None
         if path.suffix.lower() in ('.hdf5','.h5'):return 'hdf5'
         if path.suffix=='.pt':return 'minivla-checkpoint'
-        if path.name=='report.json' and _marker(path.parent/'cross_replay.json',path.parent):return 'replay-report'
         return None
     if not path.is_dir():return None
     files,dirs=_files(path)
@@ -96,7 +95,7 @@ def discover_inputs(folder, *, category=None) -> list[dict]:
         found.setdefault(str(resolved),dict(path=str(resolved),format=fmt,category=kind,name=label))
     if root.is_file():
         fmt=input_format(root)
-        if fmt:add(root,fmt,'policy' if fmt in ('minivla-checkpoint','lerobot-policy') else 'report' if fmt=='replay-report' else 'dataset')
+        if fmt:add(root,fmt,'policy' if fmt in ('minivla-checkpoint','lerobot-policy') else 'dataset')
         return list(found.values())
     def visit(base):
         if base.with_name('.'+base.name+'.workflow-lock').exists():return
@@ -114,7 +113,6 @@ def discover_inputs(folder, *, category=None) -> list[dict]:
         if 'meta' in dirs and 'data' in dirs and _marker(base/'meta/info.json',root):
             add(base,'lerobot','dataset');return
         if 'evaluation_datasets.json' in files:add(base,'evaluation','dataset')
-        if {'report.json','cross_replay.json'}<=files:add(base/'report.json','replay-report','report')
         for name in sorted(files):
             p=base/name
             if p.suffix.lower() in ('.hdf5','.h5'):
@@ -135,7 +133,7 @@ def discover_inputs(folder, *, category=None) -> list[dict]:
 
 OUTPUT_FOLDERS = {'source':'sources','annotate':'annotations','datagen':'datagen',
                   'convert':'datasets','merge':'datasets','train':'models','validate':'validations','sim_eval':'evaluations','real_eval':'evaluations',
-                  'replay':'evaluations','hf_dataset':'evaluations','hf_policy':'evaluations'}
+                  'hf_dataset':'evaluations','hf_policy':'evaluations'}
 
 
 def validate_storage_name(value):

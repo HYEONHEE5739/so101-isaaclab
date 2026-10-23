@@ -238,9 +238,8 @@ def validate_dataset(reader,*,require_annotations=False):
         values,attrs,videos=reader.episode(name)
         episode_io.validate_episode(values,attrs,videos,reader.hz,require_annotations=require_annotations,video_root=reader.path.parent)
         if reader.args.get('source_partition'):
-            from .episodes import validate_partition_episode
-            validate_partition_episode(reader.args['source_partition'],_json(attrs.get('source_lineage')),
-                reader.args.get('source_partition_input'))
+            from .episodes import validate_partition
+            validate_partition(reader.args['source_partition'])
     return {'episodes':len(reader.names),'schema':episode_io.SCHEMA,'backend':reader.backend}
 
 
@@ -333,7 +332,7 @@ def inspect_dataset(kind, path, *, full=True):
             if args.get('validation_only'):
                 raise ValueError('Smoke data cannot enter the training workflow')
             if any(g.attrs.get('validation_only',False) for g in episodes):raise ValueError('Smoke episodes cannot enter the training workflow')
-            if kind == 'annotated' and any('obs/datagen_info/subtask_term_signals/grasp' not in g for g in episodes):
+            if kind == 'annotated' and any(not annotated_group(g) for g in episodes):
                 raise ValueError('Missing Mimic annotation')
             from .tasks import episode_definition
             definitions = [episode_definition(g, args) for g in episodes]
@@ -346,10 +345,9 @@ def inspect_dataset(kind, path, *, full=True):
                 if args['dataset_schema']!=SCHEMA:raise ValueError('Unknown episode dataset schema')
                 result.update(format=SCHEMA,backend=args.get('backend'),scene_configuration=args.get('scene_configuration'))
             if args.get('source_partition'):
-                from .episodes import validate_partition,validate_partition_episode
+                from .episodes import validate_partition
                 partition=validate_partition(args['source_partition'])
-                for g in episodes:validate_partition_episode(partition,json.loads(g.attrs.get('source_lineage','null')),args.get('source_partition_input'))
-                result.update(source_partition=partition,lineage_status='verified_partition',source_count=len(partition['source_ids']))
+                result.update(source_partition=partition,lineage_status='historical_partition',source_count=len(partition['source_ids']))
         coordinates = read_contract(p)
         if full and result.get('format')=='so101.common-episode/2':
             from .dataset import EpisodeDataset,validate_dataset
@@ -372,6 +370,13 @@ def inspect_dataset(kind, path, *, full=True):
     return result
 
 
+def annotated_group(group):
+    """Lightweight format marker; an empty Legacy annotation is NOT acceptance."""
+    if 'obs/datagen_info/subtask_term_signals/grasp' in group:return True
+    annotation=json.loads(group.attrs.get('annotation','{}'))
+    return annotation.get('schema')=='so101.event-annotation/1' and 'events' in annotation and 'signals' in annotation
+
+
 def episode_input_kind(path):
     """Read recorded generation/annotation evidence for the input file picker."""
     p = Path(path)
@@ -387,7 +392,7 @@ def episode_input_kind(path):
             args = json.loads(data.attrs.get('env_args', '{}'))
             generated = bool(data.attrs.get('generation_provenance'))
             episodes = [g for name, g in data.items() if name.startswith('demo_')]
-            annotated = bool(episodes) and all('obs/datagen_info/subtask_term_signals/grasp' in g for g in episodes)
+            annotated = bool(episodes) and all(annotated_group(g) for g in episodes)
     if generated or args.get('source_dataset') or args.get('generation_method'):
         return 'datagen'
     if args.get('evaluation_schema'):return 'evaluation_dataset'

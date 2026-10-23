@@ -51,27 +51,55 @@ def annotate_episode(adapter,reader,name,values,attrs,bridge=None):
                 reason='Stable grasp was not observed' if category=='grasp_failure' else 'Stable grasp observed; final placement condition not met'
         except (ValueError,RuntimeError) as exc:passed=False;reason=str(exc);category='simulation_failure'
     row={'episode':name,'physical_replay_passed':bool(passed),'category':category,'reason':reason,
-        'annotation_accepted':False,'grasp_confirmed':adapter.tracker.completed,'place_confirmed':bool(adapter.place_success()),
+        'annotation_accepted':False,'grasp_confirmed':bool(adapter.tracker and adapter.tracker.completed),'place_confirmed':bool(adapter.place_success()),
         'steps':adapter.step_index,'joint_l2_max_rad':metrics['joint_l2_max_rad'],
         'object_position_error_max_m':metrics['object_position_error_max_m'],'source_backend':reader.backend,
         'execution_backend':'mujoco' if hasattr(adapter,'backend') else 'isaac'}
+    processing=getattr(adapter,'processing_runtime',None)
+    if processing:
+        row.update(acceptance_source='script_terms',playback_completed=metrics['simulation_error'] is None and not skipped,task_accepted=bool(passed),events=dict(adapter.event_boundaries),
+                   native_acceptance=bool(adapter.tracker and adapter.tracker.completed and adapter.place_success()))
+        if category=='task_condition_not_met':row['reason']='Declared Annotation acceptance was not satisfied'
+        elif getattr(adapter,'processing_failure',None):row['reason']='Declared failure term: '+adapter.processing_failure
     prepared=None
+    if passed and processing:
+        spec=processing['contract']['declaration']['annotation']
+        manual=spec.get('manual_event') if not getattr(adapter,'annotation_auto',True) and len(marks)==1 and 0<marks[0]<len(values['actions'])-1 else None
+        missing=[key for key in getattr(adapter.buffer,'signal_names',[]) if key!=manual and adapter.event_boundaries.get(key,0)<=0]
+        if missing:
+            row.update(category='missing_event_boundary',reason='Required signals need a 0→1 boundary: '+', '.join(missing))
+            return row,None
     if passed:
+        try:
+            if not adapter.accept_followup():
+                row.update(category='task_condition_not_met',reason='Explicit Annotation acceptance term was not satisfied')
+                return row,None
+        except (ValueError,RuntimeError) as exc:
+            row.update(category='task_contract_error',reason=str(exc));return row,None
         exported_attrs={**attrs,'success':True,'success_source':'simulation_stable_grasp_and_place',
             'simulation_backend':row['execution_backend'],
             'annotation_method':'cross_backend_stable_contact_replay','source_group':attrs.get('source_group','UNKNOWN'),
             'physical_replay':json.dumps(row)}
+        if getattr(adapter,'followup_acceptance',None):
+            exported_attrs['success_source']='simulation_stable_grasp_and_place_and_followup_term'
+        if processing:
+            exported_attrs['success_source']='script_annotation_terms'
+            adapter.buffer.final_event_values={key:adapter.term_boolean(adapter.processing_events[key]) for key in adapter.buffer.final_events}
         prepared=adapter.buffer.finish(exported_attrs,success=adapter.check_success())
         if not getattr(adapter,'annotation_auto',True):
-            if len(marks)!=1 or not 0<marks[0]<len(values['actions'])-1:
+            event=processing['contract']['declaration']['annotation'].get('manual_event') if processing else 'grasp'
+            if event is None or len(marks)!=1 or not 0<marks[0]<len(values['actions'])-1:
                 row.update(annotation_accepted=False,reason='Mark one grasp boundary before placement')
                 prepared=None
             else:
                 signal=(np.arange(len(values['actions']))>=marks[0]).astype(np.uint8)[:,None]
-                prepared[0]['obs']['events']['grasp']=signal
-                prepared[0]['obs']['datagen_info']['subtask_term_signals']['grasp']=signal
-                annotation=json.loads(prepared[1]['annotation']);annotation.update(grasp=marks[0],method='manual_grasp_and_measured_place')
+                prepared[0]['obs']['events'][event]=signal
+                prepared[0]['obs']['datagen_info']['subtask_term_signals'][event]=signal
+                annotation=json.loads(prepared[1]['annotation'])
+                if annotation.get('schema','so101.common-subtasks/1')=='so101.common-subtasks/1':annotation.update(grasp=marks[0],method='manual_grasp_and_measured_place')
+                else:annotation['events'][event]=marks[0];annotation['method']='manual_event'
                 prepared[1]['annotation']=json.dumps(annotation)
+                if processing:row.update(manual_event=event,manual_boundary=marks[0])
     return row,prepared
 
 
@@ -102,6 +130,7 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
             return ordinal
 
     def begin(a,ordinal):
+        if a is not primary:a.bind_followup(getattr(primary,'followup_runtime',None))
         t=time.perf_counter();name=reader.names[ordinal]
         values,attrs,videos=reader.episode(name)
         with lock:
@@ -131,7 +160,7 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
             workers[index].update(state='saving' if prepared else 'failed',steps=row['steps'])
             workers[index]['completed']+=1;workers[index]['failures']+=int(prepared is None)
             category=row.get('category','simulation_failure')
-            if prepared is None and row['physical_replay_passed']:category='manual_boundary_missing'
+            if prepared is None and row['physical_replay_passed'] and category=='success':category='manual_boundary_missing'
             finished[ordinal]=dict(env_id=index,ready=prepared is not None,category=category,reason=row.get('reason',''))
         active_episodes.pop(a,None)
         completed.put((ordinal,row,prepared,video))
@@ -177,7 +206,7 @@ def run(primary,reader,output,bridge,writer,num_envs,*,input_validated=False):
                         if worker['state']=='saving':worker['state']='completed'
             finally:
                 if video:video.abort()
-            rows.append(row);print('[REPLAY] '+json.dumps(row),flush=True)
+            rows.append(row);print('[ANNOTATION] '+json.dumps(row),flush=True)
             atomic(output/'replay_progress.json',rows)
 
     executor=None;native=None;render=None;sim_step=None;stopped=False

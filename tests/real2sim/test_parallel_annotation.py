@@ -58,6 +58,8 @@ def test_vector_refills_short_episode_preserves_order_and_holds_idle(count,tmp_p
     native=SimpleNamespace(scene={'robot':robot},sim=SimpleNamespace(render=lambda:None,step=lambda:None),
                            device='cpu',num_envs=count,step=step)
     class Adapter:
+        bind_followup=adapters.SimulationAdapter.bind_followup
+        accept_followup=adapters.SimulationAdapter.accept_followup
         def __init__(self,native,index,*args):
             self.native=native;self.index=index;self.ids=list(range(6));self.seed=1
             self.annotation_auto=True;self.step_index=0;self.metrics={}

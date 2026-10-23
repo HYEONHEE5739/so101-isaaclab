@@ -1,8 +1,6 @@
 """Worker-only implementations. No model, simulation or hardware in the GUI process."""
 import json
 from pathlib import Path
-import subprocess
-import signal
 import sys
 import time
 
@@ -10,11 +8,10 @@ import numpy as np
 
 from ..simulation import environment as simulation_environment
 from .dataset import recording_provenance
-from .episodes import grasp_tracker, subtask_signals, training_coordinates
+from .episodes import grasp_tracker, subtask_signals
 from .worker_request import mujoco_request, prepare_mujoco
-from ..learning.minivla.config import MODEL_ROOT
 from ..real2sim.storage import atomic
-from ..real2sim.workspaces.package import ROOT, load, metadata
+from ..real2sim.workspaces.package import load, metadata
 
 
 def _preview(env, request, publish):
@@ -90,11 +87,16 @@ def source(request, output, publish, bridge):
         raise ValueError('Positive episode count/duration required')
     with simulation_environment.create_mujoco(**prepare_mujoco(request)) as env:
         publish = _preview(env, request, publish)
+        if request.get('_script_bindings'):
+            from ..simulation.task_context import TaskContext
+            TaskContext(env.backend).validate_bindings(request['_script_bindings'])
         leader = Leader(None, options['port'], options.get('calibration_file_name', 'so101_leader.json'),
                         model_hash=selected_precision['urdf_sha256'] if selected_precision else None)
         try:
             # Fail rendering preflight before opening the physical leader bus.
             env.observe()
+            if options.get('scene_only') and env.backend.workspace['task'].get('observation_cameras')!=['side','wrist']:
+                raise NotImplementedError('Scene-only Source currently requires existing Side/Wrist Common recording')
             leader.connect()
             mapper = getattr(leader, 'precision_mapper', None) or DEFAULT_MAPPER
             if selected_precision and getattr(mapper, 'profile', {}).get('id') != selected_precision['id']:
@@ -113,6 +115,9 @@ def source(request, output, publish, bridge):
                 if previous and 'simulation_model' not in previous:
                     # Keep a verified historical identity/legacy-mode contract unchanged.
                     provenance['coordinate_contract'].pop('simulation_model',None)
+            if options.get('script_identity'):
+                provenance['source_script'] = {**options['script_identity'], 'followup_contracts':request.get('_followup_contracts'),
+                                               'source_reference':request.get('_source_reference'), 'declaration':request.get('_source_declaration')}
             provenance['leader'] = leader.metadata if hasattr(leader, 'metadata') else {'fixture': True}
             common=storage=='common'
             dataset_path=(output/'dataset').with_suffix('.hdf5') if common else output/'dataset'
@@ -133,6 +138,9 @@ def source(request, output, publish, bridge):
             episode = writer.count
             while writer.count < count:
                 env.reset(options.get('seed', 0) + episode)
+                if options.get('scene_only'):
+                    from ..simulation.task_context import reset_objects
+                    reset_objects(env.backend,options['script_scene']['objects'],request['_scene_resets'])
                 episode += 1
                 recording.begin(env.backend.get_initial_state())
                 log_say(f'Episode {writer.count+1}',blocking=False)
@@ -171,14 +179,14 @@ def source(request, output, publish, bridge):
                     env.backend.step(target)
                     publish(observation['camera_images'], {'episode_index': writer.count + 1,
                             'episode_total': count, 'attempt': episode, 'steps': len(recording.rows),
-                            'task_id': options.get('task_definition', {}).get('task_id', ''),
-                            'task_signals': {'place': env.backend.is_success()},
+                            'task_id': (options.get('task_definition') or {}).get('task_id', ''),
+                            'task_signals': {} if options.get('scene_only') else {'place': env.backend.is_success()},
                             'leader_limit_status': '관절 한계 적용: ' + ', '.join(limited) if limited else '',
                             'remaining_s': max(0., end - time.monotonic())})
                     time.sleep(max(0., 1 / env.hz - (time.monotonic() - start)))
                 if not discard and not quit_recording and recording.rows:
                     provenance['leader_target_limits'] = {'policy':'URDF/backend target bounds', 'clamped_samples_by_joint':dict(zip(env.backend.metadata['joint_order'],limit_counts.tolist()))}
-                    outcome=dict(success=env.backend.is_success(),success_source='simulation_place_condition')
+                    outcome=dict(success=None if options.get('scene_only') else env.backend.is_success(),success_source='recording_only' if options.get('scene_only') else 'simulation_place_condition')
                     if common:name=source_stage.save_common(writer,recording,env,provenance,outcome)
                     else:
                         provenance['coordinates']=env.coordinates.metadata()
@@ -276,7 +284,7 @@ def rollout(request, output, publish, bridge, policy_factory=None):
                     env.backend.get_eef_pose()[:3,3],metric_state,signals['grasp'],signals['place'],initial_positions)
                 trace[-1]['object_metrics']=measured
                 publish(observed['images'][0], {'episode_index': episode + 1, 'episode_total': int(options.get('episodes', 1)),
-                        'steps': step + 1, 'task_id': options.get('task_definition', {}).get('task_id', ''),
+                        'steps': step + 1, 'task_id': (options.get('task_definition') or {}).get('task_id', ''),
                         'task_signals': signals, 'success': result['success']})
                 if result['success']:
                     break
@@ -338,7 +346,7 @@ def rollout_lerobot(request, output, publish, bridge):
                     env.backend.get_eef_pose()[:3,3],metric_state,signals['grasp'],signals['place'],initial_positions)
                 trace.append({'action': action.tolist(), 'success': signals['place'],'object_metrics':measured})
                 emit(side, {'steps': i + 1, 'episode_index': episode + 1, 'episode_total': int(options.get('episodes', 1)),
-                    'task_id': options.get('task_definition', {}).get('task_id', ''), 'task_signals': signals})
+                    'task_id': (options.get('task_definition') or {}).get('task_id', ''), 'task_signals': signals})
                 if signals['place']: break
             rows.append({'episode': episode, 'steps': len(trace), 'success': trace[-1]['success'],**measured,
                          'inference_latency_s':inference_latencies or None,'action_call_latency_s':latencies})
@@ -354,7 +362,7 @@ def rollout_lerobot(request, output, publish, bridge):
 
 
 def execute(request):
-    if request['stage'] in ('replay','annotate','datagen'):
+    if request['stage'] in ('annotate','datagen'):
         raise ValueError('Episode stages use workflow.operations.execute_request and the common dataset API')
     request = {**request, 'options': dict(request['options'])}
     if request['options'].get('remote_policy'):
@@ -369,9 +377,9 @@ def execute(request):
     if request.get('workspace'):
         workspace = load(request['workspace'])
         request['primary_camera'] = workspace['task'].get('observation_cameras', list(workspace['profile']['cameras']))[0]
-    if request.get('workspace') and request['stage'] in ('source', 'rollout'):
+    if request.get('workspace') and request['stage'] in ('source', 'rollout') and not request['options'].get('scene_only'):
         from ..real2sim.workspaces.tasks import configured
-        w = configured(load(request['workspace']), request['options'].get('task_definition'))
+        w = configured(workspace, request['options'].get('task_definition'))
         request['options'].setdefault('instruction', w['task_definition']['language_instruction'])
     mujoco_request(request['stage'], sys.executable, request.get('workspace', ''), request.get('input', ''),
                          request.get('config', ''), request.get('checkpoint', ''), request['renderer'], request['options'])
@@ -415,11 +423,11 @@ def execute(request):
             atomic(output / 'dataset/project_provenance.json', {'schema': 'so101.minivla-dataset/1',
                  'workspace': metadata(load(request['workspace'])), 'coordinates': coordinates.metadata(),
                  'backend': 'explicit_import', 'recipe': recipe, 'source': request['input']})
-            result = {'passed': True, 'dataset': str(output / 'dataset'), 'replay_available': False}
+            result = {'passed': True, 'dataset': str(output / 'dataset')}
         elif stage == 'rollout':
             from .evaluation import evaluate_sim
             from ..real2sim.workspaces.tasks import configured
-            w=load(request['workspace'])
+            w=workspace
             definitions=request['options'].get('tasks') or [configured(w,request['options'].get('task_definition'))['task_definition']]
             result=evaluate_sim(request,request['checkpoint'],w,definitions,bridge,publish)
 

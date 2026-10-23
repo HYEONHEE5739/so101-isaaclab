@@ -1,19 +1,20 @@
-"""Offline official held-out objectives. Never updates or rewrites a checkpoint."""
+"""Offline official objectives with explicit overlap warnings. Never updates or rewrites a checkpoint."""
 import json
 from pathlib import Path
 from .datasets import inspect_dataset, leakage
 
 
 def validate_inputs(checkpoint, dataset):
-    from ..workflow.policy import inspect_checkpoint
+    from .datasets import inspect_policy
     from ..representation import require_compatible
     from ..so101_dataset_contract import JOINT_SPACE
-    model=inspect_checkpoint(checkpoint)
+    model=inspect_policy(checkpoint)
     root=Path(model['path'])
     config=json.loads((root/'config.json').read_text())
     if config.get('type') not in ('act','smolvla'):raise ValueError('Offline Validation supports ACT/SmolVLA only')
     data=inspect_dataset(dataset)
-    require_compatible(data['coordinates'],model['coordinates'],JOINT_SPACE)
+    if data['coordinates'] is not None and model['coordinates'] is not None:
+        require_compatible(data['coordinates'],model['coordinates'],JOINT_SPACE)
     for name in ('policy_preprocessor.json','policy_postprocessor.json'):
         if not (root/name).is_file():raise ValueError('Saved processor missing: '+name)
         for step in json.loads((root/name).read_text())['steps']:
@@ -37,7 +38,6 @@ def validate_inputs(checkpoint, dataset):
     saved=root/'train_config.json'
     if saved.is_file():
         train_root=json.loads(saved.read_text()).get('dataset',{}).get('root')
-        if train_root and Path(train_root).resolve()==Path(data['path']):raise ValueError('Train and Validation must be different Dataset Paths')
         info=Path(train_root or '')/'meta/info.json'
         if train_root and info.is_file() and json.loads(info.read_text())['fps']!=data['format']['fps']:
             raise ValueError('Checkpoint training FPS differs from Validation')
@@ -88,6 +88,7 @@ def evaluate_checkpoint(checkpoint, dataset, output, *, device='cpu', batch_size
         if train_config.is_file():
             saved=json.loads(train_config.read_text()); train_path=saved.get('dataset',{}).get('root')
             if train_path and Path(train_path).is_dir():evidence=leakage(inspect_dataset(train_path),data)
+        for warning in evidence['warnings']:print('[VALIDATION WARNING] '+warning,flush=True)
         report.update(model_type=cfg.type,checkpoint_sha256=fingerprint(root),dataset_sha256=fingerprint(Path(data['path'])),
                       leakage=evidence,horizon=cfg.action_delta_indices,normalization='saved checkpoint processor; no validation statistics fitted',
                       metric=('act_vae_training_objective' if cfg.type=='act' and cfg.use_vae else 'act_l1_objective') if cfg.type=='act' else 'smolvla_flow_objective',

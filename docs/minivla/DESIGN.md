@@ -1,3 +1,5 @@
+> Historical / Archived — 2026-10-22. 과거 모델 설계/실험 기록이며 삭제된 학습 명령은 실행 안내가 아닙니다. 현재 지원 범위는 [README](README.md)를 따릅니다.
+
 # MiniVLA Flow-DiT
 
 기존 `soarm101_lab.learning.minivla` 자체를 교체했다. 별도 버전 모델/호환 wrapper는 없다.

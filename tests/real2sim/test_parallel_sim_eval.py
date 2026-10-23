@@ -131,26 +131,6 @@ def test_legacy_evaluation_folder_is_discovered_without_rewriting(evaluated_data
     assert fingerprint(path)==before and not (path/'evaluation_datasets.json').exists()
 
 
-def test_failed_evaluation_playback_does_not_bypass_source_gate(evaluated_dataset,tmp_path):
-    from soarm101_lab.workflow.replay import run as replay
-    reader=EpisodeDataset(evaluated_dataset/'failure/dataset.hdf5')
-    values,_,_=reader.episode(reader.names[0])
-    class Adapter:
-        backend=SimpleNamespace(step=lambda command:None)
-        workspace={'task':{'dynamic':['cube']}}
-        base_world=np.eye(4)
-        buffer=SimpleNamespace(abort=lambda:None)
-        tracker=SimpleNamespace(completed=False)
-        def restore(self,*args):self.step_index=0
-        def state(self):return {'joint_pos':np.zeros(6),'object_poses':{'cube':np.eye(4)}}
-        def update_grasp(self):self.step_index+=1
-        def check_success(self):return False
-        def place_success(self):return False
-        def failure_category(self):return 'grasp_failure'
-    assert not replay(Adapter(),reader,tmp_path/'strict')['passed']
-    result=replay(Adapter(),reader,tmp_path/'playback',evaluation_playback=True)
-    assert result['passed'] and not result['episodes'][0]['recorded_evaluation_success']
-    assert not result['episodes'][0]['replay_task_success']
 
 
 def test_private_video_relocation_preserves_published_episode(tmp_path,episode):

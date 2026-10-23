@@ -13,7 +13,7 @@ from soarm101_lab.so101_joint_mapping import JOINTS, RobotCoordinates
 from soarm101_lab.workflow.paths import output_location
 from soarm101_lab.workflow.worker_request import stage_input
 from soarm101_lab.utils.artifact_identity import fingerprint
-from soarm101_lab.workflow.lerobot_merge import combine_partitions, merged_provenance, validate_inputs, merge
+from soarm101_lab.workflow.lerobot_merge import merged_provenance, validate_inputs, merge
 
 
 def converted_record(root, name, split='train'):
@@ -84,14 +84,10 @@ def test_unpartitioned_multitask_merge_preserves_absent_roles_and_original_evide
     assert [a, b, c] == before
 
 
-@pytest.mark.parametrize('mismatch', ['mixed_role','lineage','payload','group','episode_partition','model_hash','physics','scene_hash','scene_physics'])
+@pytest.mark.parametrize('mismatch', ['payload','model_hash','physics','scene_hash','scene_physics'])
 def test_unpartitioned_merge_rejects_invalid_evidence_and_physical_changes(tmp_path, mismatch):
     a, b = [unpartitioned_record(tmp_path, n) for n in ('a', 'b')]
-    if mismatch == 'mixed_role':b['provenance']['source_partition'] = converted_record(tmp_path, 'b')['provenance']['source_partition']
-    elif mismatch == 'lineage':b['provenance']['episode_source_lineage']['0'] = None
-    elif mismatch == 'payload':b['provenance']['episode_source_lineage']['0']['segments'][0]['source']['source']['payload_sha256'] = 'different'
-    elif mismatch == 'group':b['provenance']['source_groups']['0'] = 'UNKNOWN'
-    elif mismatch == 'episode_partition':b['provenance']['episode_source_partitions'] = {'0':converted_record(tmp_path,'b')['provenance']['source_partition']}
+    if mismatch == 'payload':b['provenance']['episode_source_lineage']['0']['segments'][0]['source']['source']['payload_sha256'] = 'different'
     elif mismatch == 'model_hash':b['coordinates']['simulation_model']['sha256'] = 'broken'
     elif mismatch == 'physics':
         model = b['coordinates']['simulation_model'];model['robot_model']['collision'] = 'changed'
@@ -108,7 +104,7 @@ def test_partition_union_keeps_original_per_episode_proofs_and_overlap_detection
     a, b = [converted_record(tmp_path, n) for n in ('a', 'b')]
     for r in (a, b):r['sha256'] = r['id'] * 64
     summary = validate_inputs([a, b])
-    assert summary['episodes'] == 2 and summary['partition']['source_ids'] == ['a_train', 'b_train']
+    assert summary['episodes'] == 2 and summary['partition'] is None
     p = merged_provenance([a, b], summary)
     assert p['episode_source_lineage']['1'] == b['provenance']['episode_source_lineage']['0']
     assert p['episode_source_partitions']['1'] == b['provenance']['source_partition']
@@ -120,16 +116,14 @@ def test_partition_union_keeps_original_per_episode_proofs_and_overlap_detection
     assert validate_inputs([merged, c])['episodes'] == 3
 
 
-@pytest.mark.parametrize('mismatch', ['role','features','fps','workspace','model','canonical','lineage','partition_assignment','duplicate'])
+@pytest.mark.parametrize('mismatch', ['features','fps','workspace','model','canonical','partition_assignment','duplicate'])
 def test_incompatible_or_duplicate_inputs_are_rejected(tmp_path, mismatch):
     a, b = [converted_record(tmp_path, n) for n in ('a', 'b')]
-    if mismatch == 'role':b = converted_record(tmp_path, 'b', 'val')
-    elif mismatch == 'features':b['format']['features']['action']['shape'] = [5]
+    if mismatch == 'features':b['format']['features']['action']['shape'] = [5]
     elif mismatch == 'fps':b['format']['fps'] = 60
     elif mismatch == 'workspace':b['provenance']['workspace'] = {'other':'workspace'}
     elif mismatch == 'model':b['coordinates']['simulation_model'] = {'different_collision':'hash'}
     elif mismatch == 'canonical':b['provenance']['canonical_coordinates']['gripper_open_rad'] *= 2
-    elif mismatch == 'lineage':b['provenance']['episode_source_lineage'] = {}
     elif mismatch == 'partition_assignment':
         b['provenance']['source_partition'] = copy.deepcopy(a['provenance']['source_partition'])
         b['provenance']['source_partition']['sha256'] = 'broken'
@@ -137,11 +131,13 @@ def test_incompatible_or_duplicate_inputs_are_rejected(tmp_path, mismatch):
     with pytest.raises(ValueError):validate_inputs([a, b])
 
 
-def test_conflicting_assignments_and_groups_cannot_be_unioned(tmp_path):
-    a, b = [converted_record(tmp_path, n)['provenance']['source_partition'] for n in ('a', 'b')]
-    b['inventory']['b_val']['groups'] = ['a/train']
-    b['sha256'] = evidence_hash({k:v for k,v in b.items() if k!='sha256'})
-    with pytest.raises(ValueError, match='leakage'):combine_partitions([a, b])
+def test_historical_roles_and_missing_lineage_do_not_gate_merge(tmp_path):
+    a = converted_record(tmp_path, 'a')
+    b = converted_record(tmp_path, 'b', 'val')
+    assert validate_inputs([a,b])['partition'] is None
+    b['provenance'].pop('source_partition')
+    b['provenance']['episode_source_lineage'] = {}
+    assert validate_inputs([a,b])['episodes'] == 2
 
 
 def write_video_dataset(record, value):
@@ -237,3 +233,9 @@ def test_real_unpartitioned_multitask_merge_uses_shared_coordinates_and_task_ind
     from soarm101_lab.learning.datasets import inspect_dataset
     assert inspect_dataset(output)['format']['total_episodes']==3
     for record in records:assert stage_input('train',record['path'])['format']['total_episodes']==1
+
+
+def test_known_exact_source_episode_duplicate_rejected(tmp_path):
+    a,b=[converted_record(tmp_path,n) for n in ('a','b')]
+    b['provenance']['episode_source_lineage']=copy.deepcopy(a['provenance']['episode_source_lineage'])
+    with pytest.raises(ValueError,match='중복 episode'):validate_inputs([a,b])

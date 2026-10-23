@@ -77,7 +77,7 @@ def test_storage_name_keyboard_input_reaches_worker_and_stays_per_stage(panel,mo
 
 
 
-@pytest.mark.parametrize('stage',['source','replay','annotate','datagen','convert','train','sim_eval','hf_dataset','hf_policy','real_eval'])
+@pytest.mark.parametrize('stage',['source','annotate','datagen','convert','train','sim_eval','hf_dataset','hf_policy','real_eval'])
 def test_every_stage_has_required_name_and_passes_it_to_worker(panel,monkeypatch,stage):
     from PyQt6.QtWidgets import QMessageBox
     alerts=[];calls=[];received=[]

@@ -44,7 +44,7 @@ def test_same_origin_has_independent_named_splits_and_no_copies(collection):
     assert fingerprint(origin)==before and not (root/'artifacts').exists()
 
 
-@pytest.mark.parametrize('stage',['replay','annotate','datagen','convert','train'])
+@pytest.mark.parametrize('stage',['annotate','datagen','convert','train'])
 def test_collection_selection_is_path_and_stage_local(collection,stage):
     app,p,root,origin=collection
     folder=origin.parent.parent/'분할_1';export_splits(origin,folder,.7)
@@ -59,13 +59,13 @@ def test_collection_selection_is_path_and_stage_local(collection,stage):
 
 def test_overlapping_stage_paths_are_independent_and_restored(collection):
     app,p,root,origin=collection
-    for stage in ('replay','annotate','convert'):
+    for stage in ('annotate','convert'):
         p.stage.setCurrentIndex(p.stage.findData(stage));p.select_data(origin)
         until(lambda:p.inputs.currentData()==str(origin))
         assert p.input_selections[stage]=={'path':str(origin)}
-    p.stage.setCurrentIndex(p.stage.findData('replay'))
+    p.stage.setCurrentIndex(p.stage.findData('annotate'))
     until(lambda:p.inputs.currentData()==str(origin))
-    assert set(p.input_folders)=={'replay','annotate','convert'}
+    assert set(p.input_folders)=={'annotate','convert'}
     saved=json.loads((root/'ui.json').read_text())
     assert all('artifact' not in v for v in saved['input_selections'].values())
 

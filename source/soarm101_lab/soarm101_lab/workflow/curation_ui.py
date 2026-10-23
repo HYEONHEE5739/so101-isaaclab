@@ -659,11 +659,18 @@ class CurationDialog(QDialog):
         self.release_reader();self.trajectory.row=None;self.list.setEnabled(False);self.load_button.setEnabled(False);self.export_button.setEnabled(False)
         self.info.setText('데이터 분석 중…')
         def read():
-            rows=analyze(path)
+            selected=Path(path)
+            if selected.is_dir() and not (selected/'manifest.json').is_file() and not (selected/'evaluation_datasets.json').is_file():
+                candidates=sorted([*selected.glob('*.hdf5'),*selected.glob('*.h5')])
+                if not candidates and (selected/'origin').is_dir():
+                    candidates=sorted([*(selected/'origin').glob('*.hdf5'),*(selected/'origin').glob('*.h5')])
+                if len(candidates)==1:selected=candidates[0]
+            resolved=str(selected)
+            rows=analyze(resolved)
             from .dataset import episode_input_kind
-            kind='evaluation_dataset' if any(r.get('evaluation_outcome') for r in rows) else episode_input_kind(path)
-            return rows,kind
-        self.run_job(read,lambda result:self.loaded(path,result[0],result[1]))
+            kind='evaluation_dataset' if any(r.get('evaluation_outcome') for r in rows) else episode_input_kind(resolved)
+            return resolved,rows,kind
+        self.run_job(read,lambda result:self.loaded(*result))
     def loaded(self,path,rows,kind=None):
         try:
             self.rows=rows;self.path=path;self.excluded=set();self.split_plan=None;self.split_generation+=1

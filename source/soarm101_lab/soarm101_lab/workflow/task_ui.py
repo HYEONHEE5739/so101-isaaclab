@@ -5,6 +5,42 @@ from PyQt6.QtWidgets import QWidget, QFormLayout, QComboBox, QLineEdit, QListWid
 from ..real2sim.workspaces.tasks import catalog, object_ids, active_objects, workspace_key
 
 
+def task_file_preview(path):
+    """Read static declarations only; never import or evaluate user Python."""
+    import ast
+    from pathlib import Path
+    with Path(path).expanduser().open('rb') as stream:
+        source = stream.read(1024 * 1024 + 1)
+    if len(source) > 1024 * 1024:
+        raise ValueError('Task Python exceeds the 1 MiB preview limit')
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise ValueError(f'Task Python syntax: {exc}') from exc
+    declarations = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in ('TASK_ID', 'INSTRUCTION'):
+                    declarations[target.id] = str(node.value.value)
+    hooks = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    success = hooks.get('success')
+    if success is None:
+        raise ValueError('Task success(ctx) function is missing; implement the generated template')
+    body = [n for n in success.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str))]
+    def unfinished(node):
+        if isinstance(node, ast.Pass): return True
+        if isinstance(node, ast.Raise):
+            value = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            return isinstance(value, ast.Name) and value.id == 'NotImplementedError'
+        if isinstance(node, (ast.Expr, ast.Return)):
+            return (isinstance(node.value, ast.Constant) and node.value.value is Ellipsis) or (isinstance(node.value, ast.Name) and node.value.id == 'NotImplemented')
+        return False
+    if not body or all(unfinished(n) for n in body):
+        raise ValueError('Task success(ctx) is not implemented; edit the generated Python first')
+    return declarations
+
+
 class TaskSelector(QWidget):
     changed = pyqtSignal()
 
@@ -32,6 +68,13 @@ class TaskSelector(QWidget):
         self.instruction.textEdited.connect(self.edit_instruction)
         self.scope.currentIndexChanged.connect(lambda: None if self.loading else self.changed.emit())
         self.multiple.itemChanged.connect(lambda: None if self.loading else self.changed.emit())
+
+    def set_python_task_mode(self, enabled):
+        self.layout().labelForField(self.preset).setText('Scene 구성 (명시)' if enabled else 'Task preset')
+        for widget in (self.pick, self.target, self.instruction, self.scope, self.multiple):
+            visible = not enabled and (widget not in (self.scope, self.multiple) or getattr(self, 'stage', None) in ('sim_eval', 'real_eval'))
+            widget.setVisible(visible)
+            self.layout().labelForField(widget).setVisible(visible)
 
     def configure(self, workspace, stage, inherited=None, active_object_ids=None):
         same_workspace = getattr(self,'workspace_identity',None)==workspace_key(workspace)

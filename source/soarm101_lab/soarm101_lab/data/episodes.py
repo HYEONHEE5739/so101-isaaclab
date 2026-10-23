@@ -337,12 +337,21 @@ def validate_episode(values,attrs,videos,hz,*,require_annotations=False,video_ro
             raise ValueError('Invalid world object pose: '+name)
         if name not in initial['rigid_object'] or not np.allclose(pose_matrix(initial['rigid_object'][name]['root_pose'][0]),pose_matrix(poses[0]),atol=1e-5):
             raise ValueError('Initial object state differs from first observation: '+name)
-    signal=info.get('subtask_term_signals',{}).get('grasp')
-    if require_annotations and signal is None:raise ValueError('Mimic grasp annotation missing')
-    if signal is not None:
-        signal=np.asarray(signal).reshape(-1)
-        if len(signal)!=n or not np.isin(signal,[0,1]).all() or signal[0]!=0 or np.any(np.diff(signal.astype(int))<0):raise ValueError('Grasp must have one increasing 0→1 boundary')
-        if require_annotations and not np.any(signal):raise ValueError('Grasp boundary missing')
+    signals=info.get('subtask_term_signals',{})
+    annotation=json.loads(attrs.get('annotation','{}'))
+    event_annotation=annotation.get('schema')=='so101.event-annotation/1'
+    if event_annotation:
+        if annotation.get('frame_count')!=n or not isinstance(annotation.get('events'),dict):raise ValueError('Invalid Event annotation metadata')
+        for name,index in annotation['events'].items():
+            if type(index)is not int or not 0<=index<n:raise ValueError('Event boundary outside Episode')
+    required=annotation.get('signals',[]) if event_annotation else ['grasp']
+    if event_annotation and (not isinstance(required,list) or any(not isinstance(k,str) or not k.isidentifier() for k in required) or len(set(required))!=len(required)):
+        raise ValueError('Invalid declared annotation signals')
+    if (require_annotations or event_annotation) and any(key not in signals for key in required):raise ValueError('Mimic annotation signal missing')
+    for key,value in signals.items():
+        signal=np.asarray(value).reshape(-1)
+        if len(signal)!=n or not np.isin(signal,[0,1]).all() or signal[0]!=0 or np.any(np.diff(signal.astype(int))<0):raise ValueError('Signal requires one increasing 0→1 boundary: '+key)
+        if (require_annotations or event_annotation) and key in required and not np.any(signal):raise ValueError('Annotation boundary missing: '+key)
     if set(videos)!={'side_cam','wrist_cam'}:raise ValueError('Side and Wrist videos required')
     from ..utils.async_video_writer import VideoFrames
     for camera,spec in videos.items():
@@ -487,7 +496,7 @@ def recording_args(provenance,manifest):
         workspace=p['workspace'],workspace_path=p.get('workspace_path'),control_dt=1/float(manifest['control_hz']),
         action_semantics=SEMANTICS,so101_coordinates=p['coordinate_contract'],scene_configuration=p['scene_configuration'],
         canonical_coordinates=copy.deepcopy(p['coordinates']),
-        task_definitions=[s['task_definition']],grasp_object=s['pick'],place_bin=s['target'],source_partition=p.get('source_partition'),
+        task_definitions=[s['task_definition']] if s.get('task_definition') else [],grasp_object=s.get('pick'),place_bin=s.get('target'),source_partition=p.get('source_partition'),
         source_partition_input=p.get('source_partition_input'),legacy_provenance=copy.deepcopy(p),ee_frame='robot_base',root_quaternion_order='wxyz',
         observation_timestamp_path='obs/timestamp',object_telemetry={n:{'path':'obs/object_poses/'+n,'frame':'world',
             'pose_format':'xyz_wxyz','timestamp_path':'obs/timestamp'} for n in s['dynamic_objects']},

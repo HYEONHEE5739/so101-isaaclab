@@ -56,7 +56,7 @@ class EvaluationRecorder:
         policy_provenance=minivla_root(checkpoint)/'project_provenance.json'
         if policy_provenance.is_file():
             coordinates=json.loads(policy_provenance.read_text()).get('coordinates',coordinates)
-        definition = selected(workspace)
+        definition = workspace.get('task_definition') or selected(workspace)
         scene = configured(workspace, definition, workspace['task']['dynamic'], backend)['scene_configuration']
         provenance = {'backend': backend, 'workspace': metadata(workspace), 'workspace_path': str(workspace['root']),
             'coordinate_contract': contract, 'coordinates':coordinates, 'scene_configuration': scene,
@@ -97,19 +97,22 @@ class EvaluationRecorder:
             for k,v in a.buffer.initial['rigid_object'].items()}
         row['failure_reason'] = '' if row['success'] else row.get('failure_reason') or a.failure_category()
         row['failure_diagnostics']=a.failure_diagnostics()
-        row['success_condition'] = 'backend placement geometry and rest; stable grasp recorded separately'
+        row.setdefault('success_condition', 'backend placement geometry and rest; stable grasp recorded separately')
         row['episode_dataset'] = str(self.writer.path) if self.writer else None
         row['recording_available']=self.recording
         if not self.recording:
             row['recording_unavailable_reason']='Legacy camera contract: numeric/video collection requires Side/Wrist 640x480'
             return row
-        attrs = {'success':bool(row['success']), 'success_source':'simulation_place_condition',
+        attrs = {'success':bool(row['success']), 'success_source':row.get('success_source','simulation_place_condition'),
             'failure_reason':row['failure_reason'], 'evaluation':json.dumps(row), 'source_group':'evaluation',
             'task_definition':json.dumps(self.writer.args['task_definitions'][0]),
             'scene_configuration':json.dumps(self.writer.args['scene_configuration'])}
         if self.initial_physics_state is not None:attrs['legacy_initial_state']=json.dumps(self.initial_physics_state)
         try:
             prepared=a.buffer.finish(attrs,success=a.check_success())
+            if row.get('success_source')=='user_task_success':
+                # Preserve physical grasp/place signals but never label them user-task annotation.
+                prepared[1].pop('annotation',None)
             if self.writers is not None:
                 a.buffer.video.relocate(self.writer.path.parent)
                 for spec in prepared[2].values():spec['file']=str(a.buffer.video.folder/Path(spec['file']).name)
@@ -233,30 +236,68 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
     root=Path(request['output']);root=root.parent if root.suffix=='.json' else root
     root.mkdir(parents=True,exist_ok=True)
     if (root/'evaluation_datasets.json').exists():raise FileExistsError(root/'evaluation_datasets.json')
-    progress=EvaluationProgress(episodes*len(definitions),count,getattr(bridge,'config',{}).get('started_at') if bridge else None)
+    from .worker_request import validate_task_request,load_task_python
+    from ..real2sim.workspaces.tasks import validate_task_scene
+    validate_task_request(request.get('stage','sim_eval'),backend,opts)
+    task,task_identity=load_task_python(opts)
+    if task is not None:
+        if len(definitions)!=1:raise ValueError('One explicit Scene is required for a Task Python evaluation')
+        validate_task_scene(task,configured(workspace,definitions[0],opts.get('active_object_ids',workspace['task']['dynamic']),backend))
+        atomic(root/'task_identity.json',task_identity)
+    suite=request.get('_script_evaluations') or []
+    if suite and backend != 'mujoco': raise ValueError('Script Evaluation currently supports MuJoCo only')
+    original_definitions=definitions
+    if suite:
+        definitions=[original_definitions[row['scene']] for row in suite]
+    task_counts=[row['episodes'] for row in suite] if suite else [episodes]*len(definitions)
+    offsets=np.cumsum([0]+task_counts[:-1]).tolist()
+    custom_task=task is not None and task.get('TASK_CONTRACTS') is None
+    result_definitions=([dict(task_id=task['TASK_ID'],language_instruction=task['INSTRUCTION'],success_condition={'relation':'user_task_success'} if custom_task else definitions[0]['success_condition'])] if task else definitions)
+    if suite:
+        result_definitions=[dict(task_id=row['id'],language_instruction=row['instruction'],success_condition={'relation':'user_task_success'} if row.get('contract','task.success/1')=='task.success/1' else definitions[i]['success_condition']) for i,row in enumerate(suite)]
+    progress=EvaluationProgress(sum(task_counts),count,getattr(bridge,'config',{}).get('started_at') if bridge else None)
     if bridge:
         bridge.progress_provider=progress.progress;bridge.status()
     policy,pre,post=load_policy(path,coordinate_contract(workspace),device)
     if hasattr(policy,'policy') and hasattr(policy.policy,'checkpoint_step'):
         atomic(root/'selected_checkpoint.json',{'path':str(path),'step':policy.policy.checkpoint_step})
-    writers={};stopped=False;fatal=None;scene_reports=[]
+    writers={};stopped=False;fatal=None;scene_reports=[];configured_scenes=[]
     active=opts.get('active_object_ids',workspace['task']['dynamic'])
     try:
         for task_index,definition in enumerate(definitions):
-            w=configured(workspace,definition,active,backend)
+            episodes=task_counts[task_index]
+            entry=suite[task_index] if suite else None
+            reset=entry.get('reset') if entry else None
+            scene_ids=opts.get('script_scenes',[None]*len(original_definitions))[entry['scene']] if entry else None
+            active=([n for n in workspace['task']['dynamic'] if n in scene_ids] if scene_ids is not None
+                    else opts.get('active_object_ids',workspace['task']['dynamic']))
+            if entry:
+                custom_task=entry.get('contract','task.success/1')=='task.success/1'
+                task={'TASK_ID':entry['id'],'INSTRUCTION':entry['instruction'],
+                      'OBJECT_IDS':entry.get('objects',[definition['pick_object_id'],definition['target_object_id']]),
+                      'CAMERA_IDS':entry.get('cameras',list(workspace['profile']['cameras'])),
+                      'success':entry['success_fn']}
+                for hook in ('setup','observe'):
+                    if hook in entry: task[hook]=entry[hook]
+                task_identity={**opts['script_identity'],'task_id':entry['id'],'instruction':entry['instruction']}
+            w=configured(workspace,definition,active,backend,reset=reset,scene_objects=scene_ids)
+
+            configured_scenes.append(w['scene_configuration'])
+            outcome_definition=result_definitions[task_index]
             native=None;parent=None;backends=[];executor=None
-            scene_root=root if len(definitions)==1 else root/'tasks'/definition['task_id']
+            scene_root=root if len(definitions)==1 else root/'tasks'/outcome_definition['task_id']
             try:
                 if backend=='mujoco':
                     from .worker_request import prepare_mujoco
                     from ..simulation.environment import create_mujoco
                     from ..simulation.mujoco_backend import MujocoBackend
                     env_request={**request,'checkpoint':str(path),'options':{**opts,'task_definition':definition,
-                        'instruction':definition['language_instruction'],'active_object_ids':active}}
+                        'instruction':definition['language_instruction'],'active_object_ids':active,'scene_objects':scene_ids,**({'scene_reset':reset} if reset is not None else {})}}
                     hz=getattr(getattr(policy,'policy',None),'control_hz',None)
                     parent=create_mujoco(**prepare_mujoco(env_request,hz=hz,workspace=workspace))
-                    backends=[parent.backend]+[MujocoBackend(render_backend=parent.backend.render_backend,
-                        shared_backend=parent.backend) for _ in range(count-1)]
+                    backends=[parent.backend]
+                    for _ in range(count-1):
+                        backends.append(MujocoBackend(render_backend=parent.backend.render_backend,shared_backend=parent.backend))
                     hz=parent.hz
                     executor=ThreadPoolExecutor(max_workers=count,thread_name_prefix='eval-mujoco')
                     scene_reports.append(parent.backend.metadata)
@@ -282,10 +323,10 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                         for field in ('_grasp_completed','_gripper_opened_once'):
                             if hasattr(native,field):getattr(native,field).zero_()
                     metrics=[{} for _ in range(size)];initial=[];traces=[[] for _ in range(size)]
-                    guards=[];done=[False]*size;latencies=[[] for _ in range(size)]
+                    guards=[];done=[False]*size;latencies=[[] for _ in range(size)];contexts=[]
                     try:
                         for i in range(size):
-                            episode=first+i;global_index=task_index*episodes+episode
+                            episode=first+i;global_index=offsets[task_index]+episode
                             views=None
                             if backend=='mujoco':backends[i].reset(seed=seed+global_index)
                             else:
@@ -296,11 +337,19 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                                 scene_root,hz,seed+global_index if backend=='mujoco' else seed,
                                 index=i,writers=writers,contact_views=views)
                             recorders.append(recorder);a=recorder.adapter
+                            if task is not None:
+                                from ..simulation.task_context import TaskContext
+                                ctx=TaskContext(backends[i],adapter=a);ctx.validate_bindings(task)
+                                if request.get('_script_bindings'):
+                                    bindings=request['_script_bindings']
+                                    ctx.validate_bindings({**bindings,'OBJECT_IDS':scene_ids} if scene_ids is not None else bindings)
+                                if task.get('setup'):task['setup'](ctx)
+                                contexts.append(ctx)
                             state=a.state();states.append(state)
                             initial.append({n:state['object_poses'][n][:3,3].copy() for n in active})
                             bounds=a.backend.limits if backend=='mujoco' else a.limits
                             guards.append(ActionGuard(bounds[:,0],bounds[:,1],[2.]*6,hz))
-                            progress.begin(i,episode,definition['task_id'])
+                            progress.begin(i,episode,outcome_definition['task_id'])
                         # Completed slots keep their final measured target for the rest of the group.
                         holds=[s['joint_pos'].copy() for s in states]
                         for step in range(limit):
@@ -308,7 +357,7 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                             images=[r.adapter.images() for r in recorders]
                             begin=time.perf_counter()
                             commands=batch_actions(policy,pre,post,[s['joint_pos'] for s in states],images,
-                                                   definition['language_instruction'],device).astype(np.float64)
+                                                   outcome_definition['language_instruction'],device).astype(np.float64)
                             duration=time.perf_counter()-begin
                             for i,r in enumerate(recorders):
                                 if done[i]:continue
@@ -324,13 +373,20 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                                 native.step(action)
                             for i,r in enumerate(recorders):
                                 if done[i]:continue
-                                a=r.adapter;a.update_grasp();states[i]=a.state();success=bool(a.place_success())
+                                a=r.adapter;a.update_grasp();states[i]=a.state();success=bool(a.place_success());placement_success=success
+                                if task is not None:
+                                    if task.get('observe'):task['observe'](contexts[i])
+                                    task_success=task['success'](contexts[i])
+                                    if not isinstance(task_success,(bool,np.bool_)):raise ValueError('Task success(ctx) must return bool')
+                                    if not custom_task and bool(task_success)!=success:
+                                        raise ValueError('Declared Pick & Place evaluation contract differs from Task success')
+                                    success=bool(task_success)
                                 measured=object_metrics(active,definition['pick_object_id'],
                                     {n:states[i]['object_poses'][n][:3,3] for n in active},states[i]['eef_pose'][:3,3],
-                                    metrics[i],a.tracker.completed,success,initial[i])
+                                    metrics[i],a.tracker.completed,placement_success,initial[i])
                                 traces[i].append(dict(step=step+1,**measured));progress.workers[i]['steps']=step+1
                                 if success or step+1==limit:
-                                    reason='' if success else a.failure_category()
+                                    reason='' if success else ('task_condition_not_met' if custom_task else a.failure_category())
                                     if backend=='mujoco':details=a.backend.success_details()
                                     else:
                                         from ..real2sim.workspaces.environment import task_success_details
@@ -339,15 +395,25 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                                     checks={label:bool(details[key]) for label,key in [('높이','height_ok'),('컵 안쪽 벽','wall_ok'),('정지 속도','speed_ok')]}
                                     failed=[k for k,v in checks.items() if not v]
                                     from .presentation import failure_label
-                                    row=dict(task_id=definition['task_id'],language_instruction=definition['language_instruction'],
-                                        episode=first+i,evaluation_index=task_index*episodes+first+i,env_id=i,steps=step+1,
+                                    if custom_task:
+                                        checks={'user_task_success':success};failed=[] if success else ['user_task_success']
+                                    row=dict(task_id=outcome_definition['task_id'],language_instruction=outcome_definition['language_instruction'],
+                                        episode=first+i,evaluation_index=offsets[task_index]+first+i,env_id=i,steps=step+1,
                                         success=success,failure_reason=reason,checks=checks,failure_conditions=failed,
                                         outcome_reason='컵 안 정지 조건 충족' if success else failure_label(reason)+' · 미충족: '+', '.join(failed),
                                         action_call_latency_s=latencies[i],object_metric_trace=traces[i],**measured)
+                                    if task is not None:
+                                        row['task_python']=task_identity
+                                        row['evaluation_success_contract']='task.success/1' if custom_task else 'so101.placement/1'
+                                        row['task_success_observation']=success
+                                    if custom_task:
+                                        row.update(outcome_reason='User task condition satisfied' if success else 'User task condition not met before timeout',
+                                            success_source='user_task_success',success_condition='user success(ctx); physical grasp/place diagnostics are separate',
+                                            scene_diagnostics_task_id=definition['task_id'])
                                     r.finish(row,a.tracker,limit);progress.finish(i,row);done[i]=True
                                     holds[i]=states[i]['joint_pos'].copy()
                                     atomic(root/f'episode_{row["evaluation_index"]:04d}.json',{'summary':row,'trace':traces[i]})
-                                    log_evaluation(progress.rows,definition['task_id'])
+                                    log_evaluation(progress.rows,outcome_definition['task_id'])
                             if bridge:
                                 bridge.steps=step+1
                                 bridge.details['task_signals']={'grasp':recorders[0].adapter.tracker.completed,'place':bool(recorders[0].adapter.place_success())}
@@ -381,12 +447,19 @@ def evaluate_sim(request, path, workspace, definitions, bridge=None, publish=Non
                                              'episodes':writer.count})
         result=dict(schema='so101.sim-evaluation/1',passed=fatal is None,stopped=stopped,backend=backend,
             workspace=metadata(workspace),checkpoint_path=str(path),num_envs=count,evaluation_seed=seed,
-            task_definitions=definitions,scene_configurations=[configured(workspace,d,active,backend)['scene_configuration'] for d in definitions],
+            task_definitions=definitions,scene_configurations=configured_scenes,
             scenes=scene_reports,datasets=datasets,episodes=progress.rows,**progress.progress(),
             **evaluation_distribution({'path':str(minivla_root(path))},workspace,active),
-            metrics_per_task=evaluation_metrics(definitions,progress.rows,True),
+            metrics_per_task=evaluation_metrics(result_definitions,progress.rows,True),
             task_success='backend geometric placement and rest; grasp/drop measured separately',
             batching='reset group together; completed slots hold until group ends; one shared policy')
+        if task is not None and not suite:
+            result.update(task_python=task_identity,evaluation_success_contract='task.success/1' if custom_task else 'so101.placement/1')
+            if custom_task:result['task_success']='user success(ctx); scene grasp/drop/placement remain separate diagnostics'
+        if suite:
+            result['execution_script']=opts['script_identity']
+            result['evaluation_tasks']=opts.get('script_evaluations',[])
+            result['evaluation_success_contract']='per-task; see episodes'
         if fatal:result['error']=f'{type(fatal).__name__}: {fatal}'
         atomic(root/'evaluation_datasets.json',result)
         atomic(root/'report.json',result)

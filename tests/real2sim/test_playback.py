@@ -24,6 +24,8 @@ def drive(iterator,step):
 def adapter_fixture(values):
     events=[];q=np.zeros(6);tick=[0]
     class Adapter:
+        bind_followup=adapters.SimulationAdapter.bind_followup
+        accept_followup=adapters.SimulationAdapter.accept_followup
         workspace={'task':{'dynamic':['cube']}};base_world=np.eye(4);step_index=0;previous=np.zeros(6)
         def restore(self,*args):events.append('restore');q[:]=0;self.step_index=0;tick[0]=0
         def state(self):events.append('state');return {'joint_pos':q.copy(),'object_poses':{'cube':np.eye(4)}}
@@ -106,6 +108,8 @@ def test_playback_iterator_with_annotation_vector_scheduler(episode,count,tmp_pa
         robot.data.joint_pos[:]=commands;tick[0]+=1
     native.step=step
     class Adapter:
+        bind_followup=adapters.SimulationAdapter.bind_followup
+        accept_followup=adapters.SimulationAdapter.accept_followup
         base_world=np.eye(4);workspace={'task':{'dynamic':['cube']}}
         def __init__(self,native,index,*args):
             self.native=native;self.index=index;self.ids=list(range(6));self.seed=1047;self.metrics={};self.annotation_auto=True
@@ -138,36 +142,27 @@ def test_playback_iterator_with_annotation_vector_scheduler(episode,count,tmp_pa
         if count>1:assert starts[count]==2 and starts[count]<ends[0]
 
 
-@pytest.mark.parametrize('failure',['restore','step','interrupt','status'])
-def test_replay_failure_cleanup_keeps_worker_owned_environment(episode,failure,tmp_path):
-    from soarm101_lab.workflow.replay import run
-    values,attrs,videos,*_=episode;a,events=adapter_fixture(values)
-    a.buffer=SimpleNamespace(abort=lambda:events.append('abort'));a.tracker=SimpleNamespace(completed=False)
-    a.check_success=lambda:False;a.place_success=lambda:False;a.failure_category=lambda:'grasp_failure'
-    a.close=lambda:pytest.fail('Playback cannot close its caller-owned engine')
-    reader=SimpleNamespace(names=['demo_0'],episode=lambda name:(values,attrs,videos),path=tmp_path/'input.hdf5',hz=30,backend='mujoco',args={})
-    def fail(*args):raise ValueError('restore failed')
-    def step(*args):
-        if failure=='interrupt':raise KeyboardInterrupt()
-        raise RuntimeError('step failed')
-    if failure=='restore':a.restore=fail
-    elif failure!='status':a.backend.step=step
-    bridge=None
-    if failure=='status':
-        bridge=SimpleNamespace(details={},before_step=lambda:None,status=lambda:fail())
-    if failure in ('restore','interrupt'):
-        with pytest.raises(KeyboardInterrupt if failure=='interrupt' else ValueError):run(a,reader,tmp_path,bridge)
-    else:
-        result=run(a,reader,tmp_path,bridge)
-        assert result['episodes'][0]['category']=='simulation_failure' and not result['passed']
-    assert events[-1]=='abort' and events.count('abort')==1
 
 
 def test_playback_has_no_stage_or_engine_imports():
     subprocess.run([sys.executable,'-c',"import sys;import soarm101_lab.simulation.playback;assert not any(k.startswith(('soarm101_lab.workflow','mujoco','isaaclab','omni','pxr','torch','PyQt6')) for k in sys.modules)"],check=True)
 
 
-@pytest.mark.parametrize('stage,other',[('replay','annotation'),('annotation','replay')])
+@pytest.mark.parametrize('stage,other',[('annotation','replay')])
 def test_stage_imports_are_independent_and_do_not_construct_engines(stage,other):
     code=f"import sys,importlib;importlib.import_module('soarm101_lab.workflow.{stage}');assert 'soarm101_lab.workflow.{other}' not in sys.modules;assert not any(k.startswith(('mujoco','isaaclab','omni','pxr','torch','PyQt6')) for k in sys.modules)"
     subprocess.run([sys.executable,'-c',code],check=True)
+
+
+
+
+def test_removed_replay_is_not_exposed_or_dispatched(tmp_path):
+    import importlib.util
+    from soarm101_lab.workflow.operations import STAGES
+    from soarm101_lab.workflow.worker_request import MUJOCO_STAGES,EPISODE_STAGES
+    from soarm101_lab.workflow.stages import SIM_STAGES,PREVIEW_STAGES
+    from soarm101_lab.workflow.unified import execute
+    assert all('replay' not in stages for stages in (STAGES,MUJOCO_STAGES,EPISODE_STAGES,SIM_STAGES,PREVIEW_STAGES))
+    assert importlib.util.find_spec('soarm101_lab.workflow.replay') is None
+    with pytest.raises(ValueError,match='Unsupported common episode stage'):
+        execute({'stage':'replay'})

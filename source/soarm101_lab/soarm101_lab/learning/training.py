@@ -2,7 +2,95 @@
 from pathlib import Path
 import json
 
-def resume_checkpoint(path, artifact, options):
+def validate_credentials(value):
+    """Reject credential values before requests/configs/logs are persisted."""
+    import re
+    if isinstance(value,dict):
+        for key,child in value.items():
+            if key.lower() in ('token','hf_token','password','api_key','secret'):
+                raise ValueError('Use existing environment/Hub login for credentials')
+            validate_credentials(child)
+    elif isinstance(value,(list,tuple)):
+        for child in value:validate_credentials(child)
+    elif isinstance(value,str) and (re.search(r'\bhf_[A-Za-z0-9]{20,}',value) or
+            re.search(r'--(?:[\w]+\.)*(?:token|hf_token|password|api_key|secret)=',value)):
+        raise ValueError('Do not put credentials in workflow options')
+
+
+def native_arguments(options):
+    """Forward upstream flags verbatim; reserve publication/identity/storage controls."""
+    import shlex
+    args=options.get('native_args',[])
+    if isinstance(args,str):args=shlex.split(args)
+    if not isinstance(args,list) or not all(isinstance(v,str) and v.startswith('--') and '=' in v for v in args):
+        raise ValueError('native_args must contain --key=value arguments')
+    reserved=('dataset.repo_id','dataset.root','dataset.revision','dataset.episodes',
+              'output_dir','config_path','resume','policy.type','policy.path','policy.pretrained_path',
+              'policy.push_to_hub','policy.repo_id','policy.device','save_checkpoint')
+    seen=set()
+    for arg in args:
+        key=arg[2:].split('=',1)[0]
+        if key in reserved:raise ValueError('Native option owned by workflow: '+key)
+        if key in seen:raise ValueError('Duplicate native option: '+key)
+        if any(v in ('token','hf_token','password','api_key','secret') for v in key.lower().split('.')):
+            raise ValueError('Use existing environment/Hub login for credentials')
+        seen.add(key)
+    return args
+
+
+def training_command(artifact, options, output, *, python=None, owned_lock=None):
+    """Return official CLI argv and config without executing or writing files."""
+    import sys
+    validate_credentials(options)
+    from .datasets import installed_policies
+    architecture=options.get('architecture','smolvla')
+    if architecture=='minivla':raise ValueError('MiniVLA 신규 학습/학습 Resume는 비활성화되어 있습니다.')
+    if architecture not in installed_policies():raise ValueError('Policy not in installed LeRobot factory: '+architecture)
+    mode=options.get('training_mode') or ('resume' if options.get('resume_checkpoint') else 'finetune' if options.get('base_model') or architecture=='smolvla' else 'scratch')
+    if mode not in ('scratch','finetune','resume'):raise ValueError('Unknown training_mode')
+    if mode=='resume' and not options.get('resume_checkpoint'):raise ValueError('Resume requires a complete local checkpoint')
+    if mode!='resume' and options.get('resume_checkpoint'):raise ValueError('Resume checkpoint conflicts with training_mode')
+    if mode=='scratch' and options.get('base_model'):raise ValueError('Scratch cannot use base_model')
+    if mode=='resume' and options.get('base_model'):raise ValueError('Resume cannot use a fine-tuning base_model')
+    info=artifact['format'];dataset=Path(artifact['path']);hub=artifact.get('hub')
+    config={'dataset':{'repo_id':hub['repo_id'] if hub else options.get('dataset_repo_id',info.get('repo_id','local/so101')),'root':str(dataset)},
+        'policy':{'type':architecture,'device':options.get('device','cuda'),'push_to_hub':False},
+        'output_dir':str(output),'steps':int(options.get('steps',10000)),'batch_size':int(options.get('batch_size',8)),
+        'num_workers':int(options.get('num_workers',0)),'save_checkpoint':True,'save_freq':int(options.get('save_freq',1000)),
+        'wandb':{'enable':False},'eval_freq':0}
+    if hub:
+        if options.get('dataset_repo_id') not in (None,hub['repo_id']):raise ValueError('Dataset repo_id conflicts with the Hub input')
+        config['dataset']['revision']=hub['revision']
+    overrides=options.get('policy_options',{})
+    if not isinstance(overrides,dict) or set(overrides)&{'type','push_to_hub','repo_id','device','pretrained_path'}:
+        raise ValueError('Invalid policy_options; workflow owns type/device/publication')
+    config['policy'].update(overrides)
+    base=options.get('base_model') or ('lerobot/smolvla_base' if architecture=='smolvla' and mode=='finetune' else None)
+    if mode=='finetune' and not base:raise ValueError('Fine-tuning requires base_model')
+    if base and (Path(base)/'config.json').is_file():
+        if json.loads((Path(base)/'config.json').read_text()).get('type')!=architecture:
+            raise ValueError('Selected Policy type differs from pretrained model configuration')
+    camera_keys=[k for k,v in info['features'].items() if k.startswith('observation.') and v.get('dtype') in ('video','image')]
+    config['rename_map']=options.get('rename_map',{k:'observation.images.camera'+str(i+1) for i,k in enumerate(camera_keys)} if architecture=='smolvla' else {})
+    if not isinstance(config['rename_map'],dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in config['rename_map'].items()):
+        raise ValueError('rename_map must map observation key strings to strings')
+    path=Path(output).with_name(Path(output).name+'.train_config.json')
+    argv=[python or options.get('python') or sys.executable,'-m','lerobot.scripts.lerobot_train','--config_path='+str(path)]
+    if base:
+        config['policy']['pretrained_path']=str(base)
+        argv.append('--policy.path='+str(base))
+        argv.extend('--policy.'+k+'='+json.dumps(v) for k,v in config['policy'].items() if k not in ('type','pretrained_path'))
+    if mode=='resume':
+        saved,config,step=resume_checkpoint(options['resume_checkpoint'],artifact,options,owned_lock=owned_lock)
+        config={**config,'resume':True,'output_dir':str(output),'steps':int(options.get('steps',config['steps']))}
+        argv=[argv[0],'-m','lerobot.scripts.lerobot_train','--config_path='+str(saved),'--resume=true',
+              '--output_dir='+str(output),'--steps='+str(config['steps']),'--policy.push_to_hub=false']
+        if native_arguments(options):raise ValueError('Resume restores saved settings; native_args must be empty')
+    argv+=native_arguments(options)
+    return argv,config,path
+
+
+def resume_checkpoint(path, artifact, options, *, owned_lock=None):
     """Resolve a full LeRobot checkpoint without modifying its saved state."""
     root = Path(path).expanduser().resolve()
     if root.name == 'train_config.json':
@@ -14,7 +102,9 @@ def resume_checkpoint(path, artifact, options):
     required = [model / 'train_config.json', model / 'config.json', model / 'model.safetensors']
     required += [state / name for name in (
         'training_step.json', 'optimizer_param_groups.json', 'optimizer_state.safetensors',
-        'rng_state.safetensors', 'scheduler_state.json')]
+        'rng_state.safetensors')]
+    if (model/'train_config.json').is_file() and json.loads((model/'train_config.json').read_text()).get('scheduler') is not None:
+        required.append(state/'scheduler_state.json')
     missing = [str(p) for p in required if not p.is_file()]
     if missing:
         raise ValueError('불완전한 resume checkpoint: ' + ', '.join(missing))
@@ -26,13 +116,14 @@ def resume_checkpoint(path, artifact, options):
         raise ValueError('선택한 모델과 checkpoint 모델이 다릅니다.')
     if int(options.get('steps', config['steps'])) <= step:
         raise ValueError(f'총 목표 steps는 checkpoint step {step}보다 커야 합니다.')
-    from ..workflow.policy import inspect_checkpoint
+    from .datasets import inspect_policy
     from ..representation import require_compatible
     from ..so101_dataset_contract import JOINT_SPACE
     from .datasets import inspect_dataset
-    record=inspect_checkpoint(model)
+    record=inspect_policy(model,owned_lock=owned_lock)
     selected=inspect_dataset(artifact['path'])
-    require_compatible(record['coordinates'],selected['coordinates'],JOINT_SPACE)
+    if record['coordinates'] is not None and selected['coordinates'] is not None:
+        require_compatible(record['coordinates'],selected['coordinates'],JOINT_SPACE)
     previous=record.get('provenance',{}).get('source_dataset_sha256')
     if previous:
         from ..utils.artifact_identity import fingerprint
@@ -57,70 +148,47 @@ def resume_output(path, architecture='smolvla'):
 
 def train(train_path, options, output):
     import subprocess
-    import sys
-    from ..so101_dataset_contract import write_contract, JOINT_SPACE
+    from ..so101_dataset_contract import write_contract
     from ..representation import describe
     if options.get('architecture') == 'minivla':
         raise ValueError('MiniVLA 신규 학습 및 학습 Resume는 비활성화되어 있습니다. 기존 추론은 지원합니다.')
     from .datasets import validate_datasets
     artifact,validation,evidence=validate_datasets(train_path,options.get('validation_dataset'))
+    if evidence:
+        for warning in evidence['warnings']:print('[VALIDATION WARNING] '+warning,flush=True)
+    if (options.get('architecture','smolvla')=='smolvla' and not options.get('base_model')
+            and not options.get('resume_checkpoint') and options.get('training_mode')!='scratch'):
+        options={**options,'base_model':'hf://lerobot/smolvla_base'}
+    if options.get('base_model') and not Path(options['base_model']).expanduser().exists():
+        from .datasets import resolve_model
+        folder,identity=resolve_model(options['base_model'],options.get('model_revision'))
+        options={**options,'base_model':folder,'hub_model':identity}
     coordinates = artifact['coordinates']
-    if coordinates['action_space'] != JOINT_SPACE:
-        raise ValueError('Training requires joint-radian targets')
     from ..real2sim.storage import atomic
     dataset = Path(artifact['path'])
-    info = json.loads((dataset / 'meta/info.json').read_text())
-    config = {'dataset': {'repo_id': options.get('dataset_repo_id', info.get('repo_id', 'local/so101')),
-                          'root': str(dataset)},
-              'policy': {'type': options.get('architecture', 'smolvla'), 'push_to_hub': False,
-                         'device': options.get('device', 'cuda')},
-              'output_dir': str(output), 'steps': int(options.get('steps', 10000)),
-              'batch_size': int(options.get('batch_size', 8)), 'num_workers': int(options.get('num_workers', 0)),
-              'save_checkpoint': True, 'save_freq': int(options.get('save_freq', 1000)), 'wandb': {'enable': False}, 'eval_freq': 0}
-    if config['policy']['type'] not in ('act', 'smolvla'):
-        raise ValueError('Choose act or smolvla')
-    overrides = options.get('policy_options', {})
-    if not isinstance(overrides, dict) or any(k in overrides for k in ('type', 'push_to_hub', 'repo_id', 'device', 'pretrained_path')):
-        raise ValueError('Invalid policy_options; workflow owns type/device/publication')
-    config['policy'].update(overrides)
-    base_model = options.get('base_model') or (
-        'lerobot/smolvla_base' if config['policy']['type'] == 'smolvla' else None)
-    camera_keys = [k for k in info.get('features', {}) if k.startswith('observation.images.')]
-    default_map = {key:'observation.images.camera'+str(i+1) for i,key in enumerate(camera_keys)}
-    config['rename_map'] = options.get('rename_map', default_map if config['policy']['type'] == 'smolvla' else {})
-    if not isinstance(config['rename_map'], dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in config['rename_map'].items()):
-        raise ValueError('rename_map must map observation key strings to strings')
-    if base_model:
-        config['policy']['pretrained_path'] = base_model
-    cfg_path = Path(output).with_name(Path(output).name + '.train_config.json')
-    atomic(cfg_path, config)
-    argv = [sys.executable, '-m', 'lerobot.scripts.lerobot_train', '--config_path=' + str(cfg_path)]
-    if base_model:
-        # Load checkpoint configuration as well as weights; validate reloads it.
-        argv.append('--policy.path=' + str(base_model))
-        for key, value in config['policy'].items():
-            if key not in ('type', 'pretrained_path'):
-                argv.append('--policy.' + key + '=' + json.dumps(value))
-    if options.get('resume_checkpoint'):
-        saved_path, config, step = resume_checkpoint(options['resume_checkpoint'], artifact, options)
-        config = {**config, 'output_dir': str(output), 'resume': True,
-                  'steps': int(options.get('steps', config['steps']))}
-        # Keep config_path at the original checkpoint: LeRobot derives optimizer/
-        # scheduler and processor locations from its parent directories.
-        argv = [sys.executable, '-m', 'lerobot.scripts.lerobot_train',
-                '--config_path=' + str(saved_path), '--resume=true',
-                '--output_dir=' + str(output), '--steps=' + str(config['steps'])]
-        atomic(cfg_path, config)
-        print(f"[WORKFLOW] 이어서 학습: step {step} → {config['steps']} · {saved_path.parent}", flush=True)
-    subprocess.run(argv, check=True)
+    owned_lock=None
+    candidate=Path(output).with_name('.'+Path(output).name+'.workflow-lock')
+    if options.get('_run_directory') and candidate.is_file():
+        if candidate.read_text()!=options['_run_directory']:raise ValueError('Training output lock belongs to another run')
+        owned_lock=candidate
+    argv,config,cfg_path=training_command(artifact,options,output,owned_lock=owned_lock)
+    atomic(cfg_path,config)
+    import shlex
+    print('[LEROBOT CLI] '+shlex.join(argv),flush=True)
+    atomic(Path(output).with_name(Path(output).name+'.command.json'),dict(argv=argv,config=config,hub_dataset=artifact.get('hub'),hub_model=options.get('hub_model')))
+    import os
+    trainer_env=os.environ.copy()
+    if config['policy'].get('device') == 'cpu':
+        trainer_env['ACCELERATE_USE_CPU']='true'
+    subprocess.run(argv, check=True, env=trainer_env)
     checkpoint = Path(output) / 'checkpoints/last/pretrained_model'
     if not (checkpoint / 'config.json').exists() or not list(checkpoint.glob('*.safetensors')):
         raise ValueError('Training did not produce a complete checkpoint')
-    write_contract(checkpoint, coordinates)
+    if (checkpoint/'train_config.json').is_file():config=json.loads((checkpoint/'train_config.json').read_text())
+    if coordinates is not None:write_contract(checkpoint, coordinates)
     from ..utils.artifact_identity import fingerprint
     atomic(checkpoint / 'workflow_provenance.json', {'workspace': artifact.get('workspace'),
-           'source_dataset': str(dataset), 'source_dataset_sha256':fingerprint(dataset), 'backend': options.get('backend', artifact.get('backend', 'isaac')), 'training': config, 'representation': describe(coordinates),
+           'source_dataset': str(dataset), 'hub_dataset':artifact.get('hub'), 'hub_model':options.get('hub_model'), 'source_dataset_sha256':fingerprint(dataset), 'backend': options.get('backend', artifact.get('backend')) if coordinates is not None else None, 'training': config, 'representation': describe(coordinates) if coordinates is not None else None,
            'task_definitions': artifact.get('tasks') or options.get('tasks', []),
            'scene_configuration':artifact.get('provenance',{}).get('scene_configuration'),
            'scene_configurations':artifact.get('provenance',{}).get('scene_configurations',[]),

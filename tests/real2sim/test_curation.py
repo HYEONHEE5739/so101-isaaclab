@@ -536,3 +536,21 @@ def test_legacy_copy_failure_rolls_back_manifest(tmp_path,motion_workspace,monke
     with pytest.raises(OSError,match='copy interrupted'):export_subset(writer.root,target,['episode_0000'])
     assert not target.exists() and not list(tmp_path.glob('.failed*'))
     assert fingerprint(writer.root)==before
+
+
+@pytest.mark.parametrize('nested',[False,True])
+def test_curation_resolves_single_hdf5_folder_before_analysis(tmp_path,monkeypatch,nested):
+    from PyQt6.QtWidgets import QApplication
+    from soarm101_lab.workflow import curation_ui,dataset
+    app=QApplication.instance() or QApplication([])
+    folder=tmp_path/'input';payload=folder/'origin' if nested else folder
+    payload.mkdir(parents=True);path=payload/'dataset.hdf5';path.write_bytes(b'fixture')
+    seen=[]
+    monkeypatch.setattr(curation_ui,'analyze',lambda value:seen.append(value) or [])
+    monkeypatch.setattr(dataset,'episode_input_kind',lambda value:'source')
+    dialog=curation_ui.CurationDialog(tmp_path/'workflow')
+    dialog.run_job=lambda fn,done:done(fn())
+    dialog.loaded=lambda *args:seen.append(args)
+    dialog.load_data(str(folder))
+    assert seen==[str(path), (str(path),[],'source')]
+    dialog.close()

@@ -194,7 +194,7 @@ def test_ui_filters_objects_and_requires_explicit_task(workspace):
     selector.preset.setCurrentIndex(0);assert selector.selection()[0]['pick_object_id']=='cube_red'
     selector.configure(workspace,'source',active_object_ids=[])
     with pytest.raises(ValueError,match='least one'):selector.object_selection()
-    selector.configure(workspace,'replay',[definition(workspace)],['cube_red'])
+    selector.configure(workspace,'annotate',[definition(workspace)],['cube_red'])
     assert not selector.objects.isEnabled() and selector.object_selection()==['cube_red']
     selector.setEnabled(False);assert not selector.objects.isEnabled()
     selector.close()
@@ -227,7 +227,7 @@ def test_legacy_episode_stages_use_only_common_import_boundary(workspace,tmp_pat
     writer=record_fixture(tmp_path/'source',workspace,['cube_red'])
     before=fingerprint(writer.root)
     monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',lambda *args,**kwargs:pytest.fail('Invalid input must fail before engine creation'))
-    for stage in ('replay','annotate','datagen'):
+    for stage in ('annotate','datagen'):
         request={'backend':'mujoco','stage':stage,'workspace':str(workspace['root']),
             'input':str(writer.root),'renderer':'none','output':str(tmp_path/stage),
             'options':{'auto':True,'realtime':False,'num_successful_demos':1,'max_attempts':1}}

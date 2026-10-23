@@ -260,7 +260,9 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
             assert success == (grasp and place)
             result=copy.deepcopy(values);result['obs'].setdefault('events',{})
             return result,dict(attrs,annotation=json.dumps({'grasp':2,'place':4})),videos
+    from soarm101_lab.workflow.adapters import SimulationAdapter
     class Adapter:
+        accept_followup=SimulationAdapter.accept_followup
         workspace={'task':{'dynamic':['cube']}};base_world=np.eye(4);step_index=0
         annotation_auto=True;buffer=Buffer();tracker=SimpleNamespace(completed=False);metrics={};last_images={}
         def close(self):pytest.fail('Annotation must not close its caller-owned primary adapter')
@@ -294,7 +296,7 @@ def test_common_annotation_requires_both_measured_task_signals(tmp_path,episode,
     assert bool(calls)==accepted
 
 
-@pytest.mark.parametrize('stage',['replay','annotate','datagen'])
+@pytest.mark.parametrize('stage',['annotate','datagen'])
 def test_valid_common_input_reaches_engine_without_legacy_import(stage,tmp_path,episode,monkeypatch):
     from soarm101_lab.workflow import unified,mujoco
     from soarm101_lab.workflow.operations import execute_request
@@ -311,7 +313,7 @@ def test_valid_common_input_reaches_engine_without_legacy_import(stage,tmp_path,
     from soarm101_lab.workflow import worker_request
     monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(path),
         'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],
-            'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+            'task_definition':{'language_instruction':'fixture'}},'tasks':[{}],'followup':None})
     monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
     monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',engine)
     request={'backend':'mujoco','stage':stage,'input':str(path),'workspace':'fixture',
@@ -331,7 +333,7 @@ def test_datagen_cancel_before_trials_reports_stopped_without_false_success(tmp_
     monkeypatch.setattr(package,'metadata',lambda *args:identity)
     def cancel(*args,**kwargs):raise KeyboardInterrupt()
     from soarm101_lab.workflow import worker_request
-    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(path), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(path), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}],'followup':None})
     monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
     monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',cancel)
     result=unified.execute({'backend':'mujoco','stage':'datagen','input':str(path),'workspace':'fixture',
@@ -355,11 +357,10 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
         for _ in range(14):writer.commit(values,attrs,videos)
     monkeypatch.setattr(package,'load',lambda *args:{})
     monkeypatch.setattr(package,'metadata',lambda *args:identity)
-    from soarm101_lab.workflow import replay,annotation
-    monkeypatch.setattr(replay,'run',lambda *args,**kw:pytest.fail('DataGen must not replay the Source pool'))
+    from soarm101_lab.workflow import annotation
     monkeypatch.setattr(annotation,'run',lambda *args,**kw:pytest.fail('DataGen must not annotate the Source pool'))
     native=SimpleNamespace(backend=object(),close=lambda:None)
-    adapter=SimpleNamespace(buffer=SimpleNamespace(abort=lambda:None),close=lambda:None)
+    adapter=SimpleNamespace(buffer=SimpleNamespace(abort=lambda:None),close=lambda:None,bind_followup=lambda runtime:None)
     from soarm101_lab.simulation import environment
     camera_requests=[]
     def create_isaac(*args,**kwargs):
@@ -367,7 +368,7 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
         return native
     monkeypatch.setattr(environment,'create_isaac',create_isaac)
     from soarm101_lab.workflow import worker_request
-    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(source), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}]})
+    monkeypatch.setattr(worker_request,'episode_context',lambda *a,**kw:{'reader':EpisodeDataset(source), 'workspace':{'root':tmp_path/'immutable'},'scene':{**args['scene_configuration'],'task_definition':{'language_instruction':'fixture'}},'tasks':[{}],'followup':None})
     monkeypatch.setattr(worker_request,'prepare_mujoco',lambda *args,**kwargs:{})
     monkeypatch.setattr(mujoco.simulation_environment,'create_mujoco',lambda *args,**kwargs:native)
     monkeypatch.setattr(adapters,'IsaacAdapter',lambda *args:adapter)
@@ -401,35 +402,6 @@ def test_datagen_starts_full_pool_without_automatic_source_replay(backend,source
     assert status['workflow_phase']=='generation' and 'source_total' not in status
 
 
-def test_isaac_replay_holds_idle_commands_despite_measured_drift(tmp_path,episode):
-    import torch
-    from soarm101_lab.workflow.replay import run as replay
-    values,attrs,videos,args,contract=episode
-    values['joint_targets'][:,0]=np.arange(len(values['actions']))*.01
-    source=tmp_path/'source.hdf5'
-    with DatasetWriter(source,args,contract) as writer:writer.commit(values,attrs,videos)
-    measured=torch.tensor([[.1]*6,[.2]*6,[0.]*6,[.4]*6])
-    idle_initial=measured[[0,1,3]].clone();commands=[]
-    def step(action):
-        commands.append(action.clone())
-        measured.sub_(.05)  # Simulated gravity error must not become the next hold command.
-    class Adapter:
-        index=2;ids=list(range(6));step_index=0;base_world=np.eye(4)
-        workspace={'task':{'dynamic':['cube']}};tracker=SimpleNamespace(completed=False)
-        buffer=SimpleNamespace(abort=lambda:None)
-        native=SimpleNamespace(scene={'robot':SimpleNamespace(data=SimpleNamespace(joint_pos=measured))},
-            device='cpu',step=step)
-        def restore(self,*args):measured[self.index].zero_()
-        def state(self):return {'joint_pos':measured[self.index].numpy(),'object_poses':{'cube':np.eye(4)}}
-        def update_grasp(self):self.tracker.completed=True;self.step_index+=1
-        def place_success(self):return True
-        def check_success(self):return True
-        def failure_category(self):return 'place_failure'
-    result=replay(Adapter(),EpisodeDataset(source),tmp_path/'replay')
-    assert result['passed'] and len(commands)==len(values['actions'])
-    for index,command in enumerate(commands):
-        torch.testing.assert_close(command[[0,1,3]],idle_initial,rtol=0,atol=0)
-        np.testing.assert_allclose(command[2].numpy(),values['joint_targets'][index],atol=1e-8,rtol=0)
 
 
 def test_standalone_manual_annotation_keyboard_uses_common_replay_state(monkeypatch):

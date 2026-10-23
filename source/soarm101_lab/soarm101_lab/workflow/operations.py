@@ -26,7 +26,6 @@ from ..so101_dataset_contract import JOINT_SPACE, MIMIC_SPACE
 
 STAGES = {
     'source': ({'workspace'}, 'source'),
-    'replay': ({'source', 'annotated', 'datagen', 'evaluation_dataset'}, 'replay'),
     'annotate': ({'source'}, 'annotated'),
     'datagen': ({'annotated'}, 'datagen'),
     'convert': ({'datagen', 'source', 'annotated'}, 'dataset'),
@@ -80,7 +79,18 @@ class Operations:
             return 'NOT_READY', str(exc)
 
     def plan(self, stage, artifact, workspace, options, dry=False, run_dir=None):
-        from .worker_request import EPISODE_STAGES
+        from ..learning.training import validate_credentials
+        validate_credentials(options)
+        if options.get('execution_script'):
+            from .task_scripts import script_inputs
+            artifact, workspace, options = script_inputs(options['execution_script'], stage, options.get('python'))
+        from ..learning.datasets import hub_reference,resolve_model
+        if stage in ('sim_eval','hf_policy') and hub_reference(str(artifact)):
+            artifact,identity=resolve_model(artifact)
+            options={**options,'hub_model':identity}
+        if stage=='train':workspace=''
+        from .worker_request import EPISODE_STAGES, validate_task_request
+        validate_task_request(stage,options.get('backend','isaac'),options)
         if stage in EPISODE_STAGES:
             return episode_plan(stage,artifact,workspace,options,self.root,dry=dry,run_dir=run_dir)
         from .worker_request import stage_input
@@ -102,6 +112,8 @@ class Operations:
         continuing=resumes_in_place(stage,opts,output)
         if boundary.exists() and not continuing:
             raise FileExistsError(f'이미 존재하는 결과물입니다: {boundary} · 새 저장 이름을 입력하세요. 이어 실행은 Resume 입력과 새 출력 이름을 지정하세요.')
+        if stage=='train' and output.is_relative_to(Path(artifact['path']).resolve()):
+            raise ValueError('Training output must be outside the source Dataset')
         opts['output']=str(output)
         opts['artifact_root']=str(boundary)
         if not continuing and not options.get('output'):opts.setdefault('storage_name',boundary.stem if boundary.suffix else boundary.name)
@@ -113,10 +125,14 @@ class Operations:
             records=[stage_input('merge',path,full=False) for path in paths]
             validate_inputs(records)
         if stage=='train':
-            if opts.get('architecture','smolvla') not in ('act','smolvla'):
+            if opts.get('architecture','smolvla') == 'minivla':
                 raise ValueError('MiniVLA 신규 학습/학습 Resume는 비활성화되어 있습니다. 기존 추론은 지원합니다.')
             from ..learning.datasets import validate_datasets
-            artifact,validation,evidence=validate_datasets(input_path,opts.get('validation_dataset'))
+            validation=None;evidence=None
+            if opts.get('validation_dataset'):
+                _,validation,evidence=validate_datasets(artifact['path'],opts['validation_dataset'],full=False)
+            if artifact.get('hub'):
+                input_path='hf://'+artifact['hub']['repo_id']+'@'+artifact['hub']['revision']
             if evidence:opts['validation_warnings']=evidence['warnings']
         if stage=='validate':
             from ..learning.validation import validate_inputs
@@ -131,7 +147,7 @@ class Operations:
             return plan
         if stage == 'source' and artifact.get('backend', backend) != backend:
             raise ValueError('Input simulation backend differs from selected backend')
-        if stage in ('source','replay','annotate','datagen','sim_eval','real_eval'):
+        if stage in ('source','annotate','datagen','sim_eval','real_eval'):
             from .tasks import bind_scene_options
             opts = bind_scene_options(stage, artifact, load(artifact['path'] if stage=='source' else workspace), opts)
         canonical = artifact.get('format') in ('so101.canonical/1', 'so101.minivla-policy/1')
@@ -151,7 +167,7 @@ class Operations:
             opts['checkpoint_file']=str(selected_minivla_checkpoint(path,opts.get('checkpoint_file')))
         if stage == 'source':
             workspace = path
-        needs_workspace = stage in {'source', 'replay', 'annotate', 'datagen', 'sim_eval', 'real_eval'}
+        needs_workspace = stage in {'source', 'annotate', 'datagen', 'sim_eval', 'real_eval'}
         w = load(workspace) if needs_workspace or (workspace and stage == 'convert') else None
         if w and w['task'].get('mode') == 'geometry_review':
             raise ValueError('Geometry review Workspace: use Real/Sim preview; explicit workflow metadata is required for task execution')
@@ -173,11 +189,11 @@ class Operations:
             if stage == 'source':
                 from ..real2sim.workspaces.reset import source_workspace
                 w = source_workspace(w,opts.get('resume_data'))
-            elif stage in ('replay','annotate','datagen'):
+            elif stage in ('annotate','datagen'):
                 from .tasks import recorded_scene
                 from ..real2sim.workspaces.tasks import configured
                 w = configured(w,reset=recorded_scene(artifact,w)['reset'])
-            if stage in ('source','sim_eval','real_eval','replay','annotate','datagen'):
+            if stage in ('source','sim_eval','real_eval','annotate','datagen'):
                 from ..real2sim.workspaces.tasks import configured
                 for definition in definitions:
                     configured(w,definition,opts['active_object_ids'],backend)
@@ -196,7 +212,7 @@ class Operations:
         if w and artifact.get('coordinates') and stage!='convert':
             semantic = JOINT_SPACE if stage in ('sim_eval', 'real_eval', 'train') else MIMIC_SPACE
             require_compatible(artifact['coordinates'], coordinate_contract(w), semantic)
-        if stage in ('train', 'hf_dataset', 'hf_policy', 'sim_eval', 'real_eval') and not (canonical and stage.startswith('hf_')):
+        if stage in ('sim_eval', 'real_eval'):
             coords = artifact.get('coordinates')
             if not coords or coords.get('action_space') != JOINT_SPACE:
                 raise ValueError('Policy stages require model joint-radian actions')
@@ -235,8 +251,13 @@ class Operations:
         if stage in ('hf_dataset', 'hf_policy') and type(opts.get('private')) is not bool:
             raise ValueError('Choose private=true/false explicitly')
         if stage == 'train': opts['workspace'] = str(w['root']) if w else workspace
+        training_preview=None
+        if stage=='train':
+            from ..learning.training import training_command
+            argv,config,_=training_command(artifact,opts,opts['output'])
+            training_preview={'argv':argv,'config':config,'dataset':artifact}
         if dry:
-            return {'stage':stage,'ready':not missing_name,'reason':'저장 이름을 입력하세요.' if missing_name else '; '.join(opts.get('validation_warnings',[])),
+            return {'training_command':training_preview,'stage':stage,'ready':not missing_name,'reason':'저장 이름을 입력하세요.' if missing_name else '; '.join(opts.get('validation_warnings',[])),
                     'context':{'workspace':w,'tasks':definitions,'scene':None,'input':artifact}}
         run_dir = Path(run_dir)
         python = opts.get('python') or default_python()
@@ -264,6 +285,7 @@ class Operations:
                 if abs(fps-round(fps))>1e-8:raise ValueError('This LeRobot version requires integer FPS; refusing to change recorded timing')
                 cli+=['--fps',str(round(fps))]
         else:
+            if stage=='train':opts['_run_directory']=str(run_dir)
             spec = {'stage':stage,'backend':'common','input':str(input_path),'workspace':ws,'options':{k:v for k,v in opts.items() if k!='validation_artifact'},'output':str(output)}
             atomic(run_dir / 'request.json', spec)
             cli += ['scripts/real2sim/workflow.py', 'worker', '--request', str(run_dir / 'request.json')]
@@ -387,8 +409,8 @@ class Operations:
             if stage in ('source','annotate','datagen','convert','merge'):
                 inspect_dataset(plan['type'],target)
             elif stage=='train':
-                from .policy import inspect_checkpoint
-                inspect_checkpoint(target)
+                from ..learning.datasets import inspect_policy
+                inspect_policy(target,owned_lock=reservation)
             details=report if plan.get('worker_report') else (json.loads(target.read_text()) if target.suffix=='.json' else {})
             if stage.startswith('hf_') and not details.get('commit'):raise ValueError('Remote publication has no fixed commit')
             status='STOPPED' if resumable_stop or details.get('stopped') else 'SUCCEEDED'
@@ -427,34 +449,56 @@ def mujoco_plan(stage, artifact, workspace, options, dry=False, run_dir=None):
     if any(k.lower() in ('token', 'api_key', 'password', 'hf_token') for k in opts):
         raise ValueError('Use local Hugging Face login/environment authentication, not workflow options')
     opts.setdefault('preview_cameras', True)
-    definitions = from_artifact(artifact, w)
-    if stage in ('source', 'sim_eval'):
-        definitions = opts.get('tasks') or definitions or [t for t in catalog(w)
-            if t['pick_object_id'] == w['task']['pick'] and t['target_object_id'] == w['task']['place']]
-    if stage == 'sim_eval' and opts.get('task_scope') == 'all': definitions = [t for t in catalog(w) if t['pick_object_id'] in opts.get('active_object_ids',w['task']['dynamic'])]
-    definitions = [validate(t, w) for t in definitions]
-    if stage == 'source':
-        from ..real2sim.workspaces.reset import source_workspace
-        w = source_workspace(w,opts.get('resume_data'))
-    elif stage in ('replay','annotate','datagen'):
-        from .tasks import recorded_scene
-        from ..real2sim.workspaces.tasks import configured
-        w = configured(w,reset=recorded_scene(artifact,w)['reset'])
-    if stage in ('source','sim_eval','replay','annotate','datagen'):
-        from ..real2sim.workspaces.tasks import configured
-        for definition in definitions:configured(w,definition,opts['active_object_ids'], 'mujoco')
-        if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],'mujoco')['scene_configuration']
-    if not definitions or (stage in ('source', 'annotate', 'datagen') and len(definitions) != 1):
-        raise ValueError('Source/Annotation/Datagen require one task')
-    opts.update(tasks=definitions, task_definition=definitions[0], instruction=definitions[0]['language_instruction'])
-    if stage=='source' and opts.get('resume_data'):
+    definitions=[]
+    if not opts.get('scene_only'):
+        definitions = from_artifact(artifact, w)
+        if stage in ('source', 'sim_eval'):
+            definitions = opts.get('tasks') or definitions or [t for t in catalog(w)
+                if t['pick_object_id'] == w['task']['pick'] and t['target_object_id'] == w['task']['place']]
+        if stage == 'sim_eval' and opts.get('task_scope') == 'all': definitions = [t for t in catalog(w) if t['pick_object_id'] in opts.get('active_object_ids',w['task']['dynamic'])]
+        definitions = [validate(t, w) for t in definitions]
+        if stage == 'source':
+            from ..real2sim.workspaces.reset import source_workspace
+            w = source_workspace(w,opts.get('resume_data'))
+        elif stage in ('annotate','datagen'):
+            from .tasks import recorded_scene
+            from ..real2sim.workspaces.tasks import configured
+            w = configured(w,reset=recorded_scene(artifact,w)['reset'])
+        if stage in ('source','sim_eval','annotate','datagen'):
+            from ..real2sim.workspaces.tasks import configured
+            for index,definition in enumerate(definitions):
+                ids=opts.get('script_scenes',[None]*len(definitions))[index]
+                active=opts['active_object_ids'] if ids is None else [n for n in w['task']['dynamic'] if n in ids]
+                configured(w,definition,active,'mujoco',scene_objects=ids)
+            if definitions:opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],'mujoco',scene_objects=opts.get('script_scenes',[None])[0])['scene_configuration']
+        if not definitions or (stage in ('source', 'annotate', 'datagen') and len(definitions) != 1):
+            raise ValueError('Source/Annotation/Datagen require one task')
+        opts.update(tasks=definitions, task_definition=definitions[0], instruction=definitions[0]['language_instruction'])
+        if opts.get('execution_script'):
+            from .task_scripts import validate_script_scenes
+            validate_script_scenes(w, opts)
+            if stage=='source' and opts.get('scene_reset') is not None:
+                if opts.get('resume_data') and opts['scene_reset']!=w['scene_configuration']['reset']:
+                    raise ValueError('Source Resume must preserve the recorded reset policy')
+                opts['scene_configuration']=configured(w,definitions[0],opts['active_object_ids'],'mujoco',reset=opts['scene_reset'],scene_objects=opts.get('script_scenes',[None])[0])['scene_configuration']
+        if stage=='source' and opts.get('resume_data'):
+            from .data_resume import validate as validate_resume
+            count=validate_resume('source',opts['resume_data'],metadata(w),definitions,
+                                  scene_configuration=opts.get('scene_configuration'),workspace_definition=w)
+            target=int(opts.get('episodes',1))
+            if target<=count:
+                raise ValueError(f'총 목표 Episodes는 기존 {count}개보다 커야 합니다. {count+1} 이상을 입력하세요.')
+            opts.update(resume_completed=count,resume_target=target)
+    if stage=='source' and opts.get('scene_only') and opts.get('resume_data'):
         from .data_resume import validate as validate_resume
-        count=validate_resume('source',opts['resume_data'],metadata(w),definitions,
-                              scene_configuration=opts.get('scene_configuration'),workspace_definition=w)
-        target=int(opts.get('episodes',1))
-        if target<=count:
-            raise ValueError(f'총 목표 Episodes는 기존 {count}개보다 커야 합니다. {count+1} 이상을 입력하세요.')
-        opts.update(resume_completed=count,resume_target=target)
+        from .dataset import EpisodeDataset
+        count=validate_resume('source',opts['resume_data'],metadata(w),[],scene_configuration=opts['scene_configuration'],workspace_definition=w)
+        previous=EpisodeDataset(opts['resume_data'])
+        evidence=previous.provenance.get('source_script') or previous.args.get('source_script') or {}
+        if previous.args.get('scene_configuration')!=opts['scene_configuration'] or evidence.get('source_code_sha256')!=opts['script_identity'].get('source_code_sha256'):
+            raise ValueError('Resume Scene/Reset script identity differs')
+        if int(opts.get('episodes',1))<=count:raise ValueError('Episode target must exceed existing count')
+        opts.update(resume_completed=count,resume_target=int(opts['episodes']))
     renderer = opts.get('renderer', 'egl')
     config = opts.get('model_config', str(MODEL_ROOT / 'configs/default.json'))
     if stage == 'sim_eval' and artifact.get('format') == 'so101.minivla-policy/1':
@@ -496,16 +540,17 @@ def episode_plan(stage, input_path, workspace, options, root, *, dry=False, run_
     if stage=='annotate' and not opts.get('auto',True) and opts['num_envs']!=1:raise ValueError('Manual Annotation requires one environment')
     if opts.get('renderer','egl') not in ('egl','software-egl','osmesa','none'):raise ValueError('Unknown renderer')
     ctx=episode_context(input_path,workspace,stage,opts)
+    if ctx['followup']['python']:opts['followup_identity']=ctx['followup']['python']
     source=Path(input_path).expanduser().resolve();w=ctx['workspace']
     if dry and not opts.get('output') and not opts.get('storage_name'):
-        return {'stage':stage,'context':{k:ctx[k] for k in ('workspace','scene','tasks')},
+        return {'stage':stage,'context':{k:ctx[k] for k in ('workspace','scene','tasks','followup')},
                 'ready':False,'reason':'저장 이름을 입력하세요.'}
     if opts.get('output'):
         output=Path(opts['output']).expanduser().resolve()
         if opts.get('storage_name') and validate_storage_name(opts['storage_name'])!=output.name:raise ValueError('저장 이름과 출력 경로 이름이 다릅니다.')
     else:
         name=validate_storage_name(opts.get('storage_name'))
-        bucket=Path(root).resolve()/('annotations' if stage=='annotate' else 'evaluations')
+        bucket=Path(root).resolve()/'annotations'
         output=(bucket/name).resolve()
         if not output.is_relative_to(bucket):raise ValueError('Output storage leaves stage directory through a symlink')
     if output.exists():raise FileExistsError('Choose a new output path; overwrite is disabled: '+str(output))
@@ -513,15 +558,15 @@ def episode_plan(stage, input_path, workspace, options, root, *, dry=False, run_
         raise ValueError('Output must be outside input Dataset and immutable Workspace')
     if output.with_name('.'+output.name+'.workflow-lock').exists():raise FileExistsError('Output is reserved by another run')
     opts.update(output=str(output),artifact_root=str(output),tasks=ctx['tasks'],
-                task_definition=ctx['scene']['task_definition'],instruction=ctx['scene']['task_definition']['language_instruction'],
+                task_definition=ctx['scene']['task_definition'],instruction=(ctx['scene']['task_definition'] or {}).get('language_instruction',''),
                 active_object_ids=ctx['scene']['active_object_ids'])
-    if dry:return {'stage':stage,'context':{k:ctx[k] for k in ('workspace','scene','tasks')}}
+    if dry:return {'stage':stage,'context':{k:ctx[k] for k in ('workspace','scene','tasks','followup')}}
     request={'stage':stage,'backend':opts['backend'],'input':str(source),'workspace':str(w['root']),
              'options':opts,'output':str(output),'renderer':opts.get('renderer','egl')}
     atomic(Path(run_dir)/'request.json',request)
     return {'argv':[opts['python'],'-u','scripts/real2sim/workflow.py','worker','--request',str(Path(run_dir)/'request.json')],
-            'output':str(output),'type':'annotated' if stage=='annotate' else 'replay',
-            'workspace':str(w['root']),'options':opts,'worker_report':True,'result_key':'dataset' if stage=='annotate' else None}
+            'output':str(output),'type':'annotated',
+            'workspace':str(w['root']),'options':opts,'worker_report':True,'result_key':'dataset'}
 
 
 def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
@@ -536,13 +581,18 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
         raise ValueError('Do not store credentials in workflow options')
     w=load(workspace)
     if artifact.get('workspace')!=metadata(w):raise ValueError('Input Workspace identity differs')
+    from .task_scripts import followup_context
+    from .dataset import EpisodeDataset
+    followup=followup_context(EpisodeDataset(artifact['path']),w,recorded_scene(artifact,w),options,stage=stage)
+    if followup['python']:options={**options,'followup_identity':followup['python']}
     if w['task'].get('mode')=='geometry_review':raise ValueError('Geometry review Workspace requires explicit workflow task metadata')
     opts=bind_scene_options(stage,artifact,w,options)
     definitions=[validate(t,w) for t in from_artifact(artifact,w)]
-    if len(definitions)!=1:raise ValueError('Select one homogeneous task')
+    scene=recorded_scene(artifact,w)
+    if len(definitions)!=1 and not scene.get('scene_only'):raise ValueError('Select one homogeneous task')
     if options.get('tasks') is not None and options['tasks']!=definitions:
         raise ValueError('Derived stages must inherit input artifact tasks; do not relabel demonstrations')
-    opts.update(tasks=definitions,task_definition=definitions[0],instruction=definitions[0]['language_instruction'])
+    opts.update(tasks=definitions,task_definition=definitions[0] if definitions else None,instruction=definitions[0]['language_instruction'] if definitions else '')
     opts.setdefault('mode','operator');opts['headless']=opts['mode']=='operator'
     if opts['mode'] not in ('operator','developer'):raise ValueError('Unknown execution mode')
     opts.setdefault('num_envs',1);opts.setdefault('max_attempts',10000)
@@ -561,7 +611,7 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
                 raise ValueError('DataGen 이어 생성은 이전 결과를 만든 동일 Annotation 입력을 선택해야 합니다.')
             if opts['num_successful_demos']<=previous['episode_count']:
                 raise ValueError(f"총 목표 성공 수는 기존 {previous['episode_count']}개보다 커야 합니다.")
-    if dry:return {'stage':stage,'context':{'workspace':w,'tasks':definitions,'scene':recorded_scene(artifact,w),'input':artifact}}
+    if dry:return {'stage':stage,'context':{'workspace':w,'tasks':definitions,'scene':recorded_scene(artifact,w),'input':artifact,'followup':followup}}
     run_dir=Path(run_dir);output=output_location(stage,artifact,opts,run_dir.parent.parent)[0]
     request={'backend':opts['backend'],'stage':stage,'workspace':str(w['root']),'input':artifact['path'],
         'options':opts,'output':str(output),'renderer':opts.get('renderer','egl'),'episode_schema':'so101.common-episode/2'}
@@ -573,15 +623,17 @@ def unified_plan(stage,artifact,workspace,options,dry=False,run_dir=None):
 
 def execute_request(request):
     """Worker dispatch; GUI planning does not load engines or policy libraries."""
+    if request.get('options', {}).get('execution_script'):
+        from .task_scripts import load_execution_script
+        load_execution_script(request)
+    from .worker_request import validate_task_request
+    validate_task_request(request['stage'],request.get('backend','common'),request.get('options',{}))
     if request.get('stage')=='merge':
         from .lerobot_merge import merge
         return merge(request['options']['merge_datasets'],request['output'],request['options'].get('repo_id','local/so101_merged'))
-    if request.get('stage') in ('replay','annotate','datagen'):
+    if request.get('stage') in ('annotate','datagen'):
         from .unified import execute
         return execute(request)
-    if request.get('stage')=='train' and request['options'].get('validation_dataset'):
-        from .worker_request import stage_input
-        request={**request,'options':{**request['options'],'validation_artifact':stage_input('train',request['options']['validation_dataset'])}}
     backend = request.get('backend', 'common')
     if backend == 'mujoco':
         from .mujoco import execute
@@ -592,14 +644,14 @@ def execute_request(request):
     from .worker_request import stage_input
     if stage not in ('hf_dataset','hf_policy','train','validate','sim_eval','real_eval'):
         raise ValueError('Unknown workflow stage: '+str(stage))
+    if stage=='train':
+        from ..learning.training import train
+        return train(request['input'],options,Path(request['output']))
     artifact=stage_input(stage,request['input'])
     output = Path(request['output'])
     if stage in ('hf_dataset', 'hf_policy'):
         from .hub import publish
         publish(artifact, options, output)
-    elif stage == 'train':
-        from ..learning.training import train
-        train(artifact['path'], options, output)
     elif stage=='validate':
         from ..learning.validation import evaluate_checkpoint
         evaluate_checkpoint(artifact['path'],options['validation_dataset'],output,device=options.get('device','cpu'),batch_size=int(options.get('batch_size',1)),seed=int(options.get('seed',42)),max_batches=options.get('max_batches'))

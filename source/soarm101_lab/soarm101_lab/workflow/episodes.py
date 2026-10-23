@@ -1,4 +1,4 @@
-"""Existing Source lineage/split policy, conversion and training input checks."""
+"""Historical Source identities and existing Dataset conversion."""
 import copy
 import json
 from pathlib import Path
@@ -22,37 +22,10 @@ def validate_partition(partition):
             or set(inventory)!=set(assignments) or not set(ids).issubset(inventory)
             or set(assignments.values())!={'train','val'} or any(assignments[i]!=p['split'] for i in ids)):
         raise ValueError('Source Partition membership/split conflict')
-    groups={}
     for key,record in inventory.items():
         if not record.get('dataset_sha256') or not record.get('episode_id'):raise ValueError('Source identity evidence missing')
         if record.get('payload_sha256') and key!='source:'+record['payload_sha256']:raise ValueError('Source payload identity conflict')
-        for group in record.get('groups',[]):
-            if group in groups and groups[group]!=assignments[key]:raise ValueError('Source group leakage in partition assignment')
-            groups[group]=assignments[key]
     return p
-
-
-def validate_partition_episode(partition,lineage,input_evidence=None):
-    p=validate_partition(partition)
-    if not isinstance(lineage,dict):raise ValueError('Source Partition episode lineage evidence missing')
-    if lineage.get('kind')=='source_episode':
-        key=lineage['source_id']
-        if key not in p['source_ids'] or p['inventory'][key]!=lineage['source']:raise ValueError('Episode Source is outside declared partition')
-    elif lineage.get('kind')=='partition':
-        from ..real2sim.precision import fingerprint
-        proof=input_evidence or {};ids=proof.get('source_ids',[])
-        if (lineage.get('partition_sha256')!=p['sha256'] or lineage.get('exact_source_ids') is not None
-                or proof.get('verification')!='source_only_input' or not proof.get('sha256') or not ids or not set(ids).issubset(p['source_ids'])
-                or proof.get('evidence_sha256')!=fingerprint({k:v for k,v in proof.items() if k!='evidence_sha256'})):
-            raise ValueError('Generated Source Partition input/lineage is unverifiable')
-    elif lineage.get('kind')=='mimic_segments':
-        segments=lineage.get('segments',[])
-        if not segments or lineage.get('partition_sha256')!=p['sha256']:raise ValueError('Mimic segment evidence missing')
-        for segment in segments:
-            original=segment.get('source',{})
-            if original.get('kind')!='source_episode':raise ValueError('Unknown Mimic subtask Source')
-            validate_partition_episode(p,original)
-    else:raise ValueError('Unknown Source lineage kind')
 
 
 def source_catalog(source,allow_unknown=False):
@@ -83,10 +56,10 @@ def source_catalog(source,allow_unknown=False):
         if lineage and lineage.get('kind')=='source_episode':record=lineage['source'];key=lineage['source_id']
         elif partition:
             if allow_unknown:return {},partition
-            raise ValueError('Generated partition cannot be split again as independent Source episodes')
+            continue  # Historical aggregate lineage is not an independent source identity.
         elif derived:
             if allow_unknown:return {},None
-            raise ValueError('Original Source lineage unavailable; split the original Source dataset first')
+            continue  # Do not invent an original identity or restrict the current allocation.
         else:
             # Content identity survives copying into another file, renumbering, and Source append.
             payload=hashlib.sha256()
@@ -136,6 +109,7 @@ def convert_dataset(source, output, options):
         '--input_file',str(Path(source).resolve()),'--root',str(output/'lerobot'),
         '--repo_id',options['repo_id'],'--action_source','joint_targets']
     if options.get('include_failed'):argv.append('--include_failed')
+    if options.get('instruction'):argv.extend(['--task',options['instruction']])
     subprocess.run(argv,check=True)
     info=json.loads((output/'lerobot/meta/info.json').read_text())
     return {'dataset':str(output/'lerobot'),'lerobot':str(output/'lerobot'),'episodes':info['total_episodes']}

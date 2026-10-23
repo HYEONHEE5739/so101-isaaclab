@@ -18,7 +18,7 @@ def recorded_scene(artifact, workspace, required=True):
         payload = {k:v for k,v in scene.items() if k != 'sha256'}
         digest = hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         if scene.get('sha256') != digest:raise ValueError('Recorded scene configuration hash mismatch')
-        bound=workspace_tasks.configured(workspace,scene.get('task_definition'),ids,scene.get('backend'),reset=scene.get('reset'))['scene_configuration']
+        bound=workspace_tasks.configured(workspace,scene.get('task_definition'),ids,scene.get('backend'),reset=scene.get('reset'),scene_objects=scene.get('object_ids'),scene_only=scene.get('scene_only',False),object_configuration=scene.get('objects'))['scene_configuration']
         for key in ('pick_object_id','place_target_id','reset'):
             if scene.get(key)!=bound[key]:raise ValueError('Recorded scene semantic mismatch: '+key)
         return copy.deepcopy(scene)
@@ -43,15 +43,17 @@ def recorded_scene(artifact, workspace, required=True):
 
 def bind_scene_options(stage, artifact, workspace, options):
     """Bind run choices or inherited evidence into existing request options."""
-    opts = dict(options)
+    from .task_scripts import resolve_script
+    opts = dict(resolve_script(workspace,options))
+    if opts.get('scene_only'):return opts
     if workspace['task'].get('mode')=='geometry_review':
         raise ValueError('Geometry review requires explicit workflow metadata for task execution')
     if stage in ('source','sim_eval','real_eval'):
         ids = workspace_tasks.active_objects(workspace, opts.get('active_object_ids'))
-    elif stage in ('replay','annotate','datagen'):
+    elif stage in ('annotate','datagen'):
         scenes = artifact.get('provenance',{}).get('scene_configurations',[])
         if len({tuple(s['active_object_ids']) for s in scenes}) > 1:
-            raise ValueError('Mixed scene compositions: select a homogeneous source subset for replay/annotation/datagen')
+            raise ValueError('Mixed scene compositions: select a homogeneous source subset for annotation/datagen')
         scene = recorded_scene(artifact,workspace)
         ids = scene['active_object_ids']
         if 'active_object_ids' in opts and set(opts['active_object_ids']) != set(ids):

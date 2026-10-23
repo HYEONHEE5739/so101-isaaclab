@@ -1,3 +1,55 @@
+## 2026-10-23 Scene/Terms 아키텍처 정리
+
+최신 계약은 docs/task_sdk/SCRIPT_GUIDE.md(사용법), docs/architecture/TASK_SDK_DESIGN.md(상태/Reset), SYSTEM_FLOW.md(호출 그래프)가 소유한다. 아래 항목은 날짜별 과거 기록이다. task_scripts는 AST/identity/Worker entry 실행, SimulationAdapter.bind_followup/term_boolean/after_reset은 Runtime binding/Event 상태를 소유한다. 기존 파서의 bind_followup/accept_followup/term_*는 Adapter 메서드로 직접 교체했다. Native/Term Event 배열·Mimic cfg·Uniform/Edge sampler 연결 중복 통합. 검증/수치/남은 부채: outputs/workflow_validation/architecture_cleanup/REPORT.md. 사용자 원본·기존 dirty·의존성·Commit/Push 보존.
+
+## 2026-10-23 Scene 기반 Source / Reusable Terms
+
+Scene 매핑 Source는 Task/Pick/Target 없이 Builder Pose/명시 Pose·Reset으로 Common 기록. 기존 목록형 Script/FOLLOWUP 유지. simulation.task_context.reset_objects와 기존 sampler를 사용하고, task_scripts의 기존 후속 경계에 Event/factory·Acceptance/Failure·tool0 sequential Subtask 연결. Tracker/Physics/IK/reference Generator는 원래 소유자. Event factory는 환경/Episode별 생성. UI 조회는 AST/header만, 명시 Worker만 Python 실행. Source Resume는 Scene+SCRIPT 외 코드 identity(실행 옵션 수정 허용), 실행 계획은 전체 SHA. 실제 가상 Leader/Qt Worker, Legacy Red/Blue A/B·일부 새 Builder 배치의 strict IK 실패를 구분한다. 범위/명령/근거 docs/task_sdk/SCRIPT_GUIDE.md 및 outputs/workflow_validation/scene_terms_sdk/REPORT.md. Training/Hub/MiniVLA/원본/의존성/Commit/Push 보존.
+
+## 2026-10-23 Annotation/Mimic Task SDK
+
+Source reference를 기존 Annotation/Mimic에 연결. task_scripts.read_followup/followup_context/load_followup/bind_followup/accept_followup과 기존 Worker·UI Python 선택을 재사용한다. Native Adapter/check_success·StableGrasp·Placement·Mimic/RNG/Recording/Source는 그대로이며 순수 사용자 Term은 Native 성공 뒤 결과 채택만 추가 제한한다. Source Python Path는 Metadata에서 자동 실행하지 않는다. Red/Blue/0.02조건/subset 실제 MuJoCo 가상 Leader→Annotation→Mimic, 기존37/60배열·4MP4 A/B 동일, Qt 실제 자식 Worker 확인. 명시 Python은 MuJoCo Pick/Place만; 임의 Boundary/새 Subtask·EEF/Isaac SDK/실물 미지원. 107PASS·UI10PASS, 실패/원인/범위는 outputs/workflow_validation/annotation_mimic_sdk/REPORT.md. API docs/task_sdk/SCRIPT_GUIDE.md. 기존 dirty/사용자 원본/Training/의존성/Commit/Push 보존.
+
+## 2026-10-23 Native LeRobot 통합
+
+기존 Script SDK 보존. learning.datasets가 설치 factory 목록·명시 hf://Dataset/Model·commit snapshot/native metadata/feature 검사를, learning.training이 공식 CLI argv/config/모드/native_args·기존 저장/Resume 연결을 소유한다. Training UI는 Local/Hub·Scratch/Fine-tuning/Resume·명령/Metadata·공식 로그 Loss 표시를 제공한다. 실제 ACT Hub1update→Resume2step·Local Fine-tune/converted 학습·Qt Start/Stop, SmolVLA2batch 언어 입력, 기존 Sim180배열/10영상 일치. 상세 outputs/workflow_validation/native_integration/REPORT.md 및 docs/real2sim/NATIVE_LEROBOT.md. 다른 factory Policy/Hub 업로드·GPU·실물 미검증. 사용자 원본/의존성/Commit/Push 변경 없음.
+
+## 2026-10-23 간결한 Metadata Script API
+
+scene.objects + source/evaluations를 기본 Generator 형식으로 제공. Legacy tasks/bindings도 유지, 혼합 거부. Metadata pair의 유일한 조건만 생략 가능, 사용자 Task ID와 물리 Scene을 분리. subset target visual alias/초기 복원·기존 Source Resume 보호. 실제 검증/제한은 outputs/workflow_validation/concise_scripts/REPORT.md, 전체 예제/계약은 docs/task_sdk/SCRIPT_GUIDE.md. 사용자 원본·Training·Commit/Push 변경 없음.
+
+## 2026-10-23 Script-Driven SDK (부분 구현·실제 검증)
+
+Source/Evaluation literal SCRIPT + Worker-only terms, metadata generator 확장, UI 실행 Script 모드, 기존 MuJoCo multi-task/multi-env 연결. Source 가상 Leader/실제 엔진 및 UI child Worker 확인. 실제 ACT 2task3+2episode/2env, Source·Evaluation A/B numeric/video 정확 일치. 상세 outputs/workflow_validation/script_sdk/REPORT.md, 사용 docs/task_sdk/SCRIPT_GUIDE.md. 임의 Scene/Reset·Isaac Script·사용자 Annotation/Mimic hooks는 미구현. 기존 작업·사용자 자료 보존, Commit/Push 없음.
+
+## Task SDK Phase 4 — 단일 MuJoCo Evaluation 연결
+
+options.task_python / CLI --task-python → 기존 Operations/Worker → evaluate_sim 연결. 명시 Scene·num_envs1·MuJoCo만 지원. Worker가 source bytes SHA256/선언/Scene 확인, Runtime binding/setup 후 사용자 Hook을 평가한다. SO101 예제는 기존 Placement/StableGrasp/Annotation/Mimic 구현 참조를 선언하고 원본 계산을 재사용. Generic success와 물리 diagnostics/annotation 의미 분리. UI/Isaac SDK/Annotation·Mimic 연결은 미구현. 실제 ACT CPU Worker와 Hold+실제 MuJoCo 비교, 29PASS 근거 outputs/workflow_validation/task_sdk_phase4/REPORT.md. 사용자 원본·Training/Hub/MiniVLA·Commit/Push 변경 없음.
+
+## Task SDK Phase 3.5 — 사용자 Task 독립 실행
+
+check_env.py 사용자 Task 모드는 고정 cup probe 없이 setup/observe/success를 실행한다. --scene-task-id/--full-workspace는 명시 Scene 선택이며 TASK_DEFINITION은 검증용이다. TaskContext.validate_bindings가 setup 전 선언 ID/실제 body/camera·선택적 asset/hash를 검사한다. docs/architecture/task_x_threshold.py는 catalog 없는 X좌표 조건 예제. 단일 MuJoCo만 지원, 기존 Backend 판정 위임 예제는 보존. 근거 outputs/workflow_validation/task_sdk_phase35/REPORT.md. 사용자 자료/Training/Physics/Commit/Push 변경 없음.
+
+## 2026-10-22 Task SDK 최소 경로
+
+Phase 1–3만 구현: simulation/task_context.py의 단일 MuJoCo borrowed Context, workspaces.tasks.generate_template, 기존 workflow.py task-template 및 check_env.py --task-python. 실제 Builder v8·두 Builder fixture/실제 MuJoCo trace 확인. SDK4PASS, 기존 Task4PASS·Qt selector1PASS. 인접 Training fixture coordinate 재쓰기 실패는 이번 범위 밖으로 남김. UI/Mimic/Isaac/Evaluation 통합 미구현. 상세 outputs/workflow_validation/task_sdk/REPORT.md, API docs/architecture/TASK_SDK_DESIGN.md. 이전 Native Learning dirty 변경 보존, Commit/Push 없음.
+
+## 2026-10-22 Native LeRobot 호환 작업 완료
+
+외부 Dataset native 학습 입력·HF Import UI/CLI·native Policy 재사용과 Partition 역할 강제 제거를 반영했다. 실제 PushT 다운로드/Reader/ACT CPU1update, 기존 ACT 공식 CLI fine-tuning1update 및 저장 processor Validation 성공. 상세 근거/제한: outputs/workflow_validation/native_learning/REPORT.md. CPU 학습은 ACCELERATE_USE_CPU=true를 자식에게 전달한다. Sim/Real의 기존 좌표 안전 검사는 유지한다. 같은 Train/Val Path는 경고하며 독립 검증으로 표시하지 않는다. 과거 per-episode Partition gate/union은 삭제, 역사 Hash/중복 Episode 검사는 유지한다. 현재 문서는 docs/architecture의 네 문서; 이전 기록은 Historical로 구분했다. Commit/Push 없음, 이전 dirty 변경 보존.
+
+## 진행 상태 영역 높이 제한 — 2026-10-22
+
+DataGen/Sim Evaluation의 task_state QLabel이 텍스트 줄 수만큼 중앙 화면을 늘리던 문제를 수정했다. 기존 QLabel/상태 생성은 유지하고 QScrollArea 내부에 넣어 viewport 높이72–160px로 제한했다. 긴 내용은 내부 세로 스크롤로 전부 확인한다. Preview/카메라·실행 본문 변경 없음. Qt offscreen Presentation17PASS(긴4환경 상태의 전체 텍스트·160px 제한·스크롤 확인). 실제 desktop 화면은 재시작 후 확인 필요. Commit/Push 없음.
+
+## 독립 Replay 삭제 — 2026-10-22
+
+사용자 요청으로 독립 Replay Stage/UI/CLI·workflow/replay.py·scripts/tools/replay_joint_targets.py를 삭제했다. Workspace CLI의 replay와 smoke 뒤 자동 재생·전용 helper도 제거했다. Annotation 공통 물리 재생, Curation 영상 Preview, Legacy 초기 상태/Annotation의 기존 기록 필드는 실제 기능/형식 계약으로 유지한다. 이전 Replay 수정/구현 기록은 과거 상태다. 검증·삭제 범위: outputs/workflow_validation/replay_removal/REPORT.md. 사용자 데이터/과거 결과·Commit/Push 변경 없음.
+
+## Replay 판정 수정 — 2026-10-22
+
+명시 Replay는 모든 형식에서 실행 완료와 Task 성공을 분리한다. `workflow.replay.run`의 evaluation 전용 예외/인수를 제거하고 `replay_task_success`를 별도 기록한다. Grasp/Place 실패는 결과에 남되 실행 실패로 올리지 않는다. 복원/물리 실행 오류는 계속 실패하며 Annotation 성공 기준은 변경하지 않았다. 실제 사용자 `테스트/origin/dataset.hdf5`를 별도 검증 출력으로 재생: 323step, joint오차0·object오차1.727281241445394e-08 그대로, exit0·입력Hash 불변. 관련39PASS/Qt1skip. 근거 `outputs/workflow_validation/replay_task_outcome/source_jfvi1sp6/`.
+
 ## 최신 완료 — Training / Offline Validation
 
 공식 ACT/SmolVLA Trainer 설정·native Resume는 `learning/training.py`, LeRobot 입력/누수 검사는 `learning/datasets.py`, 독립 평가와 저장 processor/공식 loss는 `learning/validation.py`가 소유한다. Train 전체·선택 Val Path를 사용하며 자동 Split/과거 Partition 역할 강제는 없다. UI/Worker의 독립 `validate`와 학습 후 별도 평가 process를 연결했다. MiniVLA 전용 train/data·prepared Dataset·학습 UI는 삭제했고 모델/Checkpoint 추론 및 실제 legacy Reader는 보존했다.

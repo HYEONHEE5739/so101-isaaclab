@@ -8,9 +8,10 @@ import pytest
 from soarm101_lab.workflow.worker_request import prepare_mujoco
 
 
-@pytest.mark.parametrize('stage', ['environment','source','replay','annotate','datagen','rollout'])
+@pytest.mark.parametrize('stage', ['environment','source','annotate','datagen','rollout'])
 @pytest.mark.parametrize('resume', [False,True])
-def test_preparation_preserves_contract_reset_and_profile(stage,resume,tmp_path,monkeypatch):
+@pytest.mark.parametrize('recorded_scene', [None, {'reset':{'mode':'recorded'}}])
+def test_preparation_preserves_contract_reset_and_profile(stage,resume,recorded_scene,tmp_path,monkeypatch):
     from soarm101_lab.workflow import worker_request,dataset
     from soarm101_lab.real2sim import precision
     from soarm101_lab.real2sim.workspaces import tasks,reset
@@ -21,7 +22,7 @@ def test_preparation_preserves_contract_reset_and_profile(stage,resume,tmp_path,
         calls.append(('configure',kw));return copy.deepcopy(w)
     def source(w,resume):
         calls.append(('source',resume));return w
-    recorded={'simulation_model':{'scene_configuration':{'reset':{'mode':'recorded'}}}}
+    recorded={'simulation_model':{'scene_configuration':recorded_scene}}
     path=tmp_path/'source.hdf5';path.touch()
     monkeypatch.setattr(contract,'read_contract',lambda p:recorded)
     monkeypatch.setattr(tasks,'configured',configure)
@@ -42,7 +43,8 @@ def test_preparation_preserves_contract_reset_and_profile(stage,resume,tmp_path,
     assert out['control_hz']==25 and out['simulation_configuration']=={'identity_sim':False}
     assert out['task_definition'] is options['task_definition']
     if stage=='source':assert calls[1]==('source',str(path) if resume else None)
-    else:assert calls[1][1]['reset']==recorded['simulation_model']['scene_configuration']['reset']
+    elif recorded_scene is not None:assert calls[1][1]['reset']==recorded_scene['reset']
+    else:assert [c[0] for c in calls]==['configure','simulation']
     assert calls[-1][1]['coordinates'] is recorded and calls[-1][1]['hardware_role']=='leader'
     assert original=={'scene_configuration':{'reset':{'mode':'base'}}}
 
@@ -81,7 +83,7 @@ def test_datagen_writer_initialization_failure_closes_owned_parent(tmp_path,monk
     def writer(*a,**kw):raise OSError('disk failure')
     monkeypatch.setattr(datagen,'DatasetWriter',writer)
     with pytest.raises(OSError,match='disk failure'):
-        datagen.run_mujoco({'options':{'num_envs':2,'generation_seed':1}},SimpleNamespace(hz=30,contract={}),tmp_path,parent=parent if provided_parent else None)
+        datagen.run_mujoco({'options':{'num_envs':2,'generation_seed':1}},SimpleNamespace(hz=30,contract={},args={}),tmp_path,parent=parent if provided_parent else None)
     assert closed==[True] and created==([] if provided_parent else [True])
 
 

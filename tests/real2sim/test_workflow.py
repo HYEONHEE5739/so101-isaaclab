@@ -189,18 +189,6 @@ def test_workflow_panel_shared_backend_and_no_autorun(tmp_path, monkeypatch):
     panel.close()
 
 
-def test_source_and_datagen_replay_layout_no_remapping():
-    from soarm101_lab.real2sim.workspaces.demo import replay_fields
-    q = np.array([[.1, .2, .3, .4, .5, .6]])
-    images = {'side_cam': np.zeros((1, 2, 2, 3)), 'wrist_cam': np.zeros((1, 2, 2, 3))}
-    source = {'joint_targets': q, 'obs': {'policy': images}, 'states': {'joint_pos': q}}
-    generated = {'joint_targets': q, 'obs': images,
-                 'states': {'articulation': {'robot': {'joint_position': q}},
-                            'rigid_object': {'cube': {'root_pose': np.zeros((1, 7))}}}}
-    assert replay_fields(source)[1] is q
-    assert replay_fields(generated)[1] is q
-    assert 'cube' in replay_fields(generated)[2]
-    with pytest.raises(ValueError): replay_fields({**source, 'joint_targets': np.zeros((2, 6))})
 
 
 def test_source_timing_options(published, tmp_path):

@@ -2,7 +2,7 @@
 import copy,json,shutil
 from pathlib import Path
 import h5py,numpy as np,pytest
-from soarm101_lab.workflow.episodes import source_catalog,validate_partition_episode
+from soarm101_lab.workflow.episodes import source_catalog,validate_partition
 from soarm101_lab.workflow.curation import split_dataset,export_splits
 from soarm101_lab.workflow.curation import export_subset,analyze
 from soarm101_lab.so101_dataset_contract import current_contract,MIMIC_SPACE,write_contract,read_contract
@@ -95,16 +95,12 @@ def training_entry(plan,name,split,id):
 
 
 
-def test_mimic_generated_unknown_requires_real_input_partition_evidence(tmp_path):
-    from soarm101_lab.real2sim.precision import fingerprint
-    src=tmp_path/'source.hdf5';source_fixture(src,4);p=historical_plan(src)['partitions']['train']
-    lineage={'kind':'partition','partition_sha256':p['sha256'],'exact_source_ids':None}
-    with pytest.raises(ValueError,match='unverifiable'):validate_partition_episode(p,lineage)
-    proof={'verification':'source_only_input','sha256':'recorded_input_bytes','source_ids':p['source_ids']}
-    proof['evidence_sha256']=fingerprint(proof)
-    validate_partition_episode(p,lineage,proof)
-    proof['source_ids']=['unrelated']
-    with pytest.raises(ValueError,match='unverifiable'):validate_partition_episode(p,lineage,proof)
+def test_historical_partition_integrity_is_still_checked(tmp_path):
+    src=tmp_path/'source.hdf5';source_fixture(src,4)
+    p=historical_plan(src)['partitions']['train']
+    assert validate_partition(p)==p
+    p['sha256']='invalid'
+    with pytest.raises(ValueError,match='hash'):validate_partition(p)
 
 
 def test_curation_split_preview_and_manual_ui(tmp_path,monkeypatch):

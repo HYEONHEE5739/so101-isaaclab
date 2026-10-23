@@ -10,12 +10,12 @@ from ..learning.minivla.config import MODEL_ROOT
 from ..real2sim.workspaces.package import load
 
 
-MUJOCO_STAGES = dict(environment='Environment', source='Source', replay='Replay',
+MUJOCO_STAGES = dict(environment='Environment', source='Source',
               convert='Convert', import_='Import', annotate='Annotation',
               datagen='Datagen', rollout='Evaluation')
 MUJOCO_STAGES['import'] = MUJOCO_STAGES.pop('import_')
 
-EPISODE_STAGES = frozenset(('replay','annotate'))
+EPISODE_STAGES = frozenset({'annotate'})
 
 
 def episode_context(path, workspace, stage, options=None):
@@ -49,7 +49,6 @@ def episode_context(path, workspace, stage, options=None):
         raise ValueError('Annotation requires original demonstrations, not generated/evaluation data')
     w=load(workspace or args.get('workspace_path',''))
     if args.get('workspace')!=metadata(w):raise ValueError('Input Workspace identity differs')
-    if w['task'].get('mode')=='geometry_review':raise ValueError('Explicit workflow task metadata is required')
     expected=coordinate_contract(w)
     # Historical writers used a different human-readable asset scope sentence.
     # File identities/digest, mapping and every numeric contract remain exact.
@@ -59,7 +58,8 @@ def episode_context(path, workspace, stage, options=None):
     if args.get('so101_coordinates') is not None and args['so101_coordinates']!=reader.contract:
         raise ValueError('Embedded/sidecar coordinate contracts differ')
     scene=recorded_scene(args,w)
-    definition=validate(scene['task_definition'],w)
+    if w['task'].get('mode')=='geometry_review' and not scene.get('scene_only'):raise ValueError('Explicit workflow task metadata is required')
+    definition=validate(scene['task_definition'],w) if scene['task_definition'] is not None else None
     if args.get('task_definitions') and args['task_definitions']!=[definition]:raise ValueError('Select one homogeneous recorded Task')
     # Inspect only episode headers here. Legacy entries are already in manifest;
     # calling legacy episode_attributes would perform FK/array loading.
@@ -85,10 +85,12 @@ def episode_context(path, workspace, stage, options=None):
             if isinstance(value,(str,bytes)):value=json.loads(value)
             if value is not None and value!=expected:raise ValueError('Mixed or inconsistent recorded '+key)
     opts=dict(options or {})
-    if opts.get('tasks') is not None and opts['tasks']!=[definition]:raise ValueError('Derived stages must inherit recorded tasks')
+    if opts.get('tasks') is not None and opts['tasks']!=([definition] if definition else []):raise ValueError('Derived stages must inherit recorded tasks')
     if 'active_object_ids' in opts and set(opts['active_object_ids'])!=set(scene['active_object_ids']):
         raise ValueError('Derived stages must inherit the recorded active object set')
-    return {'reader':reader,'workspace':w,'scene':scene,'tasks':[definition]}
+    from .task_scripts import followup_context
+    contract=followup_context(reader,w,scene,opts,stage=stage)
+    return {'reader':reader,'workspace':w,'scene':scene,'tasks':[definition] if definition else [],'followup':contract}
 
 def mujoco_request(stage, python, workspace, input_path, config, checkpoint, renderer, options):
     if stage not in MUJOCO_STAGES:
@@ -101,9 +103,9 @@ def mujoco_request(stage, python, workspace, input_path, config, checkpoint, ren
         raise ValueError('Unknown renderer')
     if renderer == 'none' and stage in ('source', 'rollout'):
         raise ValueError('This stage requires RGB rendering')
-    if stage in ('environment', 'source', 'replay', 'rollout', 'import'):
+    if stage in ('environment', 'source', 'rollout', 'import'):
         load(workspace)
-    if stage in ('convert', 'annotate', 'datagen', 'replay'):
+    if stage in ('convert', 'annotate', 'datagen'):
         if not (Path(input_path) / 'manifest.json').is_file():
             raise ValueError('Input must be a canonical MiniVLA dataset directory')
     if stage == 'import' and not Path(input_path).is_file():
@@ -150,12 +152,18 @@ def prepare_mujoco(request: dict, *, coordinates=None, hz=None, workspace=None) 
     base_workspace=load(request['workspace']) if workspace is None else workspace
     w=base_workspace
     from ..real2sim.workspaces.tasks import configured
-    w=configured(w,options.get('task_definition'),options.get('active_object_ids'),backend='mujoco')
-    if request.get('stage')=='source':
+    w=configured(w,options.get('task_definition'),options.get('active_object_ids'),backend='mujoco',scene_objects=options.get('scene_objects',options.get('script_scenes',[None])[0]),
+                 scene_only=options.get('scene_only',False),object_configuration=(options.get('script_scene') or {}).get('objects'))
+    if request.get('stage')=='source' and not options.get('scene_only'):
         from ..real2sim.workspaces.reset import source_workspace
         w=source_workspace(w,options.get('resume_data'))
     elif recorded_contract and recorded_contract.get('simulation_model'):
-        w=configured(w,reset=recorded_contract['simulation_model'].get('scene_configuration',{}).get('reset'))
+        recorded_scene=recorded_contract['simulation_model'].get('scene_configuration')
+        if recorded_scene is not None:
+            if not isinstance(recorded_scene,dict):raise ValueError('Recorded simulation scene_configuration must be an object or null')
+            w=configured(w,reset=recorded_scene.get('reset'),scene_objects=options.get('scene_objects',recorded_scene.get('object_ids')))
+    if options.get('scene_reset') is not None:
+        w=configured(w,reset=options['scene_reset'])
     simulation=simulation_configuration(w,coordinates=recorded_contract,
         mappings=options.get('_collection_mappings'),identity=options.get('identity_sim_for_validation',False),
         backend='mujoco',scene_configuration=w['scene_configuration'],hardware_role='leader' if '_collection_mappings' in options else None)
@@ -165,7 +173,7 @@ def prepare_mujoco(request: dict, *, coordinates=None, hz=None, workspace=None) 
     if options.get('resume_data'):
         previous_scene = recording_provenance(options['resume_data'])['scene']
         physics_profile = previous_scene.get('physics_profile', 'legacy_urdf')
-    return dict(workspace=base_workspace, renderer=request['renderer'],
+    return dict(workspace=w if options.get('scene_only') else base_workspace, renderer=request['renderer'],
                               control_hz=hz or options.get('control_hz', 30),
                               width=options.get('width', RGB_WIDTH), height=options.get('height', RGB_HEIGHT),
                               closed_rad=coords.get('gripper_closed_rad', options.get('gripper_closed_rad')),
@@ -186,6 +194,11 @@ def stage_input(stage, path, *, full=True):
     """
     if not isinstance(path,(str,Path)) or not str(path):raise ValueError('Select an explicit input Path')
     from .paths import input_format
+    from ..learning.datasets import hub_reference
+    if hub_reference(str(path)):
+        if stage!='train':raise ValueError('Remote Dataset reference supports Training only')
+        from ..learning.datasets import inspect_dataset
+        return inspect_dataset(path,full=full)
     path=Path(path).expanduser().resolve()
     if any(p.name and p.with_name('.'+p.name+'.workflow-lock').exists() for p in (path,*path.parents)):
         raise ValueError('Input is still being written')
@@ -194,7 +207,16 @@ def stage_input(stage, path, *, full=True):
         from ..real2sim.workspaces.demo import coordinate_contract
         w=load(path)
         return dict(path=str(w['root']),type='workspace',workspace=metadata(w),coordinates=coordinate_contract(w))
-    if stage in ('sim_eval','real_eval','hf_policy','validate'):
+    if stage=='hf_policy' and input_format(path) in ('minivla-checkpoint','minivla-policy'):
+        from .policy import inspect_checkpoint
+        return inspect_checkpoint(path)
+    if stage in ('validate','hf_policy'):
+        from ..learning.datasets import inspect_policy
+        return inspect_policy(path)
+    if stage=='train' or (stage=='hf_dataset' and input_format(path)!='canonical'):
+        from ..learning.datasets import inspect_dataset
+        return inspect_dataset(path,full=full)
+    if stage in ('sim_eval','real_eval'):
         from .policy import inspect_checkpoint
         return inspect_checkpoint(path)
     from .dataset import inspect_dataset,episode_input_kind
@@ -212,3 +234,39 @@ def stage_input(stage, path, *, full=True):
         from ..so101_dataset_contract import JOINT_SPACE
         if result.get('coordinates',{}).get('action_space')!=JOINT_SPACE:raise ValueError('Dataset requires explicit joint-radian coordinates')
     return result
+
+
+def validate_task_request(stage, backend, options):
+    """Path-only planning/dispatch gate; never execute user code here."""
+    if options.get('followup_python'):
+        if stage not in ('annotate','datagen') or backend!='mujoco':
+            raise ValueError('Followup Python requires MuJoCo Annotation/Mimic')
+        from .task_scripts import read_followup
+        read_followup(options['followup_python'])
+    if not options.get('task_python'):return
+    if stage not in ('sim_eval','rollout') or backend!='mujoco':
+        raise ValueError('Task Python currently supports MuJoCo Sim Evaluation only')
+    if options.get('num_envs',1)!=1:
+        raise ValueError('Task Python currently requires num_envs=1')
+    if not (options.get('tasks') or options.get('task_definition')):
+        raise ValueError('Task Python requires an explicit scene task_definition or tasks selection')
+    path=Path(options['task_python']).expanduser()
+    if path.suffix!='.py' or not path.is_file():raise ValueError('Select an existing Task Python file')
+
+
+def load_task_python(options):
+    """Worker-only trusted source execution; hash the exact bytes being executed."""
+    if not options.get('task_python'):return None,None
+    import hashlib
+    from ..real2sim.workspaces.tasks import validate_task_module
+    path=Path(options['task_python']).expanduser().resolve()
+    source=path.read_bytes();digest=hashlib.sha256(source).hexdigest()
+    if options.get('task_sha256') and options['task_sha256']!=digest:
+        raise ValueError('Task source identity changed since request')
+    namespace={'__name__':'__workspace_task__','__file__':str(path)}
+    exec(compile(source,str(path),'exec'),namespace)
+    validate_task_module(namespace)
+    return namespace,{'path':str(path),'sha256':digest,'task_id':namespace['TASK_ID'],
+                     'instruction':namespace['INSTRUCTION'],
+                     'contracts':namespace.get('TASK_CONTRACTS'),
+                     'identity_scope':'entry Python file bytes; imported modules are not pinned'}
